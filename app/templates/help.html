@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>基础排查</h1>
+    <p class="muted">这里仅保留少量排查信息，日常配置请直接在对应页面完成。</p>
+  </div>
+</div>
+
+<section class="panel">
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 180px;">配置项</th>
+        <th>建议</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Grafana 登录地址</td>
+        <td>填写浏览器能访问的完整登录地址，例如 <code>http://localhost:3000/login</code>。</td>
+      </tr>
+      <tr>
+        <td>截图目标地址</td>
+        <td>填写完整看板地址，例如 <code>http://localhost:3000/d/xxx?orgId=1</code>。</td>
+      </tr>
+      <tr>
+        <td>等待选择器</td>
+        <td>Grafana 看板推荐 <code>.react-grid-layout</code>，Kibana 看板推荐 <code>[data-test-subj=dashboardViewport]</code>。</td>
+      </tr>
+      <tr>
+        <td>账号密码</td>
+        <td>在认证配置页面直接填写；密码默认隐藏，可点小眼睛查看。</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+{% endblock %}

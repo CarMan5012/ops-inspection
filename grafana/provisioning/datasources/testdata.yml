@@ -1,0 +1,9 @@
+apiVersion: 1
+
+datasources:
+  - name: Local TestData
+    type: testdata
+    access: proxy
+    uid: local-testdata
+    isDefault: true
+    editable: true

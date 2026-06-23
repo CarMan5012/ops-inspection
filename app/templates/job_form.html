@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ "修改巡检任务" if job.id else "新建巡检任务" }}</h1>
+    <p class="muted">巡检任务是调度的核心单元，控制着执行频率、截图合并生成的 Word 报告内容以及发信目标邮箱。</p>
+  </div>
+</div>
+
+<form method="post" action="{{ action }}" class="panel">
+  <!-- 第一部分：基本信息 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 任务基本信息</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label>
+      任务名称 <span style="color: var(--danger);">* (必填)</span>
+      <input name="name" value="{{ job.name or '' }}" required placeholder="例如：核心看板每日早巡检">
+      <span class="form-tip">给巡检计划起一个易于识别的名称。</span>
+    </label>
+    <label>
+      运行环境 <span style="color: var(--danger);">* (必填)</span>
+      <input name="environment" value="{{ job.environment or '生产环境' }}" required placeholder="例如：生产环境、测试环境">
+      <span class="form-tip">标识本项任务所属的基础设施环境。</span>
+    </label>
+  </div>
+
+  <!-- 第二部分：执行计划 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 巡检时间计划</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label class="span-2">
+      时间配置模式 <span style="color: var(--danger);">*</span>
+      <select name="schedule_mode" onchange="toggleScheduleMode(this.value)">
+        <option value="simple" {% if job.schedule_mode == 'simple' or not job.schedule_mode %}selected{% endif %}>常规中文配置计划 (推荐：支持多时段多时间点)</option>
+        <option value="cron" {% if job.schedule_mode == 'cron' %}selected{% endif %}>高级 Cron 表达式</option>
+      </select>
+      <span class="form-tip">您可以直接在下方选择每天/每周的具体时分，或使用 Linux Cron 表达式。</span>
+    </label>
+
+    <!-- 简单中文时间配置 -->
+    <div id="simple_schedule_container" class="span-2" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 16px; border-radius: 6px;">
+      <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;">
+        <label style="margin: 0; display: flex; flex-direction: row; align-items: center; gap: 8px;">
+          重复频率：
+          <select name="frequency" style="width: auto; min-width: 120px;" onchange="toggleFrequencyFields(this.value)">
+            <option value="daily">每天</option>
+            <option value="workday">工作日 (周一至周五)</option>
+            <option value="weekly">每周</option>
+            <option value="monthly">每月</option>
+            <option value="monthly_last">每月最后一天</option>
+          </select>
+        </label>
+
+        <label id="weekly_select_label" style="margin: 0; display: flex; flex-direction: row; align-items: center; gap: 8px;">
+          执行星期：
+          <select name="day_of_week" style="width: auto; min-width: 120px;">
+            <option value="1">星期一</option>
+            <option value="2">星期二</option>
+            <option value="3">星期三</option>
+            <option value="4">星期四</option>
+            <option value="5">星期五</option>
+            <option value="6">星期六</option>
+            <option value="7">星期日</option>
+          </select>
+        </label>
+
+        <label id="monthly_select_label" style="margin: 0; display: flex; flex-direction: row; align-items: center; gap: 8px;">
+          执行日期：
+          <select name="day_of_month" style="width: auto; min-width: 120px;">
+            {% for day in range(1, 32) %}
+            <option value="{{ day }}">{{ day }}号</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+
+      <div id="time_rows_container">
+        <!-- 动态时间点行 -->
+      </div>
+
+      <button type="button" class="button" style="margin-top: 10px; font-size: 13px; font-weight: 600;" onclick="addTimeRow()">+ 增加执行时间点</button>
+    </div>
+
+    <!-- 高级 Cron 表达式配置 -->
+    <label id="cron_schedule_container" class="span-2">
+      Cron 表达式 <span style="color: var(--danger);">*</span>
+      <input name="cron_expression" value="{{ job.cron_expression or '0 9 * * *' }}">
+      <span class="form-tip">支持标准的 5 位 Linux Cron (如 <code>0 9 * * *</code> 表示每天上午9点)。如果配置多个计划，可用分号 <code>;</code> 隔开。</span>
+    </label>
+  </div>
+
+  <!-- 第三部分：报告文件与推送 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、 报告文件与推送设置</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label>
+      报告封面标题 <span style="color: var(--danger);">* (必填)</span>
+      <input name="report_title" value="{{ job.report_title or '自动化巡检报告' }}" required>
+      <span class="form-tip">生成的 Word 文档封面大标题。</span>
+    </label>
+    <label>
+      封面统计周期描述 <span style="color: var(--danger);">* (必填)</span>
+      <input name="time_range_label" value="{{ job.time_range_label or '最近24小时' }}" required>
+      <span class="form-tip">封面展示的时间范围描述，例如“最近24小时”或“即时”。</span>
+    </label>
+    <label class="span-2">
+      关联的邮件发信服务器配置
+      <select name="mail_profile_id">
+        <option value="">暂不进行邮件推送 (仅保留本地文件归档)</option>
+        {% for profile in mail_profiles %}
+        <option value="{{ profile.id }}" {% if job.mail_profile_id == profile.id %}selected{% endif %}>{{ profile.name }}</option>
+        {% endfor %}
+      </select>
+      <span class="form-tip">选择巡检报告生成后，用于执行发信的 SMTP 邮箱配置。</span>
+    </label>
+  </div>
+
+  <!-- 第四部分：浏览器运行配置 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">四、 浏览器与截图选项</h3>
+  <div class="form-grid" style="margin-bottom: 24px;">
+    <label>
+      默认浏览器宽度 (px) <span style="color: var(--danger);">*</span>
+      <input name="browser_width" type="number" value="{{ job.browser_width or 1920 }}" required>
+      <span class="form-tip">模拟浏览器窗口的宽度，常用于自适应看板分辨率（推荐 1920）。</span>
+    </label>
+    <label>
+      默认浏览器高度 (px) <span style="color: var(--danger);">*</span>
+      <input name="browser_height" type="number" value="{{ job.browser_height or 1080 }}" required>
+      <span class="form-tip">模拟浏览器窗口的高度（推荐 1080）。</span>
+    </label>
+    
+    <div class="span-2" style="display: flex; gap: 24px; margin: 8px 0; flex-wrap: wrap;">
+      <label class="check">
+        <input name="enabled" type="checkbox" {% if job.enabled is not defined or job.enabled %}checked{% endif %}>
+        启用此任务计划 (自动定时运行)
+      </label>
+      <label class="check">
+        <input name="send_mail" type="checkbox" {% if job.send_mail %}checked{% endif %}>
+        允许向关联邮箱发送报告邮件
+      </label>
+      <label class="check">
+        <input name="headless" type="checkbox" {% if job.headless is not defined or job.headless %}checked{% endif %}>
+        无头模式运行 (Headless, 推荐开启)
+      </label>
+    </div>
+  </div>
+
+  <div class="form-actions span-2">
+    <button class="primary" type="submit" style="font-weight: 600;">保存任务配置</button>
+    <a class="button" href="{{ '/jobs/' ~ job.id if job.id else '/' }}">取消并返回</a>
+  </div>
+</form>
+
+<script>
+  function toggleScheduleMode(mode) {
+    const simpleContainer = document.getElementById('simple_schedule_container');
+    const cronContainer = document.getElementById('cron_schedule_container');
+    if (mode === 'simple') {
+      simpleContainer.style.display = 'block';
+      cronContainer.style.display = 'none';
+      cronContainer.querySelector('input').removeAttribute('required');
+    } else {
+      simpleContainer.style.display = 'none';
+      cronContainer.style.display = 'block';
+      cronContainer.querySelector('input').setAttribute('required', 'required');
+    }
+  }
+
+  function toggleFrequencyFields(freq) {
+    const weeklyLabel = document.getElementById('weekly_select_label');
+    const monthlyLabel = document.getElementById('monthly_select_label');
+    if (freq === 'daily' || freq === 'workday' || freq === 'monthly_last') {
+      weeklyLabel.style.display = 'none';
+      monthlyLabel.style.display = 'none';
+    } else if (freq === 'weekly') {
+      weeklyLabel.style.display = 'inline-flex';
+      monthlyLabel.style.display = 'none';
+    } else if (freq === 'monthly') {
+      weeklyLabel.style.display = 'none';
+      monthlyLabel.style.display = 'inline-flex';
+    }
+  }
+
+  function createTimeRowHtml(ampmVal, hourVal, minuteVal) {
+    ampmVal = ampmVal || 'am';
+    hourVal = parseInt(hourVal) || 9;
+    minuteVal = parseInt(minuteVal) || 0;
+
+    let ampmOptions = `
+      <option value="am" ${ampmVal === 'am' ? 'selected' : ''}>上午</option>
+      <option value="pm" ${ampmVal === 'pm' ? 'selected' : ''}>下午</option>
+    `;
+
+    let hourOptions = '';
+    let hours = [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    hours.forEach(h => {
+      hourOptions += `<option value="${h}" ${hourVal === h ? 'selected' : ''}>${h}点</option>`;
+    });
+
+    let minuteOptions = '';
+    for (let m = 0; m < 60; m++) {
+      let mStr = m.toString().padStart(2, '0');
+      minuteOptions += `<option value="${m}" ${minuteVal === m ? 'selected' : ''}>${mStr}分</option>`;
+    }
+
+    return `
+      <div class="time-row" style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px;">
+        <select name="ampm" style="width: auto; min-width: 80px;">
+          ${ampmOptions}
+        </select>
+        <select name="hour" style="width: auto; min-width: 80px;">
+          ${hourOptions}
+        </select>
+        <select name="minute" style="width: auto; min-width: 80px;">
+          ${minuteOptions}
+        </select>
+        <button type="button" class="button" style="padding: 6px 12px; font-size: 12px; color: var(--danger); border-color: #fca5a5; background: #fef2f2; min-height: 30px;" onclick="removeTimeRow(this)">删除时间点</button>
+      </div>
+    `;
+  }
+
+  function addTimeRow(ampmVal, hourVal, minuteVal) {
+    const container = document.getElementById('time_rows_container');
+    const rowHtml = createTimeRowHtml(ampmVal, hourVal, minuteVal);
+    const div = document.createElement('div');
+    div.innerHTML = rowHtml.trim();
+    container.appendChild(div.firstChild);
+  }
+
+  function removeTimeRow(button) {
+    const container = document.getElementById('time_rows_container');
+    if (container.children.length > 1) {
+      button.closest('.time-row').remove();
+    } else {
+      alert('任务必须保留至少一个执行时间点。');
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const configStr = '{{ job.schedule_config | safe if job.schedule_config else "" }}';
+    let config = null;
+    if (configStr) {
+      try {
+        config = JSON.parse(configStr);
+      } catch (e) {
+        console.error("Failed to parse schedule_config", e);
+      }
+    }
+
+    const scheduleModeSelect = document.getElementsByName('schedule_mode')[0];
+    const scheduleMode = '{{ job.schedule_mode or "simple" }}';
+    scheduleModeSelect.value = scheduleMode;
+    toggleScheduleMode(scheduleMode);
+
+    if (config) {
+      document.getElementsByName('frequency')[0].value = config.frequency || 'daily';
+      if (config.day_of_week) {
+        document.getElementsByName('day_of_week')[0].value = config.day_of_week;
+      }
+      if (config.day_of_month) {
+        document.getElementsByName('day_of_month')[0].value = config.day_of_month;
+      }
+      toggleFrequencyFields(config.frequency || 'daily');
+
+      if (config.times && config.times.length > 0) {
+        config.times.forEach(t => {
+          addTimeRow(t.ampm, t.hour, t.minute);
+        });
+      } else {
+        addTimeRow('am', 9, 0);
+      }
+    } else {
+      document.getElementsByName('frequency')[0].value = 'daily';
+      toggleFrequencyFields('daily');
+      addTimeRow('am', 9, 0);
+    }
+  });
+</script>
+{% endblock %}

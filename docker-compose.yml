@@ -1,0 +1,38 @@
+name: inspection-report-local
+
+services:
+  inspection-report:
+    build: .
+    image: inspection-report:latest
+    container_name: inspection-report
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      APP_DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - grafana
+    restart: unless-stopped
+
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana-oss:11.4.0}
+    container_name: inspection-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASS:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: light
+      GF_SERVER_SERVE_FROM_SUB_PATH: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: unless-stopped
+
+volumes:
+  grafana-data:

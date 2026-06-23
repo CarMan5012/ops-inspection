@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ "修改周期报告配置 - " ~ setting.name }}</h1>
+    <p class="muted">自定义自动打包发信的执行定时计划、包含内容以及重试等待策略。</p>
+  </div>
+</div>
+
+<form method="post" action="{{ action }}" class="panel">
+  <!-- 第一部分：基本配置 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 报告基本信息</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label class="span-2">
+      报告配置名称 <span style="color: var(--danger);">* (必填)</span>
+      <input name="name" value="{{ setting.name or '' }}" required placeholder="例如：每周一早8点周报打包">
+      <span class="form-tip">给这个周期报告配置起一个易于识别的名称。</span>
+    </label>
+  </div>
+
+  <!-- 第二部分：执行计划 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 周期执行计划</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label class="span-2">
+      计划执行模式 <span style="color: var(--danger);">*</span>
+      <select name="schedule_mode" onchange="toggleScheduleMode(this.value)">
+        <option value="simple" {% if setting.schedule_mode == 'simple' or not setting.schedule_mode %}selected{% endif %}>常规中文计划配置 (推荐)</option>
+        <option value="cron" {% if setting.schedule_mode == 'cron' %}selected{% endif %}>高级 Cron 表达式</option>
+      </select>
+    </label>
+
+    <!-- 简单时间计划配置 -->
+    <div id="simple_schedule_container" class="span-2" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 16px; border-radius: 6px;">
+      <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;">
+        <!-- 如果是周报，允许选择星期 -->
+        {% if setting.report_type == 'weekly' %}
+        <input type="hidden" name="frequency" value="weekly">
+        <span style="font-size: 13px; color: var(--text-color);">重复频率：<strong>每周</strong></span>
+        <label style="margin: 0; display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 13px; color: var(--text-color);">
+          执行星期：
+          <select name="day_of_week" style="width: auto; min-width: 120px;">
+            <option value="1">星期一</option>
+            <option value="2">星期二</option>
+            <option value="3">星期三</option>
+            <option value="4">星期四</option>
+            <option value="5">星期五</option>
+            <option value="6">星期六</option>
+            <option value="7">星期日</option>
+          </select>
+        </label>
+        
+        <!-- 如果是月报，强制绑定为每月最后一天 -->
+        {% else %}
+        <input type="hidden" name="frequency" value="monthly_last">
+        <span style="font-size: 13px; color: var(--text-color);">重复频率：<strong>每月最后一天</strong></span>
+        {% endif %}
+      </div>
+
+      <div id="time_rows_container">
+        <!-- 动态时间行 -->
+      </div>
+
+      <button type="button" class="button" style="margin-top: 10px; font-size: 13px; font-weight: 600;" onclick="addTimeRow()">+ 增加执行时间点</button>
+    </div>
+
+    <!-- 高级 Cron 表达式配置 -->
+    <label id="cron_schedule_container" class="span-2">
+      Cron 表达式 <span style="color: var(--danger);">*</span>
+      <input name="cron_expression" value="{{ setting.cron_expression or '' }}">
+      <span class="form-tip">使用标准 5 位 Cron，例如：<code>0 9 * * 1</code> (每周一早上 9 点)。</span>
+    </label>
+  </div>
+
+  <!-- 第三部分：推送与推送设置 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、 邮件推送与归档设置</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label class="span-2">
+      发信邮件服务配置 <span style="color: var(--danger);">*</span>
+      <select name="mail_profile_id">
+        {% for profile in mail_profiles %}
+        <option value="{{ profile.id }}" {% if setting.mail_profile_id == profile.id %}selected{% endif %}>{{ profile.name }}</option>
+        {% endfor %}
+      </select>
+      <span class="form-tip">选择用于发送周期归档 ZIP 压缩包的主发信邮箱配置。</span>
+    </label>
+
+    <label class="span-2">
+      收件人邮箱覆盖 (选填)
+      <input name="recipients_override" value="{{ setting.recipients_override or '' }}" placeholder="ops@example.com, manager@example.com">
+      <span class="form-tip">留空则直接发送给上述发信邮箱配置的默认收件人；若填写则覆盖默认收件人。多个邮箱以英文逗号分隔。</span>
+    </label>
+  </div>
+
+  <!-- 第四部分：月报专属等待与重试参数 -->
+  {% if setting.report_type == 'monthly' %}
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">四、 月报延迟重试策略</h3>
+  <div class="panel" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 20px; border-radius: 6px; margin-bottom: 30px;">
+    <label class="check" style="margin-bottom: 16px; font-weight: 600;">
+      <input name="wait_for_daily_jobs" type="checkbox" {% if setting.wait_for_daily_jobs %}checked{% endif %}>
+      必须等待当天所有巡检任务执行完毕，才开始打包发信
+    </label>
+
+    <div class="form-grid">
+      <label>
+        最晚等待截止时间 <span style="color: var(--danger);">*</span>
+        <input name="retry_until_time" value="{{ setting.retry_until_time or '23:50' }}" placeholder="23:50" required>
+        <span class="form-tip">格式为 HH:MM (例如 23:50)。如超过该时间仍有巡检任务未完成，则不再等待直接强行打包，并在报告中标记异常。</span>
+      </label>
+
+      <label>
+        检测重试间隔 (分钟) <span style="color: var(--danger);">*</span>
+        <input name="retry_interval_minutes" type="number" value="{{ setting.retry_interval_minutes or 10 }}" min="1" required>
+        <span class="form-tip">如果有巡检任务未跑完，每隔多少分钟重新检查一次是否全部完成。</span>
+      </label>
+
+      <label class="span-2">
+        截止超时处理策略 <span style="color: var(--danger);">*</span>
+        <select name="send_on_timeout">
+          <option value="1" {% if setting.send_on_timeout == 1 or setting.send_on_timeout is none %}selected{% endif %}>强行发送已完成部分</option>
+          <option value="0" {% if setting.send_on_timeout == 0 %}selected{% endif %}>直接标记失败且不发送</option>
+        </select>
+        <span class="form-tip">当达到最晚等待截止时间，但仍有巡检任务未完成时，系统执行的处理方式。</span>
+      </label>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- 第五部分：附加高级开关 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">{{ "四、 高级配置开关" if setting.report_type == 'weekly' else "五、 高级配置开关" }}</h3>
+  <div class="span-2" style="display: flex; gap: 24px; margin: 8px 0; flex-wrap: wrap;">
+    <label class="check">
+      <input name="enabled" type="checkbox" {% if setting.enabled %}checked{% endif %}>
+      启用此周期汇总计划 (定时执行)
+    </label>
+    <label class="check">
+      <input name="include_docx" type="checkbox" {% if setting.include_docx %}checked{% endif %}>
+      将生成的巡检 Word 文档作为附件打包 (.zip)
+    </label>
+    <label class="check">
+      <input name="include_screenshots" type="checkbox" {% if setting.include_screenshots %}checked{% endif %}>
+      在归档 ZIP 压缩包中包含成功的巡检截图图片
+    </label>
+    <label class="check">
+      <input name="send_empty_report" type="checkbox" {% if setting.send_empty_report %}checked{% endif %}>
+      即便在周期内未生成任何巡检报告，也发送空报告邮件进行告知
+    </label>
+  </div>
+
+  <div class="form-actions span-2" style="margin-top: 24px;">
+    <button class="primary" type="submit" style="font-weight: 600;">保存配置</button>
+    <a class="button" href="/periodic-reports">取消</a>
+  </div>
+</form>
+
+<script>
+  function toggleScheduleMode(mode) {
+    const simpleContainer = document.getElementById('simple_schedule_container');
+    const cronContainer = document.getElementById('cron_schedule_container');
+    if (mode === 'simple') {
+      simpleContainer.style.display = 'block';
+      cronContainer.style.display = 'none';
+      cronContainer.querySelector('input').removeAttribute('required');
+    } else {
+      simpleContainer.style.display = 'none';
+      cronContainer.style.display = 'block';
+      cronContainer.querySelector('input').setAttribute('required', 'required');
+    }
+  }
+
+  function createTimeRowHtml(ampmVal, hourVal, minuteVal) {
+    ampmVal = ampmVal || 'am';
+    hourVal = parseInt(hourVal) || 9;
+    minuteVal = parseInt(minuteVal) || 0;
+
+    let ampmOptions = `
+      <option value="am" ${ampmVal === 'am' ? 'selected' : ''}>上午</option>
+      <option value="pm" ${ampmVal === 'pm' ? 'selected' : ''}>下午</option>
+    `;
+
+    let hourOptions = '';
+    let hours = [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    hours.forEach(h => {
+      hourOptions += `<option value="${h}" ${hourVal === h ? 'selected' : ''}>${h}点</option>`;
+    });
+
+    let minuteOptions = '';
+    for (let m = 0; m < 60; m++) {
+      let mStr = m.toString().padStart(2, '0');
+      minuteOptions += `<option value="${m}" ${minuteVal === m ? 'selected' : ''}>${mStr}分</option>`;
+    }
+
+    return `
+      <div class="time-row" style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px;">
+        <select name="ampm" style="width: auto; min-width: 80px;">
+          ${ampmOptions}
+        </select>
+        <select name="hour" style="width: auto; min-width: 80px;">
+          ${hourOptions}
+        </select>
+        <select name="minute" style="width: auto; min-width: 80px;">
+          ${minuteOptions}
+        </select>
+        <button type="button" class="button" style="padding: 6px 12px; font-size: 12px; color: var(--danger); border-color: #fca5a5; background: #fef2f2; min-height: 30px;" onclick="removeTimeRow(this)">删除时间点</button>
+      </div>
+    `;
+  }
+
+  function addTimeRow(ampmVal, hourVal, minuteVal) {
+    const container = document.getElementById('time_rows_container');
+    const rowHtml = createTimeRowHtml(ampmVal, hourVal, minuteVal);
+    const div = document.createElement('div');
+    div.innerHTML = rowHtml.trim();
+    container.appendChild(div.firstChild);
+  }
+
+  function removeTimeRow(button) {
+    const container = document.getElementById('time_rows_container');
+    if (container.children.length > 1) {
+      button.closest('.time-row').remove();
+    } else {
+      alert('任务必须保留至少一个执行时间点。');
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const configStr = '{{ setting.schedule_config | safe if setting.schedule_config else "" }}';
+    let config = null;
+    if (configStr) {
+      try {
+        config = JSON.parse(configStr);
+      } catch (e) {
+        console.error("Failed to parse schedule_config", e);
+      }
+    }
+
+    const scheduleModeSelect = document.getElementsByName('schedule_mode')[0];
+    const scheduleMode = '{{ setting.schedule_mode or "simple" }}';
+    scheduleModeSelect.value = scheduleMode;
+    toggleScheduleMode(scheduleMode);
+
+    if (config) {
+      {% if setting.report_type == 'weekly' %}
+      if (config.day_of_week) {
+        document.getElementsByName('day_of_week')[0].value = config.day_of_week;
+      }
+      {% endif %}
+
+      if (config.times && config.times.length > 0) {
+        config.times.forEach(t => {
+          addTimeRow(t.ampm, t.hour, t.minute);
+        });
+      } else {
+        addTimeRow('am', 9, 0);
+      }
+    } else {
+      addTimeRow('am', 9, 0);
+    }
+  });
+</script>
+{% endblock %}

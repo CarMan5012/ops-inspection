@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <h1>{{ job.name }}</h1>
+      {% if job.enabled %}
+      <span class="badge ok">计划中</span>
+      {% else %}
+      <span class="badge">已停用</span>
+      {% endif %}
+    </div>
+    <p class="muted">
+      所属环境：<strong>{{ job.environment }}</strong> · 
+      报告范围：<code>{{ job.time_range_label }}</code> · 
+      生成标题：<code>{{ job.report_title }}</code>
+    </p>
+  </div>
+  <div class="button-row" style="gap: 8px;">
+    <form method="post" action="/jobs/{{ job.id }}/run" style="margin: 0; display: inline-block;">
+      <button class="primary" type="submit">立即运行巡检</button>
+    </form>
+    <a class="button" href="/jobs/{{ job.id }}/edit">修改配置</a>
+    <a class="button" href="/jobs/{{ job.id }}/items/new">+ 添加截图项</a>
+  </div>
+</div>
+
+{% if job.load_error %}
+<div style="background: #fef2f2; border: 1px solid #fee2e2; border-left: 4px solid var(--danger); border-radius: 6px; padding: 12px 16px; margin-bottom: 20px; font-size: 13px; color: #991b1b; display: flex; align-items: center; gap: 8px;">
+  <span style="font-size: 16px;">⚠️</span>
+  <div>
+    <strong>调度加载异常：</strong>{{ job.load_error }}
+  </div>
+</div>
+{% endif %}
+
+<div class="metrics-grid">
+  <div>
+    <span>最近运行状态</span>
+    <strong style="color: {% if '成功' in last_status or '✓' in last_status %}var(--ok){% elif '失败' in last_status or '✗' in last_status %}var(--danger){% else %}var(--text){% endif %};">
+      {{ last_status }}
+    </strong>
+  </div>
+  <div>
+    <span>下次执行时间预览 (未来3次)</span>
+    {% if next_runs %}
+      <div style="font-size: 13px; line-height: 1.4; margin-top: 4px; color: var(--primary); text-align: left;">
+        {% for t in next_runs %}
+          <div>• {{ t }}</div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <strong style="color: var(--text-muted);">-</strong>
+    {% endif %}
+  </div>
+  <div>
+    <span>关联截图项数</span>
+    <strong>{{ item_count }} 项</strong>
+  </div>
+  <div>
+    <span>默认浏览器分辨率</span>
+    <strong style="font-size: 16px; margin-top: 4px;">{{ job.browser_width or 1920 }} × {{ job.browser_height or 1080 }}</strong>
+  </div>
+</div>
+
+<div class="section-title">
+  <h2>关联截图项列表</h2>
+  <form method="post" action="/jobs/{{ job.id }}/seed-local" style="margin: 0;">
+    <button type="submit" class="button" style="background: rgba(2, 132, 199, 0.05); border-color: rgba(2, 132, 199, 0.2); color: var(--primary); font-size: 12px; min-height: 30px;">
+      🌱 自动填充本地 Grafana 测试项
+    </button>
+  </form>
+</div>
+
+<section class="panel">
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 60px;">排序</th>
+        <th>截图项名称 / 目标链接</th>
+        <th style="width: 100px;">应用类型</th>
+        <th style="width: 130px;">Word 关联章节</th>
+        <th style="width: 100px;">截图模式</th>
+        <th>关联登录凭证</th>
+        <th style="width: 80px;">状态</th>
+        <th class="actions" style="width: 220px; justify-content: flex-end;">操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td><code>{{ item.sort_order }}</code></td>
+        <td>
+          <strong><a href="/items/{{ item.id }}/edit">{{ item.name }}</a></strong>
+          <div class="url-text">{{ item.url }}</div>
+        </td>
+        <td>
+          <span class="badge" style="text-transform: uppercase;">{{ item.item_type }}</span>
+        </td>
+        <td><code>{{ item.section }}</code></td>
+        <td>
+          {% if item.capture_mode == 'full_page' %}
+          整页滚动
+          {% elif item.capture_mode == 'viewport' %}
+          当前视口
+          {% else %}
+          局部区域
+          {% endif %}
+        </td>
+        <td>
+          {% if item.auth_profile_name %}
+          <a href="/auth-profiles" style="font-weight: 500;">🔑 {{ item.auth_profile_name }}</a>
+          {% else %}
+          <span style="color: var(--text-muted); font-size: 12px;">无需登录</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if item.enabled %}
+          <span class="badge ok">已启用</span>
+          {% else %}
+          <span class="badge">已停用</span>
+          {% endif %}
+        </td>
+        <td class="actions" style="justify-content: flex-end; gap: 6px;">
+          <form method="post" action="/items/{{ item.id }}/test" style="display: inline-block; margin: 0;">
+            <button type="submit" style="padding: 4px 10px; font-size: 12px; min-height: 28px;">测试截图</button>
+          </form>
+          <a class="button" href="/items/{{ item.id }}/edit" style="padding: 4px 10px; font-size: 12px; min-height: 28px;">编辑</a>
+          <form method="post" action="/items/{{ item.id }}/delete" onsubmit="return confirm('确认要彻底删除截图项 [{{ item.name }}] 吗？')" style="display: inline-block; margin: 0;">
+            <button class="danger" type="submit" style="padding: 4px 10px; font-size: 12px; min-height: 28px;">删除</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="8" class="empty" style="padding: 48px; text-align: center;">
+          <p class="muted" style="margin-bottom: 16px; font-size: 14px;">此任务下暂无截图项。请手动添加您的 Grafana/Kibana看板，或者一键导入测试项。</p>
+          <form method="post" action="/jobs/{{ job.id }}/seed-local" style="display: inline-block;">
+            <button type="submit" class="button primary" style="font-size: 13px;">
+              ⚡ 立即一键导入本地 Grafana 测试项
+            </button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<div class="delete-zone">
+  <div style="display: flex; justify-content: space-between; align-items: center; background: #fff1f2; border: 1px solid #fecaca; border-radius: 6px; padding: 16px 20px;">
+    <div>
+      <strong style="color: var(--danger); font-size: 14px; display: block; margin-bottom: 4px;">⚠️ 危险操作区域</strong>
+      <span style="color: var(--text-muted); font-size: 12px;">删除任务将会同步清除该任务下的所有截图项配置，且该操作不可逆，请谨慎操作。</span>
+    </div>
+    <form method="post" action="/jobs/{{ job.id }}/delete" onsubmit="return confirm('警告：确认要删除任务 [{{ job.name }}] 及其关联的所有截图项吗？该操作不可撤销！')">
+      <button class="danger" type="submit" style="font-weight: 600;">删除此巡检任务</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

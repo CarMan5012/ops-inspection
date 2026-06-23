@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ "编辑邮件配置" if profile.id else "新建邮件配置" }}</h1>
+    <p class="muted">配置发信邮箱 SMTP 服务器，用于向配置的收件人自动推送打包好的巡检 Word 报告文档。</p>
+  </div>
+</div>
+
+<form method="post" action="{{ action }}" class="panel">
+  <!-- 第一部分：基本配置 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 基本配置</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label>
+      配置别名 <span style="color: var(--danger);">* (必填)</span>
+      <input name="name" value="{{ profile.name or '' }}" required placeholder="例如：139发信配置">
+      <span class="form-tip">给这个发信配置起一个易于识别的名称。</span>
+    </label>
+    
+    <label>
+      SMTP 服务器主机 <span style="color: var(--danger);">* (必填)</span>
+      <input name="smtp_host" value="{{ profile.smtp_host or '' }}" placeholder="例如：smtp.139.com" required>
+      <span class="form-tip">SMTP 服务器地址（如 smtp.exmail.qq.com）。</span>
+    </label>
+    
+    <label>
+      SMTP 端口 <span style="color: var(--danger);">* (必填)</span>
+      <input name="smtp_port" type="number" value="{{ profile.smtp_port or 465 }}" required>
+      <span class="form-tip">常用端口：SSL 模式为 465，非安全或 STARTTLS 为 25/587。</span>
+    </label>
+  </div>
+
+  <!-- 第二部分：认证配置 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 认证与发信账号</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label>
+      登录用户名 (发信邮箱账号) <span style="color: var(--danger);">* (必填)</span>
+      <input name="username" value="{{ profile.username or '' }}" placeholder="username@139.com" required>
+      <span class="form-tip">通常是您的完整发信邮箱地址。</span>
+    </label>
+    
+    <label>
+      发信密码 / 授权密码 <span style="color: var(--danger);">* (必填)</span>
+      <div style="position: relative; display: flex; align-items: center; width: 100%;">
+        <input name="password" id="mail_password_input" type="password" value="{{ decrypt_secret(profile.password_secret) or profile.password or '' }}" required placeholder="请输入发信密码或授权密码" style="padding-right: 40px; width: 100%;">
+        <button type="button" onclick="togglePasswordVisibility('mail_password_input', this)" style="position: absolute; right: 10px; background: none; border: none; cursor: pointer; color: var(--text-muted); display: flex; align-items: center;" title="显示/隐藏密码" aria-label="显示密码">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+        </button>
+      </div>
+      <span class="form-tip">对于大部分主流邮箱（如 QQ/网易/Gmail），此处必须填写生成的“客户端授权码”，而非账号登录密码。</span>
+    </label>
+
+    <div class="span-2" style="display: flex; gap: 24px; margin-top: 8px;">
+      <label class="check">
+        <input name="use_ssl" type="checkbox" {% if profile.use_ssl is not defined or profile.use_ssl %}checked{% endif %}>
+        启用 SSL 模式 (推荐，对应 465 端口)
+      </label>
+      
+      <label class="check">
+        <input name="use_starttls" type="checkbox" {% if profile.use_starttls %}checked{% endif %}>
+        启用 STARTTLS 模式 (对应 587/25 端口)
+      </label>
+    </div>
+  </div>
+
+  <!-- 第三部分：收发件人设置 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、 收发件人设置</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label>
+      发件人显示地址 <span style="color: var(--danger);">* (必填)</span>
+      <input name="sender" value="{{ profile.sender or '' }}" placeholder="username@139.com" required>
+      <span class="form-tip">显示给接收者的发信邮箱地址，通常与登录用户名相同。</span>
+    </label>
+    
+    <label>
+      收件人邮箱 (多个以英文逗号分隔) <span style="color: var(--danger);">* (必填)</span>
+      <input name="recipients" value="{{ profile.recipients or '' }}" placeholder="ops@example.com, manager@example.com" required>
+      <span class="form-tip">接收巡检报告的默认邮箱列表，可配置多个接收账号。</span>
+    </label>
+    
+    <label class="span-2">
+      抄送人邮箱 (CC, 多个以英文逗号分隔)
+      <input name="cc" value="{{ profile.cc or '' }}" placeholder="monitor@example.com">
+      <span class="form-tip">抄送接收对象列表，可留空。</span>
+    </label>
+  </div>
+
+  <!-- 第四部分：邮件主题与正文模板 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">四、 邮件配置模板</h3>
+  <div class="form-grid" style="margin-bottom: 24px;">
+    <label class="span-2">
+      邮件主题模板 <span style="color: var(--danger);">* (必填)</span>
+      <input name="subject_template" value="{{ profile.subject_template or '自动化巡检报告 - {date}' }}" required>
+      <span class="form-tip">支持使用动态变量：<code>{date}</code> 表示报告生成日期，<code>{job_name}</code> 表示巡检任务名称。</span>
+    </label>
+    
+    <label class="span-2">
+      邮件正文模板 <span style="color: var(--danger);">* (必填)</span>
+      <textarea name="body_template" rows="5" required>{{ profile.body_template or '巡检报告已生成，请查看附件。' }}</textarea>
+      <span class="form-tip">发送邮件正文内容，支持使用占位符参数。</span>
+    </label>
+  </div>
+  
+  <div class="form-actions span-2">
+    <button class="primary" type="submit" style="font-weight: 600;">保存邮件配置</button>
+    <a class="button" href="/mail-profiles">取消</a>
+  </div>
+</form>
+
+<script>
+  const eyeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
+  const eyeOffSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
+
+  function togglePasswordVisibility(inputId, btn) {
+    const input = document.getElementById(inputId);
+    if (input.type === 'password') {
+      input.type = 'text';
+      btn.innerHTML = eyeOffSvg;
+      btn.setAttribute('aria-label', '隐藏密码');
+    } else {
+      input.type = 'password';
+      btn.innerHTML = eyeSvg;
+      btn.setAttribute('aria-label', '显示密码');
+    }
+  }
+</script>
+{% endblock %}

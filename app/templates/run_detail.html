@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>运行记录 #{{ run.id }}</h1>
+    <p class="muted">{{ run.job_name }} · {{ run.status | status_label }} · 开始于 {{ run.started_at }}</p>
+  </div>
+  {% if run.report_url %}
+  <a class="button primary" href="{{ run.report_url }}" style="font-weight: 600;">📥 下载 Word 报告</a>
+  {% endif %}
+</div>
+
+<!-- 摘要卡片区 -->
+<section class="summary-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px;">
+  <div class="panel" style="padding: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 80px;">
+    <span style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; font-weight: 600;">成功截图</span>
+    <strong style="font-size: 22px; color: var(--success);">{{ run.success_count }} 张</strong>
+  </div>
+  <div class="panel" style="padding: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 80px;">
+    <span style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; font-weight: 600;">失败截图</span>
+    <strong style="font-size: 22px; color: {{ 'var(--danger)' if run.failed_count > 0 else 'var(--text-color)' }};">{{ run.failed_count }} 张</strong>
+  </div>
+  <div class="panel" style="padding: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 80px;">
+    <span style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; font-weight: 600;">邮件推送状态</span>
+    <strong style="font-size: 15px; color: var(--text-color); word-break: break-all;">{{ run.mail_status | mail_status_label }}</strong>
+  </div>
+  <div class="panel" style="padding: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 80px;">
+    <span style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; font-weight: 600;">耗时/结束时间</span>
+    <strong style="font-size: 14px; color: var(--text-color);">{{ run.finished_at or "-" }}</strong>
+  </div>
+</section>
+
+<!-- 运行异常摘要 -->
+{% if run.error_summary %}
+<div class="panel" style="border-left: 4px solid var(--danger); background: #fef2f2; padding: 16px; margin-bottom: 20px;">
+  <strong style="color: var(--danger); display: block; font-size: 14px; margin-bottom: 8px;">❌ 运行异常摘要</strong>
+  <pre style="margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 12px; color: var(--danger); word-break: break-all;">{{ run.error_summary }}</pre>
+</div>
+{% endif %}
+
+<!-- 运行截图明细 -->
+<section class="panel">
+  <h3 style="margin-bottom: 16px; font-size: 14px; border-left: 4px solid var(--primary); padding-left: 8px; font-weight: 600; color: var(--text-color);">📋 截图结果清单</h3>
+  <table>
+    <thead><tr><th>截图名称</th><th>所属报告章节</th><th>执行状态</th><th>本地图片</th><th>错误日志 / 诊断信息</th></tr></thead>
+    <tbody>
+      {% for item in results %}
+      <tr>
+        <td><strong>{{ item.item_name }}</strong></td>
+        <td>{{ item.section }}</td>
+        <td><span class="badge {{ 'ok' if item.status == 'success' else 'bad' }}">{{ item.status | status_label }}</span></td>
+        <td>
+          {% if item.file_url %}
+          <a href="{{ item.file_url }}" target="_blank" style="color: var(--primary); font-weight: 600; display: inline-flex; align-items: center; gap: 4px;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="feather feather-image"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+            查看原图
+          </a>
+          {% else %}
+          <span class="muted">-</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if item.error_message %}
+          <div style="max-width: 320px; font-size: 12px; color: var(--danger); word-break: break-all; white-space: pre-wrap; line-height: 1.4;">{{ item.error_message }}</div>
+          {% else %}
+          <span class="muted">-</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="empty" style="padding: 30px; text-align: center;">本次运行没有截图结果。请确认任务下已添加并启用截图项，然后点击任务的“立即运行”。</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<!-- 大图预览网格 -->
+{% if results and results | selectattr('file_url') | list | length > 0 %}
+<section style="margin-top: 30px;">
+  <h3 style="margin-bottom: 16px; font-size: 14px; border-left: 4px solid var(--primary); padding-left: 8px; font-weight: 600; color: var(--text-color);">📷 截图结果预览</h3>
+  <div class="preview-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 20px;">
+    {% for item in results %}
+      {% if item.file_url %}
+      <div class="panel preview" style="padding: 12px; display: flex; flex-direction: column; gap: 8px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.02);">
+        <a href="{{ item.file_url }}" target="_blank" title="点击查看原图" style="display: block; overflow: hidden; border-radius: 4px; border: 1px solid var(--panel-border); background: #f8fafc;">
+          <img src="{{ item.file_url }}" alt="{{ item.item_name }}" style="width: 100%; height: auto; display: block; transition: transform 0.2s; max-height: 240px; object-fit: contain;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
+        </a>
+        <figcaption style="font-size: 13px; font-weight: 600; text-align: center; color: var(--text-color); margin-top: 4px;">
+          {{ item.item_name }}
+          <span style="font-weight: normal; font-size: 12px; color: var(--text-muted); display: block; margin-top: 2px;">所属章节：{{ item.section }}</span>
+        </figcaption>
+      </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<script>
+  (function() {
+    const isRunning = {{ 'true' if run.status == 'running' else 'false' }};
+    const params = new URLSearchParams(window.location.search);
+    const watch = params.get('watch') === '1';
+    if (isRunning || watch) {
+      setTimeout(function() {
+        const nextUrl = isRunning ? '/runs/{{ run.id }}?watch=1' : '/runs/{{ run.id }}';
+        window.location.href = nextUrl;
+      }, 3000);
+    }
+  })();
+</script>
+{% endblock %}

@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ "修改截图项" if item.id else "新建截图项" }}</h1>
+    <p class="muted">配置需要被截图的目标 URL 页面，以及用于验证页面数据加载完毕的选择器指示物。</p>
+  </div>
+</div>
+
+<form method="post" action="{{ action }}" class="panel">
+  <!-- 第一部分：基本配置 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 截图项基本信息</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label>
+      截图项名称 <span style="color: var(--danger);">* (必填)</span>
+      <input name="name" value="{{ item.name or '' }}" required placeholder="例如：应用CPU使用率看板">
+      <span class="form-tip">给当前截图项起一个简明易懂的名称。</span>
+    </label>
+    <label>
+      类型 <span style="color: var(--danger);">*</span>
+      <select name="item_type">
+        {% for t in [("grafana", "Grafana 看板"), ("kibana", "Kibana 仪表盘"), ("web", "常规 HTML 网页")] %}
+        <option value="{{ t[0] }}" {% if item.item_type == t[0] %}selected{% endif %}>{{ t[1] }}</option>
+        {% endfor %}
+      </select>
+      <span class="form-tip">选择目标系统类型，以便系统做部分特定的自适应渲染优化。</span>
+    </label>
+    <label class="span-2">
+      目标 URL 链接地址 <span style="color: var(--danger);">* (必填)</span>
+      <textarea name="url" rows="3" required placeholder="http://localhost:3000/d/xxxxxx">{{ item.url or '' }}</textarea>
+      <span class="form-tip">
+        直接填写需要截图的完整页面地址，系统会按页面上填写的地址访问。
+      </span>
+    </label>
+    <label>
+      Word 报告所属章节名称 <span style="color: var(--danger);">* (必填)</span>
+      <input name="section" value="{{ item.section or '1服务器资源' }}" required list="template-section-options" placeholder="如：1服务器资源">
+      <datalist id="template-section-options">
+        {% for section in template_sections or [] %}
+        <option value="{{ section }}"></option>
+        {% endfor %}
+      </datalist>
+      <span class="form-tip">推荐选择 Word 模板中的监控点标题。截图项名称可自由命名，报告插图位置以这里的章节名称为准。</span>
+    </label>
+    <label>
+      关联登录认证配置
+      <select name="auth_profile_id">
+        <option value="">无需登录 (匿名访问或常规公网网页)</option>
+        {% for profile in auth_profiles %}
+        <option value="{{ profile.id }}" {% if item.auth_profile_id == profile.id %}selected{% endif %}>{{ profile.name }}</option>
+        {% endfor %}
+      </select>
+      <span class="form-tip">如果该页面需要登录才能查看，请关联对应的认证配置。</span>
+    </label>
+  </div>
+
+  <!-- 第二部分：截图与加载配置 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 截图与渲染等待配置</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label class="span-2">
+      截图获取模式 <span style="color: var(--danger);">*</span>
+      <select name="capture_mode" onchange="toggleCssSelector(this.value)">
+        <option value="viewport" {% if item.capture_mode == "viewport" %}selected{% endif %}>视口截图 (仅捕获当前浏览器窗口可视区域 - 仪表盘看板推荐)</option>
+        <option value="full_page" {% if item.capture_mode == "full_page" %}selected{% endif %}>整页长截图 (向下自动滚动，截取完整纵深长页面)</option>
+        <option value="selector" {% if item.capture_mode == "selector" %}selected{% endif %}>局部特定元素截图 (仅获取页面中指定的某个图表卡片)</option>
+      </select>
+      <span class="form-tip">通常仪表盘推荐使用“视口截图”以获得最佳的长宽一致性。若使用“局部特定元素截图”，请填下方的 CSS 选择器。</span>
+    </label>
+    <label id="css_selector_container">
+      CSS 选择器 (局部截图专用) <span style="color: var(--danger);">*</span>
+      <input name="css_selector" value="{{ item.css_selector or '' }}" placeholder="例如：div[data-panelid='12'] 或 #my-chart-id">
+      <span class="form-tip">当截图获取模式选为“局部特定元素截图”时必填。用于在页面上唯一指定待截取的 HTML 节点。</span>
+    </label>
+    <label>
+      等待目标元素加载可见 (加载检测)
+      <input name="wait_selector" value="{{ item.wait_selector or '' }}" placeholder="例如：.react-grid-layout">
+      <span class="form-tip">
+        在按下快门截图前，Chromium 会持续检测网页，直到该元素呈现在页面上才执行截图。能极好防范因数据加载缓慢产生白屏。<b>Grafana</b> 看板推荐填 <code>.react-grid-layout</code>。
+      </span>
+    </label>
+    <label>
+      额外静止等待秒数 (秒) <span style="color: var(--danger);">*</span>
+      <input name="wait_seconds" type="number" step="0.5" value="{{ item.wait_seconds or 3.0 }}" required>
+      <span class="form-tip">等待上述元素加载完毕后，再强行静止等待这几秒（用于等待折线图动画渲染、数据完全打满），随后再截图。</span>
+    </label>
+    <label>
+      网页加载最大超时时间 (秒) <span style="color: var(--danger);">*</span>
+      <input name="timeout_seconds" type="number" value="{{ item.timeout_seconds or 60 }}" required>
+      <span class="form-tip">等待网页初始化及获取数据的最长时限，超时将引发该项超时报警。</span>
+    </label>
+    <label>
+      失败自动重试次数 <span style="color: var(--danger);">*</span>
+      <input name="retry_count" type="number" value="{{ item.retry_count if item.retry_count is not none else 2 }}" required>
+      <span class="form-tip">若因网络波动或加载超时导致截图失败，系统在后台自动重试测试的次数。</span>
+    </label>
+  </div>
+
+  <!-- 第三部分：调试与尺寸选项 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、 自定义浏览器尺寸与排序</h3>
+  <div class="form-grid" style="margin-bottom: 24px;">
+    <label>
+      单独浏览器宽度 (px)
+      <input name="browser_width" type="number" value="{{ item.browser_width or '' }}" placeholder="默认使用全局宽度 (例如: 1920)">
+      <span class="form-tip">可选。为本项独立指定浏览器宽度，留空则继承巡检任务中的全局默认宽度。</span>
+    </label>
+    <label>
+      单独浏览器高度 (px)
+      <input name="browser_height" type="number" value="{{ item.browser_height or '' }}" placeholder="默认使用全局高度 (例如: 1080)">
+      <span class="form-tip">可选。为本项独立指定浏览器高度，留空则继承巡检任务中的全局默认高度。</span>
+    </label>
+    <label>
+      报告中排放排序序号
+      <input name="sort_order" type="number" value="{{ item.sort_order or 100 }}" required>
+      <span class="form-tip">用于控制本图片在 Word 报告章节中的生成顺序。数值越小，图片位置越靠前。</span>
+    </label>
+    <div style="display: flex; align-items: flex-end; padding-bottom: 8px;">
+      <label class="check">
+        <input name="enabled" type="checkbox" {% if item.enabled is not defined or item.enabled %}checked{% endif %}>
+        启用此截图项 (若关闭，则自动在巡检运行中跳过本项)
+      </label>
+    </div>
+  </div>
+
+  <div class="form-actions span-2">
+    <button class="primary" type="submit" style="font-weight: 600;">保存截图项配置</button>
+    <a class="button" href="/jobs/{{ job_id }}">取消并返回</a>
+  </div>
+</form>
+
+<script>
+  function toggleCssSelector(val) {
+    const container = document.getElementById('css_selector_container');
+    if (val === 'selector') {
+      container.style.opacity = '1';
+      container.style.pointerEvents = 'auto';
+      container.querySelector('input').setAttribute('required', 'required');
+    } else {
+      container.style.opacity = '0.5';
+      container.style.pointerEvents = 'none';
+      container.querySelector('input').removeAttribute('required');
+    }
+  }
+  // Initialize state
+  document.addEventListener('DOMContentLoaded', () => {
+    toggleCssSelector(document.getElementsByName('capture_mode')[0].value);
+  });
+</script>
+{% endblock %}

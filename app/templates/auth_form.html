@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ "修改认证配置" if profile.id else "新建认证配置" }}</h1>
+    <p class="muted">配置目标系统（如 Grafana, Kibana）在截图前的表单登录流程，使报告能在安全的登录会话下正常获取数据。</p>
+  </div>
+</div>
+
+<form method="post" action="{{ action }}" class="panel">
+  <!-- 第一部分：基本名称与类型 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 认证配置基本名称与类型</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <label>
+      配置名称 <span style="color: var(--danger);">* (必填)</span>
+      <input name="name" value="{{ profile.name or '' }}" required placeholder="例如：Grafana 生产认证">
+      <span class="form-tip">给当前认证凭证起一个易于识别的名称（如“Grafana 生产环境”）。</span>
+    </label>
+    
+    <label>
+      登录类型 <span style="color: var(--danger);">*</span>
+      <select name="auth_type">
+        {% for t in [("form", "表单登录 (Form - 推荐)"), ("none", "无需登录 (None)"), ("state", "直接读取本地缓存状态文件 (State)")] %}
+        <option value="{{ t[0] }}" {% if profile.auth_type == t[0] %}selected{% endif %}>{{ t[1] }}</option>
+        {% endfor %}
+      </select>
+      <span class="form-tip">对于大多数有用户名密码输入框的网页系统，请使用“表单登录”模式。</span>
+    </label>
+  </div>
+
+  <!-- 第二部分：登录地址与凭据 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 登录地址与账号密码</h3>
+  <div class="form-grid" style="margin-bottom: 24px;">
+    <label class="span-2">
+      登录 URL 页面地址 <span style="color: var(--danger);">* (必填)</span>
+      <input name="login_url" value="{{ profile.login_url or '' }}" required placeholder="例如：http://localhost:3000/login">
+      <span class="form-tip">浏览器在截图前会自动访问该地址并在此页面上填入账号密码。请填写完整的登录页地址。</span>
+    </label>
+
+    <label>
+      登录用户名 / 账号 <span style="color: var(--danger);">* (必填)</span>
+      <input name="username_value" value="{{ profile.username_value or profile.username or '' }}" required placeholder="请输入登录用户名 (例如: admin)">
+      <span class="form-tip">直接填写要登录的用户名。</span>
+    </label>
+
+    <label>
+      登录密码 <span style="color: var(--danger);">* (必填)</span>
+      <div style="position: relative; display: flex; align-items: center; width: 100%;">
+        <input name="password" id="auth_password_input" type="password" value="{{ decrypt_secret(profile.password_secret) or profile.password or '' }}" required placeholder="请输入密码" style="padding-right: 40px; width: 100%;">
+        <button type="button" onclick="togglePasswordVisibility('auth_password_input', this)" style="position: absolute; right: 10px; background: none; border: none; cursor: pointer; color: var(--text-muted); display: flex; align-items: center; min-height: auto; border-radius: 0; border: 0; padding: 0;" title="显示/隐藏密码" aria-label="显示密码">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+        </button>
+      </div>
+      <span class="form-tip">输入密码。密码保存后将在数据库中被强加密安全存储。</span>
+    </label>
+  </div>
+
+  <div class="form-actions span-2">
+    <button class="primary" type="submit" style="font-weight: 600;">保存认证配置</button>
+    <a class="button" href="/auth-profiles">取消</a>
+  </div>
+</form>
+
+<script>
+  const eyeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
+  const eyeOffSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
+
+  function togglePasswordVisibility(inputId, btn) {
+    const input = document.getElementById(inputId);
+    if (input.type === 'password') {
+      input.type = 'text';
+      btn.innerHTML = eyeOffSvg;
+      btn.setAttribute('aria-label', '隐藏密码');
+    } else {
+      input.type = 'password';
+      btn.innerHTML = eyeSvg;
+      btn.setAttribute('aria-label', '显示密码');
+    }
+  }
+</script>
+{% endblock %}

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or "自动化巡检报告系统" }}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">自动化巡检</a>
+    <nav class="nav">
+      <a href="/">巡检任务</a>
+      <a href="/runs">运行记录</a>
+      <a href="/periodic-reports">周期报告</a>
+      <a href="/auth-profiles">认证配置</a>
+      <a href="/mail-profiles">邮件配置</a>
+      <a href="/logout">退出登录</a>
+    </nav>
+  </header>
+  <main class="shell">
+    {% block content %}{% endblock %}
+  </main>
+
+  <!-- Global Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script>
+    // Toast Helper
+    window.showToast = function(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      if (!container) return;
+      
+      const toast = document.createElement('div');
+      toast.className = `toast toast-${type}`;
+      
+      if (type === 'error') {
+        toast.innerHTML = `<span style="flex: 1;">${message}</span><button onclick="this.parentElement.remove()" style="background:none;border:none;color:#fee2e2;cursor:pointer;font-weight:bold;margin-left:12px;font-size:16px;line-height:1;">×</button>`;
+      } else {
+        toast.innerHTML = `<span>${message}</span>`;
+      }
+      
+      container.appendChild(toast);
+      
+      // Trigger reflow & show
+      setTimeout(() => toast.classList.add('show'), 10);
+      
+      // Auto hide (Error toast stays 12 seconds unless closed)
+      const duration = type === 'error' ? 12000 : 4000;
+      setTimeout(() => {
+        if (toast.parentNode) {
+          toast.classList.remove('show');
+          setTimeout(() => toast.remove(), 300);
+        }
+      }, duration);
+    };
+
+    // Global Form Submit Handlers for Loading States
+    document.addEventListener('submit', function(e) {
+      const form = e.target;
+      const action = form.getAttribute('action') || '';
+      const submitBtn = form.querySelector('button[type="submit"]');
+      
+      if (submitBtn) {
+        if (action.includes('/run') && !action.includes('/periodic-reports')) {
+          e.preventDefault();
+          submitBtn.classList.add('btn-loading');
+          window.showToast('🚀 巡检任务已启动，正在后台截图，请稍候...', 'info');
+          setTimeout(() => form.submit(), 600);
+        } else if (action.includes('/items/') && action.includes('/test')) {
+          e.preventDefault();
+          submitBtn.classList.add('btn-loading');
+          window.showToast('📸 开始单项测试截图，正在执行，请稍候...', 'info');
+          setTimeout(() => form.submit(), 600);
+        } else if (action.includes('/auth-profiles/') && action.includes('/test')) {
+          e.preventDefault();
+          submitBtn.classList.add('btn-loading');
+          window.showToast('🔍 正在测试登录认证配置，请稍候...', 'info');
+          setTimeout(() => form.submit(), 600);
+        } else if (action.includes('/mail-profiles/') && action.includes('/test')) {
+          e.preventDefault();
+          submitBtn.classList.add('btn-loading');
+          window.showToast('✉️ 正在发送测试邮件，请稍候...', 'info');
+          setTimeout(() => form.submit(), 600);
+        } else if (action.includes('/periodic-reports/') && action.includes('/run')) {
+          e.preventDefault();
+          submitBtn.classList.add('btn-loading');
+          window.showToast('📊 周期汇总报告生成任务已启动，请稍候...', 'info');
+          setTimeout(() => form.submit(), 600);
+        }
+      }
+    });
+
+    // Make active link in navbar highlighted & show success/error toasts from URL
+    document.addEventListener('DOMContentLoaded', () => {
+      const currentPath = window.location.pathname;
+      const navLinks = document.querySelectorAll('.nav a');
+      navLinks.forEach(link => {
+        const href = link.getAttribute('href');
+        if (currentPath === href || (href !== '/' && currentPath.startsWith(href))) {
+          link.classList.add('active');
+        }
+      });
+
+      // Capture messages from URL parameters and show them as toast
+      const params = new URLSearchParams(window.location.search);
+      const successMsg = params.get('success');
+      const errorMsg = params.get('error');
+      if (successMsg) {
+        window.showToast(successMsg, 'success');
+      }
+      if (errorMsg) {
+        window.showToast(errorMsg, 'error');
+      }
+      if (successMsg || errorMsg) {
+        // Replace URL to prevent toast popup again on refresh
+        const newUrl = window.location.pathname;
+        window.history.replaceState({}, document.title, newUrl);
+      }
+    });
+  </script>
+</body>
+</html>
