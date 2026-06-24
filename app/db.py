@@ -92,6 +92,7 @@ def init_db() -> None:
                 browser_height INTEGER,
                 sort_order INTEGER NOT NULL DEFAULT 100,
                 enabled INTEGER NOT NULL DEFAULT 1,
+                real_browser_capture INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(job_id) REFERENCES report_jobs(id) ON DELETE CASCADE,
@@ -182,6 +183,7 @@ def init_db() -> None:
             ("report_jobs", "load_error", "TEXT DEFAULT ''"),
             ("periodic_report_settings", "send_on_timeout", "INTEGER DEFAULT 1"),
             ("periodic_report_settings", "load_error", "TEXT DEFAULT ''"),
+            ("screenshot_items", "real_browser_capture", "INTEGER DEFAULT 1"),
         ]
         for table, col, t in migrations:
             try:

@@ -11,6 +11,7 @@ services:
       - .env
     environment:
       APP_DATA_DIR: /app/data
+      DISPLAY: ":99"
     volumes:
       - ./data:/app/data
     depends_on:

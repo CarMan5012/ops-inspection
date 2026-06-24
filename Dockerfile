@@ -38,12 +38,14 @@ ENV PYTHONUNBUFFERED=1 \
     APP_HOST=0.0.0.0 \
     APP_PORT=8000 \
     TZ=Asia/Shanghai \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    DISPLAY=:99
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-noto-cjk \
     fonts-wqy-zenhei \
     tzdata \
+    xvfb \
     && ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime \
     && echo ${TZ} > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
@@ -63,4 +65,4 @@ RUN mkdir -p /app/data/screenshots /app/data/reports /app/data/logs /app/data/br
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}"]
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}"]

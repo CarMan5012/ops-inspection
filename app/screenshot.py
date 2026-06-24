@@ -213,9 +213,23 @@ def _capture_once(
     resolved_url = resolve_env_placeholders(raw_url)
     logger.info(f"原始 URL: {raw_url} | 解析后 URL: {resolved_url}")
 
+    is_real_capture = bool(item.get("real_browser_capture") if "real_browser_capture" in item else 1)
+    capture_mode = str(item.get("capture_mode") or "full_page")
+    if is_real_capture and capture_mode == "full_page":
+        logger.warning("启用真实浏览器截图时不支持整页长截图 (full_page)，已自动降级为视口截图 (viewport) 模式。")
+
     with sync_playwright() as p:
-        logger.info(f"启动 chromium 浏览器 (headless={bool(job.get('headless', 1))})...")
-        browser = p.chromium.launch(headless=bool(job.get("headless", 1)))
+        headless_val = False if is_real_capture else bool(job.get("headless", 1))
+        launch_kwargs = {"headless": headless_val}
+        if is_real_capture:
+            launch_kwargs["args"] = [
+                f"--window-size={width},{height}",
+                "--start-maximized",
+                "--no-sandbox",
+                "--disable-dev-shm-usage"
+            ]
+        logger.info(f"启动 chromium 浏览器 (headless={headless_val})...")
+        browser = p.chromium.launch(**launch_kwargs)
         context = _new_context(browser, auth_profile, width, height)
         try:
             page = context.new_page()
@@ -225,7 +239,7 @@ def _capture_once(
             logger.info(f"正在加载截图 URL: {resolved_url}")
             page.goto(resolved_url, wait_until="domcontentloaded", timeout=timeout_ms)
             _wait_for_page(page, item, timeout_ms)
-            _take_screenshot(page, item, output_path)
+            _take_screenshot(page, item, output_path, is_real_capture)
             _persist_storage_state(context, auth_profile)
         finally:
             context.close()
@@ -343,17 +357,58 @@ def _wait_for_page(page: Page, item: dict[str, Any], timeout_ms: int) -> None:
         page.wait_for_timeout(int(wait_seconds * 1000))
 
 
-def _take_screenshot(page: Page, item: dict[str, Any], output_path: Path) -> None:
-    capture_mode = str(item.get("capture_mode") or "full_page")
-    selector = str(item.get("css_selector") or "").strip()
-    logger.info(f"开始截图操作. 模式: {capture_mode}, 局部选择器: '{selector}'")
-    if capture_mode == "selector" and selector:
-        locator = page.locator(selector).first
-        locator.wait_for(state="visible")
-        locator.screenshot(path=str(output_path))
-        return
-
-    page.screenshot(path=str(output_path), full_page=(capture_mode == "full_page"))
+def _take_screenshot(page: Page, item: dict[str, Any], output_path: Path, is_real_capture: bool) -> None:
+    if is_real_capture:
+        logger.info("真实浏览器窗口截图模式已启用，正在使用 mss 进行系统级屏幕截图...")
+        
+        # 1. 验证 DISPLAY 环境变量
+        import os
+        display = os.getenv("DISPLAY")
+        if not display:
+            raise RuntimeError(
+                "真实浏览器窗口截图失败：未检测到 DISPLAY 环境变量。\n"
+                "请检查容器环境是否已安装并启动了 Xvfb 虚拟显示服务（如通过 Xvfb :99 并在环境变量中配置了 DISPLAY=:99）。\n"
+                "如果您在非 Linux 容器环境测试，也可以在前端关闭“真实浏览器窗口截图”选项，使用普通截图模式。"
+            )
+            
+        # 2. 验证 mss 库是否安装
+        try:
+            import mss
+            import mss.tools
+        except ImportError as err:
+            raise RuntimeError(
+                "真实浏览器窗口截图失败：未检测到 Python 系统截图依赖库 mss。\n"
+                "请确保 requirements.txt 中包含了 mss，并在容器内执行了安装。"
+            ) from err
+            
+        # 3. 执行系统级截屏
+        try:
+            # 真实地址栏必须来自 Chromium 窗口本身。为确保渲染就绪并置顶，略微等待 500ms
+            page.wait_for_timeout(500)
+            with mss.mss() as sct:
+                if not sct.monitors or len(sct.monitors) < 2:
+                    raise RuntimeError("系统截图失败：无法获取任何有效的虚拟显示器设备（sct.monitors 为空或不足）")
+                # monitors[0] 是所有监视器的合集，monitors[1] 是第一个显示屏
+                monitor = sct.monitors[1]
+                sct_img = sct.grab(monitor)
+                mss.tools.to_png(sct_img.rgb, sct_img.size, output=str(output_path))
+                logger.info(f"系统级真实窗口截图获取成功并保存至: {output_path}")
+        except Exception as exc:
+            raise RuntimeError(
+                f"真实浏览器窗口截图捕获失败：{exc}。\n"
+                "请确保 Xvfb 服务正常运行在后台，且没有其他窗口遮挡。"
+            ) from exc
+    else:
+        # 普通 Playwright 截图
+        capture_mode = str(item.get("capture_mode") or "full_page")
+        selector = str(item.get("css_selector") or "").strip()
+        logger.info(f"开始普通截图操作. 模式: {capture_mode}, 局部选择器: '{selector}'")
+        if capture_mode == "selector" and selector:
+            locator = page.locator(selector).first
+            locator.wait_for(state="visible")
+            locator.screenshot(path=str(output_path))
+        else:
+            page.screenshot(path=str(output_path), full_page=(capture_mode == "full_page"))
 
 
 def test_auth_profile_login(auth_profile_id: int) -> dict[str, Any]:

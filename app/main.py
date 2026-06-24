@@ -171,6 +171,7 @@ def item_form(
     browser_height: str | None = Form(None),
     sort_order: int = Form(100),
     enabled: str | None = Form(None),
+    real_browser_capture: str | None = Form(None),
 ) -> dict[str, Any]:
     return {
         "job_id": None,
@@ -189,6 +190,7 @@ def item_form(
         "browser_height": parse_optional_int(browser_height),
         "sort_order": sort_order,
         "enabled": 1 if enabled else 0,
+        "real_browser_capture": 1 if real_browser_capture else 0,
     }
 
 
@@ -394,6 +396,7 @@ def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
         "browser_height": parse_optional_int(str(payload.get("browser_height") or "")),
         "sort_order": int_value(payload, "sort_order", 100),
         "enabled": bool_value(payload.get("enabled"), True),
+        "real_browser_capture": bool_value(payload.get("real_browser_capture"), True),
     }
 
 

@@ -118,6 +118,7 @@ def save_screenshot_item(data: dict[str, Any], item_id: int | None = None) -> in
         "browser_height",
         "sort_order",
         "enabled",
+        "real_browser_capture",
     )
     values = [data.get(field) for field in fields]
     with connect() as conn:

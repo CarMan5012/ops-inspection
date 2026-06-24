@@ -61,11 +61,21 @@
       截图获取模式 <span style="color: var(--danger);">*</span>
       <select name="capture_mode" onchange="toggleCssSelector(this.value)">
         <option value="viewport" {% if item.capture_mode == "viewport" %}selected{% endif %}>视口截图 (仅捕获当前浏览器窗口可视区域 - 仪表盘看板推荐)</option>
-        <option value="full_page" {% if item.capture_mode == "full_page" %}selected{% endif %}>整页长截图 (向下自动滚动，截取完整纵深长页面)</option>
+        <option value="full_page" id="opt_full_page" {% if item.capture_mode == "full_page" %}selected{% endif %}>整页长截图 (向下自动滚动，截取完整纵深长页面)</option>
         <option value="selector" {% if item.capture_mode == "selector" %}selected{% endif %}>局部特定元素截图 (仅获取页面中指定的某个图表卡片)</option>
       </select>
       <span class="form-tip">通常仪表盘推荐使用“视口截图”以获得最佳的长宽一致性。若使用“局部特定元素截图”，请填下方的 CSS 选择器。</span>
     </label>
+    <div style="display: flex; align-items: flex-end; padding-bottom: 8px;" class="span-2">
+      <label class="check">
+        <input type="checkbox" id="real_browser_capture" name="real_browser_capture" {% if item.real_browser_capture is not defined or item.real_browser_capture %}checked{% endif %} onchange="onRealBrowserCaptureChange(this.checked)">
+        真实浏览器窗口截图
+        <span class="form-tip" style="display: block; margin-top: 4px; font-weight: normal;">
+          • <b>开启</b> (推荐)：将使用容器内 Xvfb + 有头 Chromium 截取真实浏览器窗口，图片包含真实地址栏、标签页与窗口边框。该模式仅支持当前视口，不支持整页长截图。<br>
+          • <b>关闭</b>：使用普通页面截图，稳定且支持整页长截图，但不包含真实浏览器地址栏。
+        </span>
+      </label>
+    </div>
     <label id="css_selector_container">
       CSS 选择器 (局部截图专用) <span style="color: var(--danger);">*</span>
       <input name="css_selector" value="{{ item.css_selector or '' }}" placeholder="例如：div[data-panelid='12'] 或 #my-chart-id">
@@ -140,8 +150,31 @@
       container.querySelector('input').removeAttribute('required');
     }
   }
+
+  function onRealBrowserCaptureChange(checked) {
+    const select = document.getElementsByName('capture_mode')[0];
+    const fullPageOpt = document.getElementById('opt_full_page');
+    if (checked) {
+      if (select.value === 'full_page') {
+        select.value = 'viewport';
+        toggleCssSelector('viewport');
+      }
+      if (fullPageOpt) {
+        fullPageOpt.disabled = true;
+      }
+    } else {
+      if (fullPageOpt) {
+        fullPageOpt.disabled = false;
+      }
+    }
+  }
+
   // Initialize state
   document.addEventListener('DOMContentLoaded', () => {
+    const checkbox = document.getElementById('real_browser_capture');
+    if (checkbox) {
+      onRealBrowserCaptureChange(checkbox.checked);
+    }
     toggleCssSelector(document.getElementsByName('capture_mode')[0].value);
   });
 </script>
