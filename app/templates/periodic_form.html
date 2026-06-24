@@ -125,8 +125,8 @@
   </div>
   {% endif %}
 
-  <!-- 第五部分：附加高级开关 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">{{ "四、 高级配置开关" if setting.report_type == 'weekly' else "五、 高级配置开关" }}</h3>
+  <!-- 第五部分：基本配置开关 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">{{ "四、 基本配置开关" if setting.report_type == 'weekly' else "五、 基本配置开关" }}</h3>
   <div class="span-2" style="display: flex; gap: 24px; margin: 8px 0; flex-wrap: wrap;">
     <label class="check">
       <input name="enabled" type="checkbox" {% if setting.enabled %}checked{% endif %}>
@@ -136,15 +136,21 @@
       <input name="include_docx" type="checkbox" {% if setting.include_docx %}checked{% endif %}>
       将生成的巡检 Word 文档作为附件打包 (.zip)
     </label>
-    <label class="check">
-      <input name="include_screenshots" type="checkbox" {% if setting.include_screenshots %}checked{% endif %}>
-      在归档 ZIP 压缩包中包含成功的巡检截图图片
-    </label>
-    <label class="check">
-      <input name="send_empty_report" type="checkbox" {% if setting.send_empty_report %}checked{% endif %}>
-      即便在周期内未生成任何巡检报告，也发送空报告邮件进行告知
-    </label>
   </div>
+
+  <details class="advanced-settings span-2" style="margin-top: 16px; border: 1px solid var(--panel-border); border-radius: 6px; padding: 12px; background: #fafafa;">
+    <summary style="cursor: pointer; font-weight: bold; color: var(--primary); font-size: 13px;">高级汇总参数设置</summary>
+    <div style="display: flex; gap: 24px; margin-top: 12px; flex-wrap: wrap;">
+      <label class="check">
+        <input name="include_screenshots" type="checkbox" {% if setting.include_screenshots %}checked{% endif %}>
+        在归档 ZIP 压缩包中包含成功的巡检截图图片 (默认不包含，以减小体积)
+      </label>
+      <label class="check">
+        <input name="send_empty_report" type="checkbox" {% if setting.send_empty_report %}checked{% endif %}>
+        即便在周期内未生成任何巡检报告，也发送空报告邮件进行告知
+      </label>
+    </div>
+  </details>
 
   <div class="form-actions span-2" style="margin-top: 24px;">
     <button class="primary" type="submit" style="font-weight: 600;">保存配置</button>

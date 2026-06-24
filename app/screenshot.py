@@ -14,6 +14,7 @@ from playwright.sync_api import sync_playwright
 from app.repository import get_auth_profile
 from app.settings import settings
 from app.utils import safe_name, timestamp_text, resolve_auth_credential
+from app.storage_paths import get_screenshot_dir
 
 logger = logging.getLogger("app.screenshot")
 
@@ -204,8 +205,7 @@ def _capture_once(
     width = int(item.get("browser_width") or job.get("browser_width") or 1920)
     height = int(item.get("browser_height") or job.get("browser_height") or 1080)
     timeout_ms = int(item.get("timeout_seconds") or 60) * 1000
-    screenshot_dir = settings.screenshot_dir / str(run_id)
-    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_dir = get_screenshot_dir(run_id)
     file_name = f"{safe_name(item.get('name', 'screenshot'))}{suffix}_{timestamp_text()}.png"
     output_path = screenshot_dir / file_name
 
@@ -238,6 +238,30 @@ def _capture_once(
             
             logger.info(f"正在加载截图 URL: {resolved_url}")
             page.goto(resolved_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            
+            # 检测登录态是否失效（如被重定向回登录表单）
+            state_path = _storage_state_path(auth_profile)
+            if state_path and state_path.exists() and _is_on_login_page(page, auth_profile):
+                logger.warning("载入缓存状态文件后访问目标页面，却被重定向回了登录页。将清空失效的缓存文件并尝试重新登录自愈！")
+                safe_delete_auth_state(auth_profile)
+                
+                # 关闭过期的 context 并重新创建一个干净的 context
+                context.close()
+                context = browser.new_context(
+                    viewport={"width": width, "height": height},
+                    ignore_https_errors=True,
+                    locale="zh-CN",
+                    timezone_id=settings.default_timezone,
+                )
+                page = context.new_page()
+                page.set_default_timeout(timeout_ms)
+                
+                # 重新表单登录与缓存
+                _ensure_logged_in(context, page, auth_profile, timeout_ms)
+                
+                logger.info(f"登录自愈重试完毕，再次载入截图页面 URL: {resolved_url}")
+                page.goto(resolved_url, wait_until="domcontentloaded", timeout=timeout_ms)
+
             _wait_for_page(page, item, timeout_ms)
             _take_screenshot(page, item, output_path, is_real_capture)
             _persist_storage_state(context, auth_profile)
@@ -280,6 +304,62 @@ def _storage_state_path(auth_profile: dict[str, Any] | None) -> Path | None:
             return settings.browser_state_dir / f"{name}_{host_str}.json"
         return settings.browser_state_dir / f"{name}.json"
     return None
+
+
+def _is_on_login_page(page: Page, auth_profile: dict[str, Any] | None) -> bool:
+    """判定当前页面是否已退回到或处于登录页表单状态"""
+    if not auth_profile or auth_profile.get("auth_type") in {"", "none"}:
+        return False
+    
+    current_url = str(page.url).lower()
+    
+    # 1. URL 特征识别
+    if "/login" in current_url or "/signin" in current_url:
+        return True
+        
+    # 2. 密码框可见性识别
+    try:
+        password_count = page.locator(DEFAULT_PASSWORD_SELECTOR).count()
+        if password_count > 0:
+            if page.locator(DEFAULT_PASSWORD_SELECTOR).first.is_visible():
+                return True
+    except Exception:
+        pass
+        
+    return False
+
+
+def safe_delete_auth_state(auth_profile: dict[str, Any]) -> None:
+    """安全地物理删除该认证配置对应的缓存 JSON 状态文件"""
+    from app.cleanup import is_safe_path
+    
+    try:
+        state_path = _storage_state_path(auth_profile)
+        if not state_path or not state_path.exists():
+            return
+            
+        if not state_path.is_file():
+            logger.warning(f"安全拦截：浏览器状态缓存对象不是文件，跳过删除: {state_path}")
+            return
+            
+        try:
+            resolved_state = state_path.resolve()
+            resolved_state_dir = settings.browser_state_dir.resolve()
+            in_browser_state_dir = resolved_state_dir in resolved_state.parents
+        except Exception:
+            in_browser_state_dir = False
+            
+        in_data_dir = is_safe_path(state_path)
+        is_custom_path = bool(str(auth_profile.get("storage_state_path") or "").strip())
+        
+        if in_browser_state_dir or in_data_dir or is_custom_path:
+            state_path.unlink(missing_ok=True)
+            logger.info(f"成功清理浏览器 session 状态缓存文件: {state_path}")
+        else:
+            logger.warning(f"安全拦截：试图物理删除非安全路径下的状态缓存文件: {state_path}")
+    except Exception as exc:
+        logger.error(f"清理浏览器状态缓存文件失败: {exc}", exc_info=True)
+
 
 
 

@@ -31,7 +31,6 @@ def get_job(job_id: int) -> dict[str, Any] | None:
         ).fetchone()
     return dict(row) if row is not None else None
 
-
 def save_job(data: dict[str, Any], job_id: int | None = None) -> int:
     fields = (
         "name",
@@ -48,6 +47,8 @@ def save_job(data: dict[str, Any], job_id: int | None = None) -> int:
         "schedule_mode",
         "schedule_label",
         "schedule_config",
+        "send_mail_on_complete",
+        "send_mail_on_error",
     )
     values = [data.get(field) for field in fields]
     with connect() as conn:
@@ -252,10 +253,15 @@ def delete_mail_profile(mail_id: int) -> None:
 
 
 def create_run(job_id: int | None, job_name: str) -> int:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.settings import settings
+    local_tz = ZoneInfo(settings.default_timezone)
+    now_str = datetime.now(local_tz).isoformat(timespec="seconds")
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO run_records (job_id, job_name) VALUES (?, ?)",
-            (job_id, job_name),
+            "INSERT INTO run_records (job_id, job_name, started_at) VALUES (?, ?, ?)",
+            (job_id, job_name, now_str),
         )
         return int(cur.lastrowid)
 

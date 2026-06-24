@@ -65,4 +65,4 @@ RUN mkdir -p /app/data/screenshots /app/data/reports /app/data/logs /app/data/br
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}"]
+CMD ["sh", "-c", "rm -f /tmp/.X99-lock && Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}"]

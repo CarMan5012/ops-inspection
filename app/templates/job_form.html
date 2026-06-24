@@ -28,62 +28,47 @@
   <div class="form-grid" style="margin-bottom: 30px;">
     <label class="span-2">
       时间配置模式 <span style="color: var(--danger);">*</span>
-      <select name="schedule_mode" onchange="toggleScheduleMode(this.value)">
-        <option value="simple" {% if job.schedule_mode == 'simple' or not job.schedule_mode %}selected{% endif %}>常规中文配置计划 (推荐：支持多时段多时间点)</option>
+      <select name="schedule_mode" id="job-schedule-mode-select" onchange="toggleScheduleMode(this.value)">
+        <option value="simple" {% if job.schedule_mode == 'simple' or not job.schedule_mode %}selected{% endif %}>常规中文配置计划 (推荐)</option>
         <option value="cron" {% if job.schedule_mode == 'cron' %}selected{% endif %}>高级 Cron 表达式</option>
       </select>
-      <span class="form-tip">您可以直接在下方选择每天/每周的具体时分，或使用 Linux Cron 表达式。</span>
+      <span class="form-tip">您可以直接在下方选择简易中文频率与时间，或使用高级 Cron 表达式。</span>
     </label>
 
     <!-- 简单中文时间配置 -->
-    <div id="simple_schedule_container" class="span-2" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 16px; border-radius: 6px;">
-      <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;">
-        <label style="margin: 0; display: flex; flex-direction: row; align-items: center; gap: 8px;">
-          重复频率：
-          <select name="frequency" style="width: auto; min-width: 120px;" onchange="toggleFrequencyFields(this.value)">
-            <option value="daily">每天</option>
-            <option value="workday">工作日 (周一至周五)</option>
-            <option value="weekly">每周</option>
-            <option value="monthly">每月</option>
-            <option value="monthly_last">每月最后一天</option>
-          </select>
-        </label>
+    <div id="simple_schedule_container" class="span-2" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 16px; border-radius: 6px; display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+      <label class="span-2">
+        巡检频率
+        <select name="frequency" id="frequency_select">
+          <option value="daily">每天</option>
+          <option value="workday">周一到周五</option>
+        </select>
+      </label>
 
-        <label id="weekly_select_label" style="margin: 0; display: flex; flex-direction: row; align-items: center; gap: 8px;">
-          执行星期：
-          <select name="day_of_week" style="width: auto; min-width: 120px;">
-            <option value="1">星期一</option>
-            <option value="2">星期二</option>
-            <option value="3">星期三</option>
-            <option value="4">星期四</option>
-            <option value="5">星期五</option>
-            <option value="6">星期六</option>
-            <option value="7">星期日</option>
-          </select>
-        </label>
+      <label class="check">
+        <input type="checkbox" name="morning_enabled" id="morning_enabled_chk">
+        启用上午巡检
+      </label>
+      <label>
+        上午时间
+        <input type="time" name="morning_time" id="morning_time_val" value="09:05">
+      </label>
 
-        <label id="monthly_select_label" style="margin: 0; display: flex; flex-direction: row; align-items: center; gap: 8px;">
-          执行日期：
-          <select name="day_of_month" style="width: auto; min-width: 120px;">
-            {% for day in range(1, 32) %}
-            <option value="{{ day }}">{{ day }}号</option>
-            {% endfor %}
-          </select>
-        </label>
-      </div>
-
-      <div id="time_rows_container">
-        <!-- 动态时间点行 -->
-      </div>
-
-      <button type="button" class="button" style="margin-top: 10px; font-size: 13px; font-weight: 600;" onclick="addTimeRow()">+ 增加执行时间点</button>
+      <label class="check">
+        <input type="checkbox" name="afternoon_enabled" id="afternoon_enabled_chk">
+        启用下午巡检
+      </label>
+      <label>
+        下午时间
+        <input type="time" name="afternoon_time" id="afternoon_time_val" value="17:05">
+      </label>
     </div>
 
     <!-- 高级 Cron 表达式配置 -->
     <label id="cron_schedule_container" class="span-2">
       Cron 表达式 <span style="color: var(--danger);">*</span>
       <input name="cron_expression" value="{{ job.cron_expression or '0 9 * * *' }}">
-      <span class="form-tip">支持标准的 5 位 Linux Cron (如 <code>0 9 * * *</code> 表示每天上午9点)。如果配置多个计划，可用分号 <code>;</code> 隔开。</span>
+      <span class="form-tip">使用标准 5 位 Linux Cron，例如 <code>0 9 * * *</code> (每天上午9点)。</span>
     </label>
   </div>
 
@@ -132,8 +117,12 @@
         启用此任务计划 (自动定时运行)
       </label>
       <label class="check">
-        <input name="send_mail" type="checkbox" {% if job.send_mail %}checked{% endif %}>
-        允许向关联邮箱发送报告邮件
+        <input name="send_mail_on_complete" type="checkbox" {% if job.send_mail_on_complete is not defined or job.send_mail_on_complete %}checked{% endif %}>
+        巡检完成后发送邮件
+      </label>
+      <label class="check">
+        <input name="send_mail_on_error" type="checkbox" {% if job.send_mail_on_error is not defined or job.send_mail_on_error %}checked{% endif %}>
+        巡检异常时发送邮件
       </label>
       <label class="check">
         <input name="headless" type="checkbox" {% if job.headless is not defined or job.headless %}checked{% endif %}>
@@ -149,11 +138,65 @@
 </form>
 
 <script>
+  function tryParseCronToSimple(cron) {
+    if (!cron) return null;
+    const parts = cron.trim().split(/\s+/);
+    if (parts.length !== 5) return null;
+    const [mPart, hPart, domPart, monPart, dowPart] = parts;
+    if (domPart !== "*" || monPart !== "*") return null;
+    
+    let frequency = "daily";
+    if (dowPart === "*" || dowPart === "?") {
+      frequency = "daily";
+    } else if (dowPart === "1-5" || dowPart === "mon-fri" || dowPart === "1,2,3,4,5") {
+      frequency = "workday";
+    } else {
+      return null;
+    }
+    
+    const hours = hPart.split(",").map(Number);
+    const minutes = mPart.split(",").map(Number);
+    if (hours.some(isNaN) || minutes.some(isNaN) || hours.length > 2) return null;
+    
+    if (hours.length === 1) {
+      const h = hours[0];
+      if (minutes.length !== 1) return null;
+      const m = minutes[0];
+      const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+      if (h < 12) {
+        return { frequency, morning_enabled: true, morning_time: timeStr, afternoon_enabled: false, afternoon_time: "17:05" };
+      } else {
+        return { frequency, morning_enabled: false, morning_time: "09:05", afternoon_enabled: true, afternoon_time: timeStr };
+      }
+    } else if (hours.length === 2) {
+      const h1 = Math.min(...hours);
+      const h2 = Math.max(...hours);
+      if (h1 >= 12 || h2 < 12) return null;
+      let m1, m2;
+      if (minutes.length === 1) {
+        m1 = m2 = minutes[0];
+      } else if (minutes.length === 2) {
+        m1 = minutes[0];
+        m2 = minutes[1];
+      } else {
+        return null;
+      }
+      return {
+        frequency,
+        morning_enabled: true,
+        morning_time: `${String(h1).padStart(2, '0')}:${String(m1).padStart(2, '0')}`,
+        afternoon_enabled: true,
+        afternoon_time: `${String(h2).padStart(2, '0')}:${String(m2).padStart(2, '0')}`
+      };
+    }
+    return null;
+  }
+
   function toggleScheduleMode(mode) {
     const simpleContainer = document.getElementById('simple_schedule_container');
     const cronContainer = document.getElementById('cron_schedule_container');
     if (mode === 'simple') {
-      simpleContainer.style.display = 'block';
+      simpleContainer.style.display = 'grid';
       cronContainer.style.display = 'none';
       cronContainer.querySelector('input').removeAttribute('required');
     } else {
@@ -163,114 +206,58 @@
     }
   }
 
-  function toggleFrequencyFields(freq) {
-    const weeklyLabel = document.getElementById('weekly_select_label');
-    const monthlyLabel = document.getElementById('monthly_select_label');
-    if (freq === 'daily' || freq === 'workday' || freq === 'monthly_last') {
-      weeklyLabel.style.display = 'none';
-      monthlyLabel.style.display = 'none';
-    } else if (freq === 'weekly') {
-      weeklyLabel.style.display = 'inline-flex';
-      monthlyLabel.style.display = 'none';
-    } else if (freq === 'monthly') {
-      weeklyLabel.style.display = 'none';
-      monthlyLabel.style.display = 'inline-flex';
-    }
-  }
-
-  function createTimeRowHtml(ampmVal, hourVal, minuteVal) {
-    ampmVal = ampmVal || 'am';
-    hourVal = parseInt(hourVal) || 9;
-    minuteVal = parseInt(minuteVal) || 0;
-
-    let ampmOptions = `
-      <option value="am" ${ampmVal === 'am' ? 'selected' : ''}>上午</option>
-      <option value="pm" ${ampmVal === 'pm' ? 'selected' : ''}>下午</option>
-    `;
-
-    let hourOptions = '';
-    let hours = [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-    hours.forEach(h => {
-      hourOptions += `<option value="${h}" ${hourVal === h ? 'selected' : ''}>${h}点</option>`;
-    });
-
-    let minuteOptions = '';
-    for (let m = 0; m < 60; m++) {
-      let mStr = m.toString().padStart(2, '0');
-      minuteOptions += `<option value="${m}" ${minuteVal === m ? 'selected' : ''}>${mStr}分</option>`;
-    }
-
-    return `
-      <div class="time-row" style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px;">
-        <select name="ampm" style="width: auto; min-width: 80px;">
-          ${ampmOptions}
-        </select>
-        <select name="hour" style="width: auto; min-width: 80px;">
-          ${hourOptions}
-        </select>
-        <select name="minute" style="width: auto; min-width: 80px;">
-          ${minuteOptions}
-        </select>
-        <button type="button" class="button" style="padding: 6px 12px; font-size: 12px; color: var(--danger); border-color: #fca5a5; background: #fef2f2; min-height: 30px;" onclick="removeTimeRow(this)">删除时间点</button>
-      </div>
-    `;
-  }
-
-  function addTimeRow(ampmVal, hourVal, minuteVal) {
-    const container = document.getElementById('time_rows_container');
-    const rowHtml = createTimeRowHtml(ampmVal, hourVal, minuteVal);
-    const div = document.createElement('div');
-    div.innerHTML = rowHtml.trim();
-    container.appendChild(div.firstChild);
-  }
-
-  function removeTimeRow(button) {
-    const container = document.getElementById('time_rows_container');
-    if (container.children.length > 1) {
-      button.closest('.time-row').remove();
-    } else {
-      alert('任务必须保留至少一个执行时间点。');
-    }
-  }
-
   document.addEventListener('DOMContentLoaded', () => {
+    const morningCheck = document.getElementById('morning_enabled_chk');
+    const morningTimeInput = document.getElementById('morning_time_val');
+    const afternoonCheck = document.getElementById('afternoon_enabled_chk');
+    const afternoonTimeInput = document.getElementById('afternoon_time_val');
+    
+    function updateTimeInputs() {
+      morningTimeInput.disabled = !morningCheck.checked;
+      afternoonTimeInput.disabled = !afternoonCheck.checked;
+    }
+    morningCheck.addEventListener('change', updateTimeInputs);
+    afternoonCheck.addEventListener('change', updateTimeInputs);
+
+    // 回显配置
     const configStr = '{{ job.schedule_config | safe if job.schedule_config else "" }}';
-    let config = null;
+    let scheduleMode = '{{ job.schedule_mode or "simple" }}';
+    let sc = null;
+    
     if (configStr) {
       try {
-        config = JSON.parse(configStr);
+        sc = JSON.parse(configStr);
       } catch (e) {
         console.error("Failed to parse schedule_config", e);
       }
+    } else {
+      const cronExpr = '{{ job.cron_expression or "" }}';
+      if (cronExpr) {
+        sc = tryParseCronToSimple(cronExpr);
+        if (!sc) {
+          scheduleMode = 'cron';
+        }
+      }
     }
 
-    const scheduleModeSelect = document.getElementsByName('schedule_mode')[0];
-    const scheduleMode = '{{ job.schedule_mode or "simple" }}';
+    const scheduleModeSelect = document.getElementById('job-schedule-mode-select');
     scheduleModeSelect.value = scheduleMode;
     toggleScheduleMode(scheduleMode);
 
-    if (config) {
-      document.getElementsByName('frequency')[0].value = config.frequency || 'daily';
-      if (config.day_of_week) {
-        document.getElementsByName('day_of_week')[0].value = config.day_of_week;
-      }
-      if (config.day_of_month) {
-        document.getElementsByName('day_of_month')[0].value = config.day_of_month;
-      }
-      toggleFrequencyFields(config.frequency || 'daily');
-
-      if (config.times && config.times.length > 0) {
-        config.times.forEach(t => {
-          addTimeRow(t.ampm, t.hour, t.minute);
-        });
-      } else {
-        addTimeRow('am', 9, 0);
-      }
+    if (sc) {
+      document.getElementById('frequency_select').value = sc.frequency || 'daily';
+      morningCheck.checked = sc.morning_enabled !== undefined ? sc.morning_enabled : true;
+      morningTimeInput.value = sc.morning_time || '09:05';
+      afternoonCheck.checked = sc.afternoon_enabled !== undefined ? sc.afternoon_enabled : true;
+      afternoonTimeInput.value = sc.afternoon_time || '17:05';
     } else {
-      document.getElementsByName('frequency')[0].value = 'daily';
-      toggleFrequencyFields('daily');
-      addTimeRow('am', 9, 0);
+      document.getElementById('frequency_select').value = 'daily';
+      morningCheck.checked = true;
+      morningTimeInput.value = '09:05';
+      afternoonCheck.checked = true;
+      afternoonTimeInput.value = '17:05';
     }
+    updateTimeInputs();
   });
 </script>
 {% endblock %}

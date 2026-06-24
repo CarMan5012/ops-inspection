@@ -20,6 +20,7 @@
       <a class="nav-link" href="/#/periodic" data-view="periodic">周期报告</a>
       <a class="nav-link" href="/#/auth" data-view="auth">认证配置</a>
       <a class="nav-link" href="/#/mail" data-view="mail">邮件配置</a>
+      <a class="nav-link" href="/#/storage" data-view="storage">存储管理</a>
       <a href="/logout">退出登录</a>
     </nav>
   </header>
@@ -98,6 +99,19 @@
         </div>
       </div>
       <section class="panel" data-region="mail-profiles"></section>
+    </section>
+
+    <section data-view-panel="storage" hidden>
+      <div class="page-head">
+        <div>
+          <h1>存储管理</h1>
+          <p class="muted">监控数据目录空间占用，配置数据保留清理策略，查看最近清理结果。</p>
+        </div>
+        <div class="action-row">
+          <button class="button" type="button" data-action="refresh-storage">刷新数据</button>
+        </div>
+      </div>
+      <section class="panel" data-region="storage-panel"></section>
     </section>
   </main>
 

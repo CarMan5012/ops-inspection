@@ -12,6 +12,7 @@ services:
     environment:
       APP_DATA_DIR: /app/data
       DISPLAY: ":99"
+      TZ: Asia/Shanghai
     volumes:
       - ./data:/app/data
     depends_on:
@@ -29,6 +30,7 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_USERS_DEFAULT_THEME: light
       GF_SERVER_SERVE_FROM_SUB_PATH: "false"
+      TZ: Asia/Shanghai
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro

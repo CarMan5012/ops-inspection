@@ -35,6 +35,7 @@ from app.repository import (
 from app.runner import run_job, test_capture_item
 from app.scheduler import reload_jobs, shutdown_scheduler, start_scheduler
 from app.settings import settings
+from app.storage_paths import get_run_date, resolve_artifact_path
 from app.report import list_template_sections
 import os
 import logging
@@ -92,7 +93,6 @@ templates.env.globals["resolve_mail_credential"] = resolve_mail_credential
 templates.env.globals["decrypt_secret"] = decrypt_secret
 
 
-
 def job_form(
     name: str = Form(...),
     environment: str = Form("生产环境"),
@@ -102,41 +102,46 @@ def job_form(
     report_title: str = Form("自动化巡检报告"),
     mail_profile_id: str | None = Form(None),
     send_mail: str | None = Form(None),
+    send_mail_on_complete: str | None = Form(None),
+    send_mail_on_error: str | None = Form(None),
     browser_width: int = Form(1920),
     browser_height: int = Form(1080),
     headless: str | None = Form(None),
-    schedule_mode: str = Form("cron"),
+    schedule_mode: str = Form("simple"),
     frequency: str = Form("daily"),
-    day_of_week: str | None = Form(None),
-    day_of_month: str | None = Form(None),
-    ampm: list[str] = Form([]),
-    hour: list[int] = Form([]),
-    minute: list[int] = Form([]),
+    morning_enabled: str | None = Form(None),
+    morning_time: str = Form("09:05"),
+    afternoon_enabled: str | None = Form(None),
+    afternoon_time: str = Form("17:05"),
 ) -> dict[str, Any]:
-    import json
-    from app.utils import times_to_cron
-
-    times_list = []
-    for i in range(len(hour)):
-        times_list.append({
-            "ampm": ampm[i] if i < len(ampm) else "am",
-            "hour": int(hour[i]),
-            "minute": int(minute[i]) if i < len(minute) else 0
-        })
-
+    from app.schedule_utils import parse_simple_inspection_schedule
+    
+    def parse_bool(v: Any) -> bool:
+        return bool(v) if v is not None else False
+        
+    payload = {
+        "frequency": frequency,
+        "morning_enabled": parse_bool(morning_enabled),
+        "morning_time": morning_time,
+        "afternoon_enabled": parse_bool(afternoon_enabled),
+        "afternoon_time": afternoon_time
+    }
+    
     if schedule_mode == "simple":
-        cron_expr, label_expr = times_to_cron(frequency, day_of_week, day_of_month, times_list)
-        schedule_config = json.dumps({
-            "frequency": frequency,
-            "day_of_week": day_of_week,
-            "day_of_month": day_of_month,
-            "times": times_list
-        })
+        try:
+            cron_expr, label_expr, schedule_config = parse_simple_inspection_schedule(payload)
+        except Exception as e:
+            raise ValueError(str(e))
     else:
         cron_expr = cron_expression
         label_expr = "高级 Cron"
         schedule_config = ""
-
+        
+    send_comp = parse_bool(send_mail_on_complete)
+    if send_mail is not None and send_mail_on_complete is None:
+        send_comp = parse_bool(send_mail)
+    send_err = parse_bool(send_mail_on_error) if send_mail_on_error is not None else True
+    
     return {
         "name": name,
         "environment": environment,
@@ -145,7 +150,9 @@ def job_form(
         "time_range_label": time_range_label,
         "report_title": report_title,
         "mail_profile_id": parse_optional_int(mail_profile_id),
-        "send_mail": 1 if send_mail else 0,
+        "send_mail": 1 if send_comp else 0,
+        "send_mail_on_complete": 1 if send_comp else 0,
+        "send_mail_on_error": 1 if send_err else 0,
         "browser_width": browser_width,
         "browser_height": browser_height,
         "headless": 1 if headless else 0,
@@ -360,21 +367,42 @@ def public_mail_profile(profile: dict[str, Any]) -> dict[str, Any]:
 
 
 def api_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.schedule_utils import parse_simple_inspection_schedule
+
+    schedule_mode = text_value(payload, "schedule_mode", "simple")
+    cron_expr = text_value(payload, "cron_expression", "0 9 * * *")
+    schedule_label = text_value(payload, "schedule_label", "高级 Cron")
+    schedule_config = text_value(payload, "schedule_config", "")
+    
+    if schedule_mode == "simple":
+        try:
+            cron_expr, schedule_label, schedule_config = parse_simple_inspection_schedule(payload)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    send_mail_on_complete = bool_value(payload.get("send_mail_on_complete"), True)
+    send_mail_on_error = bool_value(payload.get("send_mail_on_error"), True)
+    send_mail = bool_value(payload.get("send_mail"), False)
+    if "send_mail" in payload and "send_mail_on_complete" not in payload:
+        send_mail_on_complete = send_mail
+
     return {
         "name": text_value(payload, "name", "未命名巡检任务"),
         "environment": text_value(payload, "environment", "生产环境"),
         "enabled": bool_value(payload.get("enabled"), True),
-        "cron_expression": text_value(payload, "cron_expression", "0 9 * * *"),
+        "cron_expression": cron_expr,
         "time_range_label": text_value(payload, "time_range_label", "最近 24 小时"),
         "report_title": text_value(payload, "report_title", "自动化巡检报告"),
         "mail_profile_id": parse_optional_int(str(payload.get("mail_profile_id") or "")),
-        "send_mail": bool_value(payload.get("send_mail"), False),
+        "send_mail": 1 if send_mail_on_complete else 0,
+        "send_mail_on_complete": 1 if send_mail_on_complete else 0,
+        "send_mail_on_error": 1 if send_mail_on_error else 0,
         "browser_width": int_value(payload, "browser_width", 1920),
         "browser_height": int_value(payload, "browser_height", 1080),
         "headless": bool_value(payload.get("headless"), True),
-        "schedule_mode": text_value(payload, "schedule_mode", "cron"),
-        "schedule_label": text_value(payload, "schedule_label", text_value(payload, "cron_expression", "0 9 * * *")),
-        "schedule_config": text_value(payload, "schedule_config", ""),
+        "schedule_mode": schedule_mode,
+        "schedule_label": schedule_label,
+        "schedule_config": schedule_config,
     }
 
 
@@ -443,15 +471,8 @@ def api_mail_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def clear_auth_state_cache(auth_profile: dict[str, Any]) -> None:
-    from app.screenshot import _storage_state_path
-
-    try:
-        state_path = _storage_state_path(auth_profile)
-        if state_path and state_path.exists():
-            os.remove(state_path)
-            app_logger.info(f"由于认证配置发生变更，已物理删除旧的浏览器状态缓存: {state_path}")
-    except Exception as exc:
-        app_logger.error(f"清理旧的浏览器登录状态文件失败: {exc}", exc_info=True)
+    from app.screenshot import safe_delete_auth_state
+    safe_delete_auth_state(auth_profile)
 
 
 def dashboard_metrics(jobs: list[dict[str, Any]], runs: list[dict[str, Any]]) -> dict[str, int]:
@@ -478,7 +499,7 @@ def enrich_run(run: dict[str, Any]) -> dict[str, Any]:
     data["mail_status_label"] = api_mail_status_label(data.get("mail_status"))
     if data.get("report_path"):
         filename = artifact_filename(data["report_path"])
-        local_path = settings.report_dir / str(data["id"]) / filename
+        local_path = resolve_artifact_path(data["report_path"])
         if local_path.exists():
             data["report_url"] = get_artifact_url("reports", data["id"], filename)
     return data
@@ -635,11 +656,17 @@ def api_update_auth_profile(auth_id: int, payload: dict[str, Any]) -> dict[str, 
     data = api_auth_payload(payload)
     changed = any(
         str(data.get(field) or "") != str(old.get(field) or "")
-        for field in ("auth_type", "login_url", "username_value", "username", "username_selector", "password_selector", "submit_selector", "success_selector")
+        for field in (
+            "auth_type", "login_url", "username_value", "username", 
+            "username_selector", "password_selector", "submit_selector", 
+            "success_selector", "username_source", "password_source", 
+            "username_env", "password_env", "storage_state_path"
+        )
     )
     if data.get("password"):
         data["password_secret"] = encrypt_secret(data["password"])
-        changed = True
+        if data["password_secret"] != old.get("password_secret"):
+            changed = True
     else:
         data["password"] = old.get("password")
         data["password_secret"] = old.get("password_secret")
@@ -654,7 +681,8 @@ def api_update_auth_profile(auth_id: int, payload: dict[str, Any]) -> dict[str, 
 
 @api_router.delete("/auth-profiles/{auth_id}", dependencies=[Depends(require_api_login)])
 def api_delete_auth_profile(auth_id: int) -> dict[str, Any]:
-    require_value(get_auth_profile(auth_id), "认证配置不存在")
+    old = require_value(get_auth_profile(auth_id), "认证配置不存在")
+    clear_auth_state_cache(old)
     delete_auth_profile(auth_id)
     return {"ok": True}
 
@@ -948,14 +976,6 @@ def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form))
     from app.utils import encrypt_secret
     old = get_auth_profile(auth_id)
     if old:
-        changed = False
-        if form.get("password") and form.get("password") != old.get("password"):
-            changed = True
-        if form.get("username_value") and form.get("username_value") != old.get("username_value"):
-            changed = True
-        if form.get("login_url") and form.get("login_url") != old.get("login_url"):
-            changed = True
-
         # 若留空代表不修改，沿用旧凭据
         if not form.get("password"):
             form["password_secret"] = old.get("password_secret")
@@ -972,8 +992,20 @@ def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form))
             if not form.get(field):
                 form[field] = old.get(field) or form.get(field)
 
+        changed = any(
+            str(form.get(field) or "") != str(old.get(field) or "")
+            for field in (
+                "auth_type", "login_url", "username_value", "username", 
+                "username_selector", "password_selector", "submit_selector", 
+                "success_selector", "username_source", "password_source", 
+                "username_env", "password_env", "storage_state_path"
+            )
+        )
+        if form.get("password_secret") != old.get("password_secret"):
+            changed = True
+
         if changed:
-            clear_auth_state_cache(old)
+            clear_auth_state_cache(dict(old))
             
     save_auth_profile(form, auth_id)
     return RedirectResponse("/auth-profiles", status_code=303)
@@ -981,6 +1013,9 @@ def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form))
 
 @app.post("/auth-profiles/{auth_id}/delete", dependencies=[Depends(require_login)])
 def remove_auth_profile(auth_id: int) -> RedirectResponse:
+    old = get_auth_profile(auth_id)
+    if old:
+        clear_auth_state_cache(dict(old))
     delete_auth_profile(auth_id)
     return RedirectResponse("/auth-profiles", status_code=303)
 
@@ -1219,7 +1254,7 @@ def run_detail(request: Request, run_id: int) -> HTMLResponse:
     results = [with_file_url(item) for item in list_screenshot_results(run_id)]
     if run.get("report_path"):
         filename = artifact_filename(run["report_path"])
-        local_path = settings.report_dir / str(run_id) / filename
+        local_path = resolve_artifact_path(run["report_path"])
         if local_path.exists():
             run["report_url"] = get_artifact_url("reports", run_id, filename)
     return templates.TemplateResponse(
@@ -1238,10 +1273,17 @@ def artifact(kind: str, run_id: int, filename: str) -> FileResponse:
     base = {"screenshots": settings.screenshot_dir, "reports": settings.report_dir}.get(kind)
     if base is None:
         raise HTTPException(status_code=404, detail="未知文件类型")
-    path = (base / str(run_id) / filename).resolve()
-    if not is_under(path, base.resolve()) or not path.exists():
-        raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(path)
+        
+    yyyy, mm, dd = get_run_date(run_id)
+    new_path = (base / yyyy / mm / dd / f"run-{run_id}" / filename).resolve()
+    legacy_path = (base / str(run_id) / filename).resolve()
+    
+    if new_path.exists() and is_under(new_path, base.resolve()):
+        return FileResponse(new_path)
+    elif legacy_path.exists() and is_under(legacy_path, base.resolve()):
+        return FileResponse(legacy_path)
+        
+    raise HTTPException(status_code=404, detail="文件不存在")
 
 
 def require_value(value: Any, message: str) -> Any:
@@ -1255,7 +1297,7 @@ def with_file_url(item: dict[str, Any]) -> dict[str, Any]:
     run_id = item.get("run_id")
     if file_path and run_id:
         filename = artifact_filename(file_path)
-        local_path = settings.screenshot_dir / str(run_id) / filename
+        local_path = resolve_artifact_path(file_path)
         if local_path.exists():
             item["file_url"] = get_artifact_url("screenshots", run_id, filename)
     return item
@@ -1439,7 +1481,7 @@ def download_periodic_report_zip(run_id: int) -> FileResponse:
         raise HTTPException(status_code=404, detail="周期报告包不存在")
     path = Path(run["zip_path"]).resolve()
     if not path.exists():
-        raise HTTPException(status_code=404, detail="周期报告物理文件不存在")
+        raise HTTPException(status_code=400, detail="周期报告附件已按数据保留策略被自动清理")
     return FileResponse(path, media_type="application/zip", filename=path.name)
 
 
@@ -1458,4 +1500,170 @@ def delete_periodic_report_run_route(run_id: int) -> RedirectResponse:
     return RedirectResponse("/periodic-reports", status_code=303)
 
 
+# ==============================================================================
+# 存储管理与数据保留策略 API 路由
+# ==============================================================================
+
+@api_router.get("/storage", dependencies=[Depends(require_api_login)])
+def api_get_storage() -> dict[str, Any]:
+    from app.cleanup import get_storage_usage
+    from app.db import connect
+    
+    try:
+        usage = get_storage_usage()
+    except Exception as e:
+        app_logger.error(f"获取存储占用统计失败: {e}", exc_info=True)
+        usage = {
+            "total_bytes": 0, "screenshots_bytes": 0, "reports_bytes": 0,
+            "logs_bytes": 0, "browser_state_bytes": 0, "periodic_reports_bytes": 0,
+            "sqlite_db_bytes": 0, "estimated_cleanup_bytes": 0, "estimated_cleanup_files": 0
+        }
+    
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM storage_cleanup_settings ORDER BY id DESC LIMIT 1").fetchone()
+        config = dict(row) if row else {}
+    
+    with connect() as conn:
+        row_run = conn.execute("SELECT * FROM storage_cleanup_runs ORDER BY id DESC LIMIT 1").fetchone()
+        latest_run = dict(row_run) if row_run else None
+        
+    return {
+        "usage": usage,
+        "config": config,
+        "latest_run": latest_run
+    }
+
+
+@api_router.put("/storage/settings", dependencies=[Depends(require_api_login)])
+def api_update_storage_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.db import connect
+    from app.scheduler import reload_jobs
+    import json
+    
+    enabled = bool_value(payload.get("enabled"), True)
+    allow_manual_cleanup = bool_value(payload.get("allow_manual_cleanup"), True)
+    cleanup_schedule_mode = text_value(payload, "cleanup_schedule_mode", "daily")
+    
+    cleanup_schedule_label = text_value(payload, "cleanup_schedule_label", "")
+    cleanup_schedule_config = text_value(payload, "cleanup_schedule_config", "")
+    
+    if not cleanup_schedule_label:
+        if cleanup_schedule_config:
+            try:
+                cfg = json.loads(cleanup_schedule_config)
+                time_str = cfg.get("time") or "02:30"
+                if cleanup_schedule_mode == "daily":
+                    cleanup_schedule_label = f"每天 {time_str}"
+                elif cleanup_schedule_mode == "weekly":
+                    dow_val = str(cfg.get("day_of_week") or "1")
+                    mapping = {"1": "周一", "2": "周二", "3": "周三", "4": "周四", "5": "周五", "6": "周六", "7": "周日", "0": "周日"}
+                    cleanup_schedule_label = f"每周 {mapping.get(dow_val, '周一')} {time_str}"
+                elif cleanup_schedule_mode == "monthly":
+                    day_val = str(cfg.get("day_of_month") or "1")
+                    cleanup_schedule_label = f"每月 {day_val}号 {time_str}"
+            except Exception:
+                cleanup_schedule_label = "每天 02:30"
+        else:
+            cleanup_schedule_label = "每天 02:30"
+            
+    periodic_sent_retention_days = int_value(payload, "periodic_sent_retention_days", 3)
+    periodic_failed_retention_days = int_value(payload, "periodic_failed_retention_days", 30)
+    screenshot_retention_days = int_value(payload, "screenshot_retention_days", 7)
+    report_retention_days = int_value(payload, "report_retention_days", 30)
+    run_record_retention_days = int_value(payload, "run_record_retention_days", 90)
+    log_retention_days = int_value(payload, "log_retention_days", 14)
+    browser_state_retention_days = int_value(payload, "browser_state_retention_days", 30)
+    browser_state_cleanup_enabled = bool_value(payload.get("browser_state_cleanup_enabled"), False)
+    protect_recent_days = int_value(payload, "protect_recent_days", 3)
+    
+    with connect() as conn:
+        row = conn.execute("SELECT id FROM storage_cleanup_settings ORDER BY id DESC LIMIT 1").fetchone()
+        if row:
+            setting_id = row[0]
+            conn.execute(
+                """
+                UPDATE storage_cleanup_settings SET
+                    enabled = ?, allow_manual_cleanup = ?, cleanup_schedule_mode = ?,
+                    cleanup_schedule_label = ?, cleanup_schedule_config = ?,
+                    periodic_sent_retention_days = ?, periodic_failed_retention_days = ?,
+                    screenshot_retention_days = ?, report_retention_days = ?,
+                    run_record_retention_days = ?, log_retention_days = ?,
+                    browser_state_retention_days = ?, browser_state_cleanup_enabled = ?,
+                    protect_recent_days = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    enabled, allow_manual_cleanup, cleanup_schedule_mode,
+                    cleanup_schedule_label, cleanup_schedule_config,
+                    periodic_sent_retention_days, periodic_failed_retention_days,
+                    screenshot_retention_days, report_retention_days,
+                    run_record_retention_days, log_retention_days,
+                    browser_state_retention_days, browser_state_cleanup_enabled,
+                    protect_recent_days, setting_id
+                )
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO storage_cleanup_settings (
+                    enabled, allow_manual_cleanup, cleanup_schedule_mode,
+                    cleanup_schedule_label, cleanup_schedule_config,
+                    periodic_sent_retention_days, periodic_failed_retention_days,
+                    screenshot_retention_days, report_retention_days,
+                    run_record_retention_days, log_retention_days,
+                    browser_state_retention_days, browser_state_cleanup_enabled,
+                    protect_recent_days
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    enabled, allow_manual_cleanup, cleanup_schedule_mode,
+                    cleanup_schedule_label, cleanup_schedule_config,
+                    periodic_sent_retention_days, periodic_failed_retention_days,
+                    screenshot_retention_days, report_retention_days,
+                    run_record_retention_days, log_retention_days,
+                    browser_state_retention_days, browser_state_cleanup_enabled,
+                    protect_recent_days
+                )
+            )
+    
+    reload_jobs()
+    return {"ok": True}
+
+
+@api_router.post("/storage/estimate", dependencies=[Depends(require_api_login)])
+def api_estimate_storage() -> dict[str, Any]:
+    from app.cleanup import estimate_cleanup
+    try:
+        res = estimate_cleanup()
+        return {"ok": True, "result": res}
+    except Exception as e:
+        app_logger.error(f"执行预估清理失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"预估清理失败: {e}")
+
+
+@api_router.post("/storage/cleanup", dependencies=[Depends(require_api_login)])
+def api_run_storage_cleanup() -> dict[str, Any]:
+    from app.cleanup import run_cleanup
+    try:
+        res = run_cleanup(mode="manual", dry_run=False)
+        if res.get("status") == "failed" and "系统策略限制" in res.get("error_summary", ""):
+            raise HTTPException(status_code=400, detail=res["error_summary"])
+        return {"ok": True, "result": res}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        app_logger.error(f"执行物理清理失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"执行清理失败: {e}")
+
+
+@api_router.get("/storage/cleanup-runs", dependencies=[Depends(require_api_login)])
+def api_get_cleanup_runs() -> dict[str, Any]:
+    from app.db import connect
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM storage_cleanup_runs ORDER BY id DESC LIMIT 50").fetchall()
+        runs = [dict(row) for row in rows]
+    return {"runs": runs}
+
+
 app.include_router(api_router)
+

@@ -15,6 +15,7 @@ from docx.shared import Inches, Pt
 from docx.text.paragraph import Paragraph
 
 from app.settings import settings
+from app.storage_paths import get_report_dir, resolve_artifact_path
 from app.utils import relative_to_data, safe_name
 
 logger = logging.getLogger("app.report")
@@ -83,28 +84,13 @@ def insert_paragraph_after(paragraph, text=None, style=None):
     return new_para
 
 
-def resolve_artifact_path(file_path: str | Path) -> Path:
-    path = Path(file_path)
-    if path.exists():
-        return path
-
-    path_text = str(file_path).replace("\\", "/")
-    app_data_prefix = "/app/data/"
-    if path_text.startswith(app_data_prefix):
-        mapped = settings.data_dir / path_text[len(app_data_prefix):]
-        if mapped.exists():
-            return mapped
-
-    return path
-
 
 def generate_docx(
     job: dict[str, Any],
     run: dict[str, Any],
     results: list[dict[str, Any]],
 ) -> str:
-    output_dir = settings.report_dir / str(run["id"])
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = get_report_dir(run["id"])
 
     logger.info(f"开始为任务 '{job['name']}' 生成巡检报告 Word 文档 (运行 ID: {run['id']})")
 
@@ -129,7 +115,7 @@ def generate_docx(
             else:
                 start_dt = datetime.strptime(started_at_str, "%Y-%m-%d %H:%M:%S")
             
-            end_dt = datetime.now()
+            end_dt = datetime.now(ZoneInfo(settings.default_timezone))
             finished_at_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
             delta = end_dt.replace(tzinfo=None) - start_dt.replace(tzinfo=None)
             total_seconds = int(delta.total_seconds())
@@ -232,6 +218,8 @@ def generate_docx(
                     
                 logger.info(f"正在往时段 '{period}' 的 Word 章节 '{section_name}' 插入截图项 '{item_name}'...")
                 
+                target_p = doc.paragraphs[item_idx]
+                
                 # Clear paragraphs between item heading and the next heading
                 idx = item_idx + 1
                 deleted_count = 0
@@ -246,10 +234,9 @@ def generate_docx(
                     logger.info(f"清理了该监控项下原有的 {deleted_count} 个过渡段落或旧图")
                     
                 # Insert screenshot
-                target_p = doc.paragraphs[item_idx]
-                new_p = insert_paragraph_after(target_p)
                 image_path = resolve_artifact_path(file_path) if file_path else Path("")
                 if status == "success" and file_path and image_path.exists():
+                    new_p = insert_paragraph_after(target_p)
                     run_el = new_p.add_run()
                     try:
                         run_el.add_picture(str(image_path), width=Inches(6.0))
@@ -258,23 +245,20 @@ def generate_docx(
                         logger.error(f"向 Word 写入图片文件失败: {exc}", exc_info=True)
                         new_p.text = f"图片插入失败：{exc}"
                 else:
-                    logger.warning(f"截图项 '{item_name}' 截图失败，将在 Word 中写入错误原因")
-                    new_p.text = f"截图失败：{error_message or '未知错误'}"
+                    logger.warning(f"截图项 '{item_name}' 截图失败，跳过向 Word 写入任何错误文字")
 
-            # 追加无法与模板完美匹配的截图项（包括用户后来新建的其他看板截图）
-            if unmatched_items:
+            success_unmatched = [item for item in unmatched_items if item.get("status") == "success"]
+            if success_unmatched:
                 doc.add_heading("新增巡检截图", level=1)
-                for item in unmatched_items:
+                for item in success_unmatched:
                     item_name = item.get("item_name") or ""
                     section_name = item.get("section") or item_name
-                    status = item.get("status") or "failed"
                     file_path = item.get("file_path") or ""
-                    error_message = item.get("error_message") or ""
                     image_path = resolve_artifact_path(file_path) if file_path else Path("")
                     
-                    doc.add_heading(section_name, level=2)
-                    p = doc.add_paragraph()
-                    if status == "success" and file_path and image_path.exists():
+                    if file_path and image_path.exists():
+                        doc.add_heading(section_name, level=2)
+                        p = doc.add_paragraph()
                         run_el = p.add_run()
                         try:
                             run_el.add_picture(str(image_path), width=Inches(6.0))
@@ -282,8 +266,6 @@ def generate_docx(
                         except Exception as exc:
                             logger.error(f"向 Word 写入追加图片失败: {exc}", exc_info=True)
                             p.text = f"图片插入失败：{exc}"
-                    else:
-                        p.text = f"截图失败：{error_message or '未知错误'}"
 
             doc.save(output_path)
             logger.info(f"新报告已成功保存至: {output_path}")
@@ -385,18 +367,20 @@ def _add_screenshots(doc: Document, results: list[dict[str, Any]]) -> None:
         return
 
     for section, items in grouped.items():
+        success_items = [it for it in items if it.get("status") == "success"]
+        if not success_items:
+            continue
+            
         doc.add_heading(section, level=2)
-        for item in items:
+        for item in success_items:
             doc.add_paragraph(str(item.get("item_name") or ""), style=None)
             file_path = item.get("file_path") or ""
             image_path = resolve_artifact_path(file_path) if file_path else Path("")
-            if item["status"] == "success" and file_path and image_path.exists():
+            if file_path and image_path.exists():
                 try:
                     doc.add_picture(str(image_path), width=Inches(6.6))
                 except Exception as exc:  # noqa: BLE001 - keep report generation alive.
                     doc.add_paragraph(f"图片插入失败：{exc}")
-            else:
-                doc.add_paragraph(f"截图失败：{item.get('error_message') or '未知错误'}")
             doc.add_paragraph("")
 
 

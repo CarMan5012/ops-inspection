@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from app.settings import settings
 from app.db import connect
+from app.storage_paths import resolve_artifact_path
 from app.repository import (
     get_periodic_report_setting,
     get_periodic_report_run,
@@ -360,7 +361,7 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
             job_temp_dir.mkdir(parents=True, exist_ok=True)
             
             report_copied_path = ""
-            src_report = Path(r["report_path"])
+            src_report = resolve_artifact_path(r["report_path"])
             if src_report.exists():
                 shutil.copy2(src_report, job_temp_dir / src_report.name)
                 report_copied_path = f"{job_folder_name}/{src_report.name}"
@@ -379,13 +380,13 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
                 screenshots_temp_dir.mkdir(parents=True, exist_ok=True)
                 for res in results_rows:
                     if res["file_path"]:
-                        img_path = Path(res["file_path"])
+                        img_path = resolve_artifact_path(res["file_path"])
                         if img_path.exists():
                             shutil.copy2(img_path, screenshots_temp_dir / img_path.name)
                             screenshot_count += 1
             else:
                 for res in results_rows:
-                    if res["file_path"] and Path(res["file_path"]).exists():
+                    if res["file_path"] and resolve_artifact_path(res["file_path"]).exists():
                         screenshot_count += 1
 
             manifest_data["jobs"].append({

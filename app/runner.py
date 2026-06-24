@@ -1,7 +1,10 @@
 import logging
 import traceback
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any
+
+from app.settings import settings
 
 from app.mailer import send_report_mail
 from app.report import generate_docx
@@ -53,7 +56,7 @@ def run_job(job_id: int, run_id: int | None = None) -> int:
                 run_id,
                 report_path=report_path,
                 mail_status="skipped",
-                finished_at=datetime.now().isoformat(timespec="seconds"),
+                finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
             )
             logger.info("无可执行巡检项，任务标记为失败并已返回。")
             return run_id
@@ -98,30 +101,65 @@ def run_job(job_id: int, run_id: int | None = None) -> int:
         logger.info(f"报告生成成功! 存储路径: {report_path}")
         update_run(run_id, report_path=report_path)
 
+        # 判定邮件发信条件
+        send_complete = job.get("send_mail_on_complete")
+        if send_complete is None:
+            send_complete = job.get("send_mail", 0)
+            
+        send_error = job.get("send_mail_on_error")
+        if send_error is None:
+            send_error = 1
+
+        should_send = False
+        if status == "success":
+            should_send = int(send_complete) == 1
+        else:
+            should_send = int(send_error) == 1
+
         mail_status = "skipped"
-        if int(job.get("send_mail") or 0):
-            logger.info("该任务已启用邮件发送，准备发送报告邮件...")
+        if should_send:
+            logger.info(f"触发邮件发信：状态是 {status}，开始准备发信...")
             try:
                 mail_profile = get_mail_profile(job.get("mail_profile_id"))
-                mail_status = send_report_mail(mail_profile or {}, job, report_path)
-                logger.info(f"邮件发送状态: {mail_status}")
+                error_summary = run.get("error_summary") or ""
+                if not error_summary and failed_count > 0:
+                    error_summary = f"本次巡检有 {failed_count} 个截图项抓取失败，请查看附件报告获取详细错误。"
+                mail_status = send_report_mail(mail_profile or {}, job, report_path, error_msg=error_summary)
+                logger.info(f"邮件发送完成，状态: {mail_status}")
             except Exception as exc:  # noqa: BLE001 - saved to run record.
                 mail_status = f"failed: {type(exc).__name__}: {exc}"
                 logger.error(f"发送邮件异常: {mail_status}", exc_info=True)
+                
         update_run(
             run_id,
             mail_status=mail_status,
-            finished_at=datetime.now().isoformat(timespec="seconds"),
+            finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
         )
         logger.info(f"======> 巡检任务 '{job['name']}' (ID: {job_id}, 运行 ID: {run_id}) 执行完毕 <======")
     except Exception as exc:  # noqa: BLE001 - run should keep failure details.
         err_summary = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=5)}"
         logger.error(f"======> 巡检任务 '{job['name']}' 运行中发生未捕获异常: {err_summary}", exc_info=True)
+        
+        send_error = job.get("send_mail_on_error")
+        if send_error is None:
+            send_error = 1
+            
+        mail_status = "skipped"
+        if int(send_error) == 1:
+            try:
+                logger.info("满足巡检异常发信策略，正在发送错误通知邮件...")
+                mail_profile = get_mail_profile(job.get("mail_profile_id"))
+                mail_status = send_report_mail(mail_profile or {}, job, report_path=None, error_msg=err_summary)
+            except Exception as mail_exc:
+                mail_status = f"failed: {type(mail_exc).__name__}: {mail_exc}"
+                logger.error(f"发送错误通知邮件失败: {mail_status}", exc_info=True)
+
         update_run(
             run_id,
             status="failed",
             error_summary=err_summary,
-            finished_at=datetime.now().isoformat(timespec="seconds"),
+            mail_status=mail_status,
+            finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
         )
     return run_id
 
@@ -154,6 +192,6 @@ def test_capture_item(item_id: int) -> int:
         status=result.status,
         success_count=1 if result.status == "success" else 0,
         failed_count=0 if result.status == "success" else 1,
-        finished_at=datetime.now().isoformat(timespec="seconds"),
+        finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
     )
     return run_id

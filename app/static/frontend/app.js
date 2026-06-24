@@ -6,6 +6,7 @@ const state = {
   mailProfiles: [],
   periodic: { settings: [], runs: [] },
   metrics: {},
+  storage: { usage: {}, config: {}, cleanupRuns: [] }
 };
 
 let config = {
@@ -37,7 +38,8 @@ const viewToHash = {
   "runs": "#/runs",
   "periodic": "#/periodic",
   "auth": "#/auth",
-  "mail": "#/mail"
+  "mail": "#/mail",
+  "storage": "#/storage"
 };
 
 function handleRoute() {
@@ -53,6 +55,8 @@ function handleRoute() {
     view = "auth";
   } else if (hash === "#/mail") {
     view = "mail";
+  } else if (hash === "#/storage") {
+    view = "storage";
   }
   setView(view);
 }
@@ -65,6 +69,7 @@ const regions = {
   auth: document.querySelector('[data-region="auth-profiles"]'),
   mail: document.querySelector('[data-region="mail-profiles"]'),
   periodic: document.querySelector('[data-region="periodic"]'),
+  storage: document.querySelector('[data-region="storage-panel"]'),
   toasts: document.querySelector('[data-region="toasts"]'),
   modal: document.querySelector('[data-region="modal"]'),
 };
@@ -176,6 +181,12 @@ function handleAction(action, id, triggerButton = null) {
     deleteResource(`/mail-profiles/${id}`, "邮件配置已删除");
   } else if (action === "run-periodic") {
     runPeriodic(id, triggerButton);
+  } else if (action === "refresh-storage") {
+    loadStorage(true);
+  } else if (action === "estimate-storage") {
+    estimateStorage(triggerButton);
+  } else if (action === "run-storage-cleanup") {
+    runStorageCleanup(triggerButton);
   } else if (action === "close-modal") {
     closeModal();
   }
@@ -189,6 +200,9 @@ function setView(view) {
   document.querySelectorAll("[data-view-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.viewPanel !== view;
   });
+  if (view === "storage") {
+    loadStorage(false);
+  }
 }
 
 async function loadAll(showToast = false) {
@@ -208,6 +222,7 @@ async function loadAll(showToast = false) {
     renderAuthProfiles();
     renderMailProfiles();
     await loadPeriodic(false);
+    await loadStorage(false);
 
     if (showToast) {
       showSuccess("数据已刷新");
@@ -237,6 +252,9 @@ function renderLoading() {
   regions.auth.innerHTML = loadingTable(4);
   regions.mail.innerHTML = loadingTable(4);
   regions.periodic.innerHTML = loadingTable(4);
+  if (regions.storage) {
+    regions.storage.innerHTML = loadingTable(6);
+  }
 }
 
 function renderMetrics() {
@@ -490,30 +508,209 @@ function renderPeriodic() {
   bindDynamicActions(regions.periodic);
 }
 
+function tryParseCronToSimple(cron) {
+  if (!cron) return null;
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [mPart, hPart, domPart, monPart, dowPart] = parts;
+  if (domPart !== "*" || monPart !== "*") return null;
+  
+  let frequency = "daily";
+  if (dowPart === "*" || dowPart === "?") {
+    frequency = "daily";
+  } else if (dowPart === "1-5" || dowPart === "mon-fri" || dowPart === "1,2,3,4,5") {
+    frequency = "workday";
+  } else {
+    return null;
+  }
+  
+  const hours = hPart.split(",").map(Number);
+  const minutes = mPart.split(",").map(Number);
+  if (hours.some(isNaN) || minutes.some(isNaN) || hours.length > 2) return null;
+  
+  if (hours.length === 1) {
+    const h = hours[0];
+    if (minutes.length !== 1) return null;
+    const m = minutes[0];
+    const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    if (h < 12) {
+      return { frequency, morning_enabled: true, morning_time: timeStr, afternoon_enabled: false, afternoon_time: "17:05" };
+    } else {
+      return { frequency, morning_enabled: false, morning_time: "09:05", afternoon_enabled: true, afternoon_time: timeStr };
+    }
+  } else if (hours.length === 2) {
+    const h1 = Math.min(...hours);
+    const h2 = Math.max(...hours);
+    if (h1 >= 12 || h2 < 12) return null;
+    let m1, m2;
+    if (minutes.length === 1) {
+      m1 = m2 = minutes[0];
+    } else if (minutes.length === 2) {
+      m1 = minutes[0];
+      m2 = minutes[1];
+    } else {
+      return null;
+    }
+    return {
+      frequency,
+      morning_enabled: true,
+      morning_time: `${String(h1).padStart(2, '0')}:${String(m1).padStart(2, '0')}`,
+      afternoon_enabled: true,
+      afternoon_time: `${String(h2).padStart(2, '0')}:${String(m2).padStart(2, '0')}`
+    };
+  }
+  return null;
+}
+
+function bindJobFormEvents(form) {
+  if (!form) return;
+  const modeSelect = form.querySelector('#job-schedule-mode-select');
+  const simpleSec = form.querySelector('#simple-schedule-section');
+  const cronSec = form.querySelector('#cron-schedule-section');
+  
+  function updateSections() {
+    const mode = modeSelect.value;
+    if (mode === "simple") {
+      simpleSec.style.display = "grid";
+      cronSec.style.display = "none";
+      form.querySelector('[name="cron_expression"]').required = false;
+    } else {
+      simpleSec.style.display = "none";
+      cronSec.style.display = "grid";
+      form.querySelector('[name="cron_expression"]').required = true;
+    }
+  }
+  
+  modeSelect.addEventListener("change", updateSections);
+  updateSections();
+  
+  const morningCheck = form.querySelector('[name="morning_enabled"]');
+  const morningTimeInput = form.querySelector('[name="morning_time"]');
+  const afternoonCheck = form.querySelector('[name="afternoon_enabled"]');
+  const afternoonTimeInput = form.querySelector('[name="afternoon_time"]');
+  
+  function updateTimeInputs() {
+    morningTimeInput.disabled = !morningCheck.checked;
+    afternoonTimeInput.disabled = !afternoonCheck.checked;
+  }
+  morningCheck.addEventListener("change", updateTimeInputs);
+  afternoonCheck.addEventListener("change", updateTimeInputs);
+  updateTimeInputs();
+}
+
 function openJobModal(job = null) {
   const isEdit = Boolean(job);
+  
+  let scheduleMode = job?.schedule_mode || "simple";
+  let sc = {};
+  if (job?.schedule_config) {
+    try { sc = JSON.parse(job.schedule_config); } catch(e) {}
+  } else if (job?.cron_expression) {
+    sc = tryParseCronToSimple(job.cron_expression) || {};
+    if (Object.keys(sc).length === 0) {
+      scheduleMode = "cron";
+    }
+  }
+  
+  const frequency = sc.frequency || "daily";
+  const morningEnabled = sc.morning_enabled !== undefined ? sc.morning_enabled : true;
+  const morningTime = sc.morning_time || "09:05";
+  const afternoonEnabled = sc.afternoon_enabled !== undefined ? sc.afternoon_enabled : true;
+  const afternoonTime = sc.afternoon_time || "17:05";
+
+  const sendMailOnComplete = job ? asBool(job.send_mail_on_complete) : true;
+  const sendMailOnError = job ? asBool(job.send_mail_on_error) : true;
+
   openModal(isEdit ? "修改巡检任务" : "新增巡检任务", `
     <form class="form-grid wide" data-form="job">
       ${field("任务名称", "name", job?.name || "", "text", true)}
       ${field("运行环境", "environment", job?.environment || "生产环境")}
-      ${field("Cron 表达式", "cron_expression", job?.cron_expression || "0 9 * * *", "text", true)}
-      ${field("计划说明", "schedule_label", job?.schedule_label || "")}
-      ${field("时间范围", "time_range_label", job?.time_range_label || "最近 24 小时")}
-      ${field("报告标题", "report_title", job?.report_title || "自动化巡检报告")}
+      
+      <div class="span-2" style="border-top: 1px solid #ddd; margin: 5px 0; padding-top: 10px;">
+        <strong>定时巡检计划配置：</strong>
+      </div>
+      
+      <label class="span-2">
+        巡检定时模式
+        <select name="schedule_mode" id="job-schedule-mode-select">
+          <option value="simple" ${scheduleMode === "simple" ? "selected" : ""}>简易时间配置 (推荐)</option>
+          <option value="cron" ${scheduleMode === "cron" ? "selected" : ""}>高级 Cron 表达式模式</option>
+        </select>
+      </label>
+      
+      <!-- 简易配置容器 -->
+      <div id="simple-schedule-section" class="span-2 form-grid wide" style="padding: 0; gap: 15px;">
+        <label class="span-2">
+          巡检频率
+          <select name="frequency">
+            <option value="daily" ${frequency === "daily" ? "selected" : ""}>每天</option>
+            <option value="workday" ${frequency === "workday" ? "selected" : ""}>周一到周五</option>
+          </select>
+        </label>
+        
+        <label class="check">
+          <input type="checkbox" name="morning_enabled" ${morningEnabled ? "checked" : ""}>
+          启用上午巡检
+        </label>
+        <label>
+          上午时间
+          <input type="time" name="morning_time" value="${escapeAttr(morningTime)}">
+        </label>
+        
+        <label class="check">
+          <input type="checkbox" name="afternoon_enabled" ${afternoonEnabled ? "checked" : ""}>
+          启用下午巡检
+        </label>
+        <label>
+          下午时间
+          <input type="time" name="afternoon_time" value="${escapeAttr(afternoonTime)}">
+        </label>
+      </div>
+      
+      <!-- 高级 Cron 表达式配置 -->
+      <div id="cron-schedule-section" class="span-2 form-grid wide" style="padding: 0; gap: 15px; display: none;">
+        ${field("Cron 表达式", "cron_expression", job?.cron_expression || "0 9 * * *", "text", false)}
+        ${field("计划说明 (选填)", "schedule_label", job?.schedule_label || "")}
+      </div>
+
+      <div class="span-2" style="border-top: 1px solid #ddd; margin: 5px 0; padding-top: 10px;">
+        <strong>发信与浏览器配置：</strong>
+      </div>
+      
       ${selectField("邮件配置", "mail_profile_id", job?.mail_profile_id || "", state.mailProfiles.map((profile) => [profile.id, profile.name]))}
-      ${field("浏览器宽度", "browser_width", job?.browser_width || 1920, "number")}
-      ${field("浏览器高度", "browser_height", job?.browser_height || 1080, "number")}
+      ${field("时间范围", "time_range_label", job?.time_range_label || "最近 24 小时")}
+      
+      <label class="check">
+        <input type="checkbox" name="send_mail_on_complete" ${sendMailOnComplete ? "checked" : ""}>
+        巡检完成后发送邮件
+      </label>
+      <label class="check">
+        <input type="checkbox" name="send_mail_on_error" ${sendMailOnError ? "checked" : ""}>
+        巡检异常时发送邮件
+      </label>
+      
+      <details class="advanced-settings span-2">
+        <summary>高级浏览器设置</summary>
+        <div class="form-grid wide advanced-grid">
+          ${field("报告标题", "report_title", job?.report_title || "自动化巡检报告")}
+          ${field("浏览器宽度", "browser_width", job?.browser_width || 1920, "number")}
+          ${field("浏览器高度", "browser_height", job?.browser_height || 1080, "number")}
+          ${checkField("无头浏览器", "headless", job ? asBool(job.headless) : true)}
+        </div>
+      </details>
+      
       ${checkField("启用任务", "enabled", job ? asBool(job.enabled) : true)}
-      ${checkField("生成后发邮件", "send_mail", job ? asBool(job.send_mail) : false)}
-      ${checkField("无头浏览器", "headless", job ? asBool(job.headless) : true)}
-      <div class="form-actions span-2">
+ 
+      <div class="form-actions span-2" style="margin-top: 10px;">
         <button class="button" type="button" data-action="close-modal">取消</button>
         <button class="button primary" type="submit">${isEdit ? "保存修改" : "创建任务"}</button>
       </div>
     </form>
   `);
-
+ 
   const form = regions.modal.querySelector('[data-form="job"]');
+  bindJobFormEvents(form);
+  
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     await submitForm(form, isEdit ? `/jobs/${job.id}` : "/jobs", isEdit ? "PUT" : "POST", isEdit ? "任务已更新" : "任务已创建");
@@ -1058,3 +1255,373 @@ function escapeHtml(value) {
 function escapeAttr(value) {
   return escapeHtml(value).replaceAll("`", "&#096;");
 }
+
+async function loadStorage(showToast = false) {
+  if (!regions.storage) return;
+  try {
+    const data = await apiGet("/storage");
+    state.storage.usage = data.usage || {};
+    state.storage.config = data.config || {};
+    
+    const runsData = await apiGet("/storage/cleanup-runs");
+    state.storage.cleanupRuns = runsData.runs || [];
+    
+    renderStorage();
+    if (showToast) {
+      showSuccess("存储状态数据已刷新");
+    }
+  } catch (error) {
+    renderError(regions.storage, error);
+  }
+}
+
+function renderStorage() {
+  if (!regions.storage) return;
+  const usage = state.storage.usage || {};
+  const config = state.storage.config || {};
+  const cleanupRuns = state.storage.cleanupRuns || [];
+  
+  let scheduleCfg = {};
+  if (config.cleanup_schedule_config) {
+    try {
+      scheduleCfg = JSON.parse(config.cleanup_schedule_config);
+    } catch (e) {
+      console.error("解析清理计划配置失败:", e);
+    }
+  }
+  const scheduleTime = scheduleCfg.time || "02:30";
+  const dayOfWeek = scheduleCfg.day_of_week || "1";
+  const dayOfMonth = scheduleCfg.day_of_month || "1";
+
+  const storageMetricsHTML = `
+    <div class="metrics-grid">
+      <div>
+        <span>Data 目录总占用</span>
+        <strong>${formatBytes(usage.total_bytes || 0)}</strong>
+      </div>
+      <div>
+        <span>巡检截图占用</span>
+        <strong>${formatBytes(usage.screenshots_bytes || 0)}</strong>
+      </div>
+      <div>
+        <span>Word 报告占用</span>
+        <strong>${formatBytes(usage.reports_bytes || 0)}</strong>
+      </div>
+      <div>
+        <span>数据库文件大小</span>
+        <strong>${formatBytes(usage.sqlite_db_bytes || 0)}</strong>
+      </div>
+    </div>
+  `;
+  
+  const detailsHTML = `
+    <div class="card-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
+      <div class="panel">
+        <div class="panel-header">
+          <h3>物理目录细分占用</h3>
+        </div>
+        <table>
+          <tbody>
+            <tr><td>周期汇总 Zip 报告</td><td><strong>${formatBytes(usage.periodic_reports_bytes || 0)}</strong></td></tr>
+            <tr><td>历史运行日志文件</td><td><strong>${formatBytes(usage.logs_bytes || 0)}</strong></td></tr>
+            <tr><td>浏览器 session 缓存</td><td><strong>${formatBytes(usage.browser_state_bytes || 0)}</strong></td></tr>
+          </tbody>
+        </table>
+        
+        <div class="panel-header" style="margin-top: 20px;">
+          <h3>空间回收操作</h3>
+        </div>
+        <div style="padding: 10px 0;">
+          <p class="muted">预估可清理空间: <strong class="ok-text" id="est-bytes-text">${formatBytes(usage.estimated_cleanup_bytes || 0)}</strong> (共 <strong id="est-files-text">${usage.estimated_cleanup_files || 0}</strong> 个文件)</p>
+          <div class="action-row" style="margin-top: 10px;">
+            <button class="button" type="button" data-action="estimate-storage">预估可清理空间</button>
+            <button class="button danger" type="button" data-action="run-storage-cleanup">立即执行清理</button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="panel">
+        <div class="panel-header">
+          <h3>数据保留与自动清理策略配置</h3>
+        </div>
+        <form class="form-grid" data-form="storage-settings">
+          <label class="check span-2">
+            <input type="checkbox" name="enabled" ${asBool(config.enabled) ? "checked" : ""}>
+            开启自动定时清理任务
+          </label>
+          
+          <label>
+            自动清理频率
+            <select name="cleanup_schedule_mode">
+              <option value="daily" ${config.cleanup_schedule_mode === "daily" ? "selected" : ""}>每天</option>
+              <option value="weekly" ${config.cleanup_schedule_mode === "weekly" ? "selected" : ""}>每周</option>
+              <option value="monthly" ${config.cleanup_schedule_mode === "monthly" ? "selected" : ""}>每月</option>
+            </select>
+          </label>
+          
+          <label>
+            清理触发时间
+            <input type="time" name="schedule_time" value="${escapeAttr(scheduleTime)}" required>
+          </label>
+          
+          <label id="storage-dow-label">
+            选择星期几
+            <select name="schedule_day_of_week">
+              <option value="1" ${String(dayOfWeek) === "1" ? "selected" : ""}>周一</option>
+              <option value="2" ${String(dayOfWeek) === "2" ? "selected" : ""}>周二</option>
+              <option value="3" ${String(dayOfWeek) === "3" ? "selected" : ""}>周三</option>
+              <option value="4" ${String(dayOfWeek) === "4" ? "selected" : ""}>周四</option>
+              <option value="5" ${String(dayOfWeek) === "5" ? "selected" : ""}>周五</option>
+              <option value="6" ${String(dayOfWeek) === "6" ? "selected" : ""}>周六</option>
+              <option value="7" ${String(dayOfWeek) === "7" ? "selected" : ""}>周日</option>
+            </select>
+          </label>
+          
+          <label id="storage-dom-label">
+            选择几号触发 (1-31)
+            <input type="number" name="schedule_day_of_month" min="1" max="31" value="${escapeAttr(dayOfMonth)}">
+          </label>
+          
+          <label class="check span-2">
+            <input type="checkbox" name="allow_manual_cleanup" ${asBool(config.allow_manual_cleanup) ? "checked" : ""}>
+            允许前端手动触发“立即清理”
+          </label>
+          
+          <div class="span-2" style="border-top: 1px solid #ddd; margin: 10px 0; padding-top: 10px;">
+            <strong>各类数据保留天数：</strong>
+          </div>
+          
+          <label>
+            已发送周期报告 (天)
+            <input type="number" name="periodic_sent_retention_days" min="1" value="${config.periodic_sent_retention_days || 3}" required>
+          </label>
+          
+          <label>
+            发送失败周期报告 (天)
+            <input type="number" name="periodic_failed_retention_days" min="1" value="${config.periodic_failed_retention_days || 30}" required>
+          </label>
+          
+          <label>
+            普通巡检截图 (天)
+            <input type="number" name="screenshot_retention_days" min="1" value="${config.screenshot_retention_days || 7}" required>
+          </label>
+          
+          <label>
+            普通巡检 Word 报告 (天)
+            <input type="number" name="report_retention_days" min="1" value="${config.report_retention_days || 30}" required>
+          </label>
+          
+          <label>
+            运行日志文件 (天)
+            <input type="number" name="log_retention_days" min="1" value="${config.log_retention_days || 14}" required>
+          </label>
+          
+          <label>
+            运行记录数据库数据 (天)
+            <input type="number" name="run_record_retention_days" min="1" value="${config.run_record_retention_days || 90}" required>
+          </label>
+          
+          <label class="check span-2">
+            <input type="checkbox" name="browser_state_cleanup_enabled" ${asBool(config.browser_state_cleanup_enabled) ? "checked" : ""}>
+            启用自动清理浏览器 session 缓存
+          </label>
+          
+          <label id="storage-browser-retention-label">
+            浏览器 session 缓存 (天)
+            <input type="number" name="browser_state_retention_days" min="1" value="${config.browser_state_retention_days || 30}" required>
+          </label>
+          
+          <label>
+            数据安全保护天数 (天)
+            <input type="number" name="protect_recent_days" min="1" value="${config.protect_recent_days || 3}" required>
+            <span class="muted" style="font-size: 11px; display: block; margin-top: 4px;">近这几天内的任何数据决不物理删除。</span>
+          </label>
+          
+          <div class="form-actions span-2" style="margin-top: 15px;">
+            <button class="button primary" type="submit">保存保留策略配置</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+
+  const historyHTML = `
+    <div class="panel" style="margin-top: 20px;">
+      <div class="panel-header">
+        <h2>清理日志与最近清理结果</h2>
+      </div>
+      ${cleanupRuns.length ? `
+        <table>
+          <thead>
+            <tr>
+              <th>编号</th>
+              <th>触发模式</th>
+              <th>执行状态</th>
+              <th>开始时间</th>
+              <th>删除文件数</th>
+              <th>释放空间</th>
+              <th>清理运行记录数</th>
+              <th>说明 / 失败日志</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${cleanupRuns.map((run) => `
+              <tr>
+                <td>#${run.id}</td>
+                <td><code>${run.mode === "auto" ? "定时自动" : run.mode === "manual" ? "手动触发" : "空间预估"}</code></td>
+                <td>${statusBadge(run.status, run.status === "success" ? "成功" : run.status === "partial_success" ? "部分成功" : "失败")}</td>
+                <td>${escapeHtml(shortDate(run.started_at))}</td>
+                <td>${numberText(run.deleted_files_count)} 个</td>
+                <td><strong>${formatBytes(run.deleted_bytes)}</strong></td>
+                <td>${numberText(run.deleted_run_records_count)} 条</td>
+                <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeAttr(run.error_summary || "")}">
+                  ${run.error_summary ? `<span class="bad-text">${escapeHtml(run.error_summary)}</span>` : '<span class="ok-text">执行完成，无异常</span>'}
+                </td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      ` : `<div class="empty">暂无清理任务执行历史。</div>`}
+    </div>
+  `;
+
+  regions.storage.innerHTML = storageMetricsHTML + detailsHTML + historyHTML;
+  
+  const form = regions.storage.querySelector('[data-form="storage-settings"]');
+  bindStorageFormEvents(form);
+  bindDynamicActions(regions.storage);
+}
+
+function bindStorageFormEvents(form) {
+  if (!form) return;
+  
+  const modeSelect = form.querySelector('[name="cleanup_schedule_mode"]');
+  const dowLabel = form.querySelector('#storage-dow-label');
+  const domLabel = form.querySelector('#storage-dom-label');
+  const bsCheckbox = form.querySelector('[name="browser_state_cleanup_enabled"]');
+  const bsLabel = form.querySelector('#storage-browser-retention-label');
+
+  function updateScheduleFields() {
+    const mode = modeSelect.value;
+    if (mode === "daily") {
+      dowLabel.style.display = "none";
+      domLabel.style.display = "none";
+    } else if (mode === "weekly") {
+      dowLabel.style.display = "";
+      domLabel.style.display = "none";
+    } else if (mode === "monthly") {
+      dowLabel.style.display = "none";
+      domLabel.style.display = "";
+    }
+  }
+
+  function updateBrowserFields() {
+    const enabled = bsCheckbox.checked;
+    const input = bsLabel.querySelector('input');
+    input.disabled = !enabled;
+    if (!enabled) {
+      bsLabel.style.opacity = "0.5";
+    } else {
+      bsLabel.style.opacity = "1";
+    }
+  }
+
+  modeSelect.addEventListener("change", updateScheduleFields);
+  bsCheckbox.addEventListener("change", updateBrowserFields);
+  
+  updateScheduleFields();
+  updateBrowserFields();
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submitButton = form.querySelector('button[type="submit"]');
+    setButtonLoading(submitButton, true);
+    
+    try {
+      const payload = formToPayload(form);
+      
+      const scheduleConfig = {
+        time: form.querySelector('[name="schedule_time"]').value || "02:30"
+      };
+      if (payload.cleanup_schedule_mode === "weekly") {
+        scheduleConfig.day_of_week = form.querySelector('[name="schedule_day_of_week"]').value || "1";
+      } else if (payload.cleanup_schedule_mode === "monthly") {
+        scheduleConfig.day_of_month = form.querySelector('[name="schedule_day_of_month"]').value || "1";
+      }
+      
+      payload.cleanup_schedule_config = JSON.stringify(scheduleConfig);
+      
+      delete payload.schedule_time;
+      delete payload.schedule_day_of_week;
+      delete payload.schedule_day_of_month;
+      
+      await apiJson("/storage/settings", { method: "PUT", body: payload });
+      showSuccess("数据保留策略配置保存成功！");
+      await loadStorage(false);
+    } catch (error) {
+      showError(error.message || "配置保存失败，请检查输入参数。");
+    } finally {
+      setButtonLoading(submitButton, false);
+    }
+  });
+}
+
+async function estimateStorage(btn) {
+  setButtonLoading(btn, true);
+  try {
+    showToast("正在预估清理空间，请稍候...", "info");
+    const result = await apiJson("/storage/estimate", { method: "POST" });
+    if (result.ok && result.result) {
+      const res = result.result;
+      const bytesEl = document.getElementById("est-bytes-text");
+      const filesEl = document.getElementById("est-files-text");
+      if (bytesEl) bytesEl.innerText = formatBytes(res.deleted_bytes);
+      if (filesEl) filesEl.innerText = String(res.deleted_files_count);
+      showSuccess(`预估成功！可释放空间约 ${formatBytes(res.deleted_bytes)}，文件数 ${res.deleted_files_count} 个`);
+    } else {
+      showError("预估空间返回失败。");
+    }
+  } catch (error) {
+    showError(error.message || "空间预估失败。");
+  } finally {
+    setButtonLoading(btn, false);
+  }
+}
+
+async function runStorageCleanup(btn) {
+  const confirmed = await showConfirm({
+    title: "安全警告 - 立即执行清理",
+    message: "您确定要立刻物理删除所有超出保留天数的数据文件吗？本操作将永久清理相关截图、报告和日志且不可恢复。请确认操作！",
+    confirmText: "立即清理",
+    cancelText: "取消",
+    danger: true
+  });
+  if (!confirmed) return;
+
+  setButtonLoading(btn, true);
+  try {
+    showToast("清理任务已开始执行，物理清扫中...", "info");
+    const result = await apiJson("/storage/cleanup", { method: "POST" });
+    if (result.ok && result.result) {
+      const res = result.result;
+      showSuccess(`物理清理执行完成！共成功删除文件数 ${res.deleted_files_count} 个，释放物理空间 ${formatBytes(res.deleted_bytes)}`);
+      await loadStorage(false);
+    } else {
+      showError("清理执行返回异常。");
+    }
+  } catch (error) {
+    showError(error.message || "立即清理失败，可能被系统安全策略拦截。");
+  } finally {
+    setButtonLoading(btn, false);
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes === undefined || bytes === null || isNaN(bytes)) return "-";
+  if (bytes === 0) return "0 Bytes";
+  const k = 1024;
+  const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+}
+

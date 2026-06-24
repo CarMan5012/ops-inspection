@@ -162,6 +162,43 @@ def init_db() -> None:
                 started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 finished_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS storage_cleanup_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                allow_manual_cleanup INTEGER NOT NULL DEFAULT 1,
+                cleanup_schedule_mode TEXT NOT NULL DEFAULT 'daily',
+                cleanup_schedule_label TEXT NOT NULL DEFAULT '每天 02:30',
+                cleanup_schedule_config TEXT NOT NULL DEFAULT '',
+                periodic_sent_retention_days INTEGER NOT NULL DEFAULT 3,
+                periodic_failed_retention_days INTEGER NOT NULL DEFAULT 30,
+                screenshot_retention_days INTEGER NOT NULL DEFAULT 7,
+                report_retention_days INTEGER NOT NULL DEFAULT 30,
+                run_record_retention_days INTEGER NOT NULL DEFAULT 90,
+                log_retention_days INTEGER NOT NULL DEFAULT 14,
+                browser_state_retention_days INTEGER NOT NULL DEFAULT 30,
+                browser_state_cleanup_enabled INTEGER NOT NULL DEFAULT 0,
+                protect_recent_days INTEGER NOT NULL DEFAULT 3,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS storage_cleanup_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mode TEXT NOT NULL DEFAULT 'auto',
+                status TEXT NOT NULL DEFAULT 'success',
+                started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                finished_at TEXT,
+                deleted_files_count INTEGER NOT NULL DEFAULT 0,
+                deleted_bytes INTEGER NOT NULL DEFAULT 0,
+                deleted_screenshots_count INTEGER NOT NULL DEFAULT 0,
+                deleted_reports_count INTEGER NOT NULL DEFAULT 0,
+                deleted_periodic_archives_count INTEGER NOT NULL DEFAULT 0,
+                deleted_logs_count INTEGER NOT NULL DEFAULT 0,
+                deleted_browser_state_count INTEGER NOT NULL DEFAULT 0,
+                deleted_run_records_count INTEGER NOT NULL DEFAULT 0,
+                error_summary TEXT DEFAULT '',
+                detail_json TEXT DEFAULT ''
+            );
             """
         )
         
@@ -184,12 +221,20 @@ def init_db() -> None:
             ("periodic_report_settings", "send_on_timeout", "INTEGER DEFAULT 1"),
             ("periodic_report_settings", "load_error", "TEXT DEFAULT ''"),
             ("screenshot_items", "real_browser_capture", "INTEGER DEFAULT 1"),
+            ("report_jobs", "send_mail_on_complete", "INTEGER DEFAULT 1"),
+            ("report_jobs", "send_mail_on_error", "INTEGER DEFAULT 1"),
         ]
         for table, col, t in migrations:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {t}")
             except sqlite3.OperationalError:
                 pass # 列已存在时直接忽略，保证平滑向后兼容
+
+        # 兼容同步老数据中的邮件发送配置
+        try:
+            conn.execute("UPDATE report_jobs SET send_mail_on_complete = send_mail WHERE send_mail IS NOT NULL")
+        except sqlite3.OperationalError:
+            pass
 
         seed_defaults(conn)
         sync_from_env_if_empty()
@@ -444,6 +489,25 @@ def seed_defaults(conn: sqlite3.Connection) -> None:
              '{"frequency": "monthly_last", "day_of_week": "1", "day_of_month": "1", "times": [{"ampm": "pm", "hour": 6, "minute": 0}]}'),
         )
 
+    # Seed storage cleanup settings
+    cleanup_count = conn.execute("SELECT COUNT(*) FROM storage_cleanup_settings").fetchone()[0]
+    if cleanup_count == 0:
+        conn.execute(
+            """
+            INSERT INTO storage_cleanup_settings (
+                enabled, allow_manual_cleanup, cleanup_schedule_mode, cleanup_schedule_label, cleanup_schedule_config,
+                periodic_sent_retention_days, periodic_failed_retention_days, screenshot_retention_days,
+                report_retention_days, run_record_retention_days, log_retention_days,
+                browser_state_retention_days, browser_state_cleanup_enabled, protect_recent_days
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1, 1, "daily", "每天 02:30",
+                '{"frequency": "daily", "time": "02:30"}',
+                3, 30, 7, 30, 90, 14, 30, 0, 3
+            )
+        )
+
 
 def reset_database_data() -> None:
     """一键删除重置所有本地测试数据及物理目录文件"""
@@ -461,6 +525,8 @@ def reset_database_data() -> None:
     with connect() as conn:
         conn.execute("PRAGMA foreign_keys = OFF")
         tables = [
+            "storage_cleanup_runs",
+            "storage_cleanup_settings",
             "periodic_report_runs",
             "periodic_report_settings",
             "screenshot_results",

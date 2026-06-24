@@ -9,7 +9,7 @@ from typing import Any
 from app.utils import parse_csv, render_template, today_text, resolve_mail_credential
 
 
-def send_report_mail(mail_profile: dict[str, Any], job: dict[str, Any], report_path: str) -> str:
+def send_report_mail(mail_profile: dict[str, Any], job: dict[str, Any], report_path: str | None, error_msg: str = "") -> str:
     if not mail_profile:
         return "skipped: no mail profile"
     if not mail_profile.get("smtp_host"):
@@ -33,16 +33,22 @@ def send_report_mail(mail_profile: dict[str, Any], job: dict[str, Any], report_p
     message["To"] = ", ".join(recipients)
     if cc:
         message["Cc"] = ", ".join(cc)
-    message.set_content(render_template(str(mail_profile.get("body_template") or ""), context))
+        
+    body_text = render_template(str(mail_profile.get("body_template") or ""), context)
+    if error_msg:
+        body_text += f"\n\n[系统提示] 该巡检任务执行期间发生异常，未生成巡检报告。错误详情如下：\n{error_msg}"
+    message.set_content(body_text)
 
-    path = Path(report_path)
-    with path.open("rb") as file_obj:
-        message.add_attachment(
-            file_obj.read(),
-            maintype="application",
-            subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=path.name,
-        )
+    if report_path:
+        path = Path(report_path)
+        if path.exists() and path.is_file():
+            with path.open("rb") as file_obj:
+                message.add_attachment(
+                    file_obj.read(),
+                    maintype="application",
+                    subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    filename=path.name,
+                )
 
     host = str(mail_profile["smtp_host"])
     port = int(mail_profile.get("smtp_port") or 465)
