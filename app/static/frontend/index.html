@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="自动化巡检报告系统">
+  <title>自动化巡检报告系统</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/frontend/styles.css">
+  <script src="/static/frontend/app.js" defer></script>
+</head>
+
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">自动化巡检</a>
+    <nav class="nav">
+      <a class="nav-link active" href="/#/jobs" data-view="dashboard">巡检任务</a>
+      <a class="nav-link" href="/#/runs" data-view="runs">运行记录</a>
+      <a class="nav-link" href="/#/periodic" data-view="periodic">周期报告</a>
+      <a class="nav-link" href="/#/auth" data-view="auth">认证配置</a>
+      <a class="nav-link" href="/#/mail" data-view="mail">邮件配置</a>
+      <a href="/logout">退出登录</a>
+    </nav>
+  </header>
+
+  <main class="shell">
+    <section data-view-panel="dashboard">
+      <div class="page-head">
+        <div>
+          <h1>巡检任务</h1>
+          <p class="muted">通过前端静态页面调用后端 <code>/api</code> 接口管理任务、运行记录和基础配置。</p>
+        </div>
+        <div class="action-row">
+          <button class="button" type="button" data-action="refresh">刷新数据</button>
+          <button class="button primary" type="button" data-action="new-job">新增任务</button>
+        </div>
+      </div>
+
+      <div class="metrics-grid" data-region="metrics"></div>
+
+      <div class="section-title">
+        <h2>巡检任务</h2>
+        <button class="button" type="button" data-action="new-job">新增任务</button>
+      </div>
+      <section class="panel" data-region="jobs"></section>
+
+      <div class="section-title">
+        <h2>最近运行</h2>
+        <button class="button" type="button" data-view-shortcut="runs">查看全部</button>
+      </div>
+      <section class="panel" data-region="recent-runs"></section>
+    </section>
+
+    <section data-view-panel="runs" hidden>
+      <div class="page-head">
+        <div>
+          <h1>运行记录</h1>
+          <p class="muted">查看巡检任务执行状态、截图数量、报告下载和邮件发送结果。</p>
+        </div>
+        <button class="button" type="button" data-action="refresh">刷新数据</button>
+      </div>
+      <section class="panel" data-region="runs"></section>
+    </section>
+
+    <section data-view-panel="periodic" hidden>
+      <div class="page-head">
+        <div>
+          <h1>周期报告</h1>
+          <p class="muted">查看周期汇总配置和历史压缩包。</p>
+        </div>
+        <button class="button" type="button" data-action="refresh-periodic">刷新数据</button>
+      </div>
+      <section class="panel" data-region="periodic"></section>
+    </section>
+
+    <section data-view-panel="auth" hidden>
+      <div class="page-head">
+        <div>
+          <h1>认证配置</h1>
+          <p class="muted">管理登录凭据，认证配置可直接在当前页面测试登录。</p>
+        </div>
+        <div class="action-row">
+          <button class="button primary" type="button" data-action="new-auth">新增认证</button>
+        </div>
+      </div>
+      <section class="panel" data-region="auth-profiles"></section>
+    </section>
+
+    <section data-view-panel="mail" hidden>
+      <div class="page-head">
+        <div>
+          <h1>邮件配置</h1>
+          <p class="muted">管理发送巡检报告的 SMTP 邮箱配置。</p>
+        </div>
+        <div class="action-row">
+          <button class="button primary" type="button" data-action="new-mail">新增邮箱</button>
+        </div>
+      </div>
+      <section class="panel" data-region="mail-profiles"></section>
+    </section>
+  </main>
+
+  <div class="toast-container" data-region="toasts"></div>
+  <div class="modal-root" data-region="modal" hidden></div>
+  <div class="confirm-root" data-region="confirm" hidden></div>
+</body>
+
+</html>

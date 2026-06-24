@@ -353,6 +353,19 @@ textarea {
   line-height: 1.4;
 }
 
+.advanced-settings {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #f9fafb;
+}
+
+.advanced-settings summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-color);
+}
+
 /* 长文本换行支持 */
 .url-text {
   max-width: 520px;

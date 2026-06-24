@@ -76,10 +76,6 @@ def mask_value(value: str) -> str:
     return value[:3] + "***"
 
 
-def env_status(env_name: str) -> dict[str, bool | str]:
-    """已废弃：由于取消环境变量统一页面配置，不再检查环境变量状态"""
-    return {"status": "已废弃", "value": "-", "loaded": False}
-
 
 def resolve_auth_credential(profile: dict[str, Any]) -> dict[str, str]:
     """解析认证的用户名与密码，统一使用页面保存的直填值"""
@@ -107,12 +103,6 @@ def resolve_mail_credential(profile: dict[str, Any]) -> str:
         password = str(profile.get("password") or "")
             
     return password
-
-
-def sync_credentials_from_env() -> None:
-    """已废弃：系统不再从环境变量同步凭据"""
-    pass
-
 
 
 def times_to_cron(

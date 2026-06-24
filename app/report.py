@@ -83,6 +83,21 @@ def insert_paragraph_after(paragraph, text=None, style=None):
     return new_para
 
 
+def resolve_artifact_path(file_path: str | Path) -> Path:
+    path = Path(file_path)
+    if path.exists():
+        return path
+
+    path_text = str(file_path).replace("\\", "/")
+    app_data_prefix = "/app/data/"
+    if path_text.startswith(app_data_prefix):
+        mapped = settings.data_dir / path_text[len(app_data_prefix):]
+        if mapped.exists():
+            return mapped
+
+    return path
+
+
 def generate_docx(
     job: dict[str, Any],
     run: dict[str, Any],
@@ -201,6 +216,8 @@ def generate_docx(
                     if "巡检时间：" in p.text:
                         break
                     p_text_clean = normalize_section_name(p.text)
+                    if not p_text_clean:
+                        continue
                     if any(
                         clean_candidate in p_text_clean or p_text_clean in clean_candidate
                         for clean_candidate in clean_candidates
@@ -231,11 +248,12 @@ def generate_docx(
                 # Insert screenshot
                 target_p = doc.paragraphs[item_idx]
                 new_p = insert_paragraph_after(target_p)
-                if status == "success" and file_path and Path(file_path).exists():
+                image_path = resolve_artifact_path(file_path) if file_path else Path("")
+                if status == "success" and file_path and image_path.exists():
                     run_el = new_p.add_run()
                     try:
-                        run_el.add_picture(file_path, width=Inches(6.0))
-                        logger.info(f"成功将截图图片写入文档: {file_path}")
+                        run_el.add_picture(str(image_path), width=Inches(6.0))
+                        logger.info(f"成功将截图图片写入文档: {image_path}")
                     except Exception as exc:
                         logger.error(f"向 Word 写入图片文件失败: {exc}", exc_info=True)
                         new_p.text = f"图片插入失败：{exc}"
@@ -252,14 +270,15 @@ def generate_docx(
                     status = item.get("status") or "failed"
                     file_path = item.get("file_path") or ""
                     error_message = item.get("error_message") or ""
+                    image_path = resolve_artifact_path(file_path) if file_path else Path("")
                     
                     doc.add_heading(section_name, level=2)
                     p = doc.add_paragraph()
-                    if status == "success" and file_path and Path(file_path).exists():
+                    if status == "success" and file_path and image_path.exists():
                         run_el = p.add_run()
                         try:
-                            run_el.add_picture(file_path, width=Inches(6.0))
-                            logger.info(f"成功将未在模板匹配的截图追加至新增章节: {file_path}")
+                            run_el.add_picture(str(image_path), width=Inches(6.0))
+                            logger.info(f"成功将未在模板匹配的截图追加至新增章节: {image_path}")
                         except Exception as exc:
                             logger.error(f"向 Word 写入追加图片失败: {exc}", exc_info=True)
                             p.text = f"图片插入失败：{exc}"
@@ -369,9 +388,11 @@ def _add_screenshots(doc: Document, results: list[dict[str, Any]]) -> None:
         doc.add_heading(section, level=2)
         for item in items:
             doc.add_paragraph(str(item.get("item_name") or ""), style=None)
-            if item["status"] == "success" and item.get("file_path") and Path(item["file_path"]).exists():
+            file_path = item.get("file_path") or ""
+            image_path = resolve_artifact_path(file_path) if file_path else Path("")
+            if item["status"] == "success" and file_path and image_path.exists():
                 try:
-                    doc.add_picture(item["file_path"], width=Inches(6.6))
+                    doc.add_picture(str(image_path), width=Inches(6.6))
                 except Exception as exc:  # noqa: BLE001 - keep report generation alive.
                     doc.add_paragraph(f"图片插入失败：{exc}")
             else:

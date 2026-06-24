@@ -6,7 +6,7 @@
     <p class="muted">{{ run.job_name }} · {{ run.status | status_label }} · 开始于 {{ run.started_at }}</p>
   </div>
   {% if run.report_url %}
-  <a class="button primary" href="{{ run.report_url }}" style="font-weight: 600;">📥 下载 Word 报告</a>
+  <a class="button primary" href="{{ run.report_url }}" style="font-weight: 600;">下载 Word 报告</a>
   {% endif %}
 </div>
 
@@ -33,14 +33,14 @@
 <!-- 运行异常摘要 -->
 {% if run.error_summary %}
 <div class="panel" style="border-left: 4px solid var(--danger); background: #fef2f2; padding: 16px; margin-bottom: 20px;">
-  <strong style="color: var(--danger); display: block; font-size: 14px; margin-bottom: 8px;">❌ 运行异常摘要</strong>
+  <strong style="color: var(--danger); display: block; font-size: 14px; margin-bottom: 8px;">运行异常摘要</strong>
   <pre style="margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 12px; color: var(--danger); word-break: break-all;">{{ run.error_summary }}</pre>
 </div>
 {% endif %}
 
 <!-- 运行截图明细 -->
 <section class="panel">
-  <h3 style="margin-bottom: 16px; font-size: 14px; border-left: 4px solid var(--primary); padding-left: 8px; font-weight: 600; color: var(--text-color);">📋 截图结果清单</h3>
+  <h3 style="margin-bottom: 16px; font-size: 14px; border-left: 4px solid var(--primary); padding-left: 8px; font-weight: 600; color: var(--text-color);">截图结果清单</h3>
   <table>
     <thead><tr><th>截图名称</th><th>所属报告章节</th><th>执行状态</th><th>本地图片</th><th>错误日志 / 诊断信息</th></tr></thead>
     <tbody>
@@ -77,7 +77,7 @@
 <!-- 大图预览网格 -->
 {% if results and results | selectattr('file_url') | list | length > 0 %}
 <section style="margin-top: 30px;">
-  <h3 style="margin-bottom: 16px; font-size: 14px; border-left: 4px solid var(--primary); padding-left: 8px; font-weight: 600; color: var(--text-color);">📷 截图结果预览</h3>
+  <h3 style="margin-bottom: 16px; font-size: 14px; border-left: 4px solid var(--primary); padding-left: 8px; font-weight: 600; color: var(--text-color);">截图结果预览</h3>
   <div class="preview-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 20px;">
     {% for item in results %}
       {% if item.file_url %}

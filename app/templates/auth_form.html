@@ -1,59 +1,105 @@
 {% extends "base.html" %}
 {% block content %}
+{% set current_auth_type = profile.auth_type or "form" %}
+{% set current_success = profile.success_selector or "" %}
+{% set detected_system = "grafana" if not profile.id else "custom" %}
+{% if current_auth_type == "none" %}
+  {% set detected_system = "none" %}
+{% elif ".react-grid-layout" in current_success %}
+  {% set detected_system = "grafana" %}
+{% elif "dashboardViewport" in current_success %}
+  {% set detected_system = "kibana" %}
+{% endif %}
+
 <div class="page-head">
   <div>
     <h1>{{ "修改认证配置" if profile.id else "新建认证配置" }}</h1>
-    <p class="muted">配置目标系统（如 Grafana, Kibana）在截图前的表单登录流程，使报告能在安全的登录会话下正常获取数据。</p>
+    <p class="muted">先选择系统类型并填写登录地址、账号和密码；高级选择器通常不用改。</p>
   </div>
 </div>
 
-<form method="post" action="{{ action }}" class="panel">
-  <!-- 第一部分：基本名称与类型 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 认证配置基本名称与类型</h3>
+<form method="post" action="{{ action }}" class="panel" id="auth-profile-form">
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 基本信息</h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label>
       配置名称 <span style="color: var(--danger);">* (必填)</span>
       <input name="name" value="{{ profile.name or '' }}" required placeholder="例如：Grafana 生产认证">
-      <span class="form-tip">给当前认证凭证起一个易于识别的名称（如“Grafana 生产环境”）。</span>
+      <span class="form-tip">给这组登录凭据起一个容易识别的名称。</span>
     </label>
-    
+
     <label>
-      登录类型 <span style="color: var(--danger);">*</span>
-      <select name="auth_type">
-        {% for t in [("form", "表单登录 (Form - 推荐)"), ("none", "无需登录 (None)"), ("state", "直接读取本地缓存状态文件 (State)")] %}
-        <option value="{{ t[0] }}" {% if profile.auth_type == t[0] %}selected{% endif %}>{{ t[1] }}</option>
-        {% endfor %}
+      目标系统 <span style="color: var(--danger);">*</span>
+      <select name="system_preset" id="system_preset">
+        <option value="grafana" {% if detected_system == "grafana" %}selected{% endif %}>Grafana 看板</option>
+        <option value="kibana" {% if detected_system == "kibana" %}selected{% endif %}>Kibana / Elastic</option>
+        <option value="custom" {% if detected_system == "custom" %}selected{% endif %}>普通网页</option>
+        <option value="none" {% if detected_system == "none" %}selected{% endif %}>无需登录</option>
       </select>
-      <span class="form-tip">对于大多数有用户名密码输入框的网页系统，请使用“表单登录”模式。</span>
+      <span class="form-tip">选择后会自动带入适合的登录成功判断方式。</span>
     </label>
+
+    <input type="hidden" name="auth_type" id="auth_type" value="{{ current_auth_type }}">
   </div>
 
-  <!-- 第二部分：登录地址与凭据 -->
   <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 登录地址与账号密码</h3>
   <div class="form-grid" style="margin-bottom: 24px;">
-    <label class="span-2">
-      登录 URL 页面地址 <span style="color: var(--danger);">* (必填)</span>
-      <input name="login_url" value="{{ profile.login_url or '' }}" required placeholder="例如：http://localhost:3000/login">
-      <span class="form-tip">浏览器在截图前会自动访问该地址并在此页面上填入账号密码。请填写完整的登录页地址。</span>
+    <label class="span-2" data-login-field>
+      登录页面地址 <span style="color: var(--danger);">* (必填)</span>
+      <input name="login_url" id="login_url" value="{{ profile.login_url or '' }}" placeholder="例如：http://localhost:3000/login">
+      <span class="form-tip">填写浏览器能打开的登录页地址。</span>
     </label>
 
-    <label>
-      登录用户名 / 账号 <span style="color: var(--danger);">* (必填)</span>
-      <input name="username_value" value="{{ profile.username_value or profile.username or '' }}" required placeholder="请输入登录用户名 (例如: admin)">
-      <span class="form-tip">直接填写要登录的用户名。</span>
+    <label data-login-field>
+      登录账号 <span style="color: var(--danger);">* (必填)</span>
+      <input name="username_value" id="username_value" value="{{ profile.username_value or profile.username or '' }}" placeholder="例如：admin">
+      <span class="form-tip">直接填写登录用户名。</span>
     </label>
 
-    <label>
+    <label data-login-field>
       登录密码 <span style="color: var(--danger);">* (必填)</span>
       <div style="position: relative; display: flex; align-items: center; width: 100%;">
-        <input name="password" id="auth_password_input" type="password" value="{{ decrypt_secret(profile.password_secret) or profile.password or '' }}" required placeholder="请输入密码" style="padding-right: 40px; width: 100%;">
+        <input name="password" id="auth_password_input" type="password" value="{{ decrypt_secret(profile.password_secret) or profile.password or '' }}" placeholder="请输入密码" style="padding-right: 40px; width: 100%;">
         <button type="button" onclick="togglePasswordVisibility('auth_password_input', this)" style="position: absolute; right: 10px; background: none; border: none; cursor: pointer; color: var(--text-muted); display: flex; align-items: center; min-height: auto; border-radius: 0; border: 0; padding: 0;" title="显示/隐藏密码" aria-label="显示密码">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
         </button>
       </div>
-      <span class="form-tip">输入密码。密码保存后将在数据库中被强加密安全存储。</span>
+      <span class="form-tip">编辑已有配置时，留空表示沿用原密码。</span>
     </label>
   </div>
+
+  <details class="advanced-settings" style="margin-bottom: 24px;">
+    <summary>高级设置</summary>
+    <div class="form-grid" style="margin-top: 16px;">
+      <label>
+        用户名选择器
+        <input name="username_selector" id="username_selector" value="{{ profile.username_selector or 'input[name="user"], input[name="username"], input[type="email"], input[placeholder*="username"], input[placeholder*="email"], input[placeholder*="user"]' }}">
+        <span class="form-tip">用于定位用户名输入框，通常不用改。</span>
+      </label>
+
+      <label>
+        密码选择器
+        <input name="password_selector" id="password_selector" value="{{ profile.password_selector or 'input[name="password"], input[type="password"], input[placeholder*="password"]' }}">
+        <span class="form-tip">用于定位密码输入框，通常不用改。</span>
+      </label>
+
+      <label>
+        提交按钮选择器
+        <input name="submit_selector" id="submit_selector" value="{{ profile.submit_selector or 'button[type="submit"], button:has-text("Log in"), button:has-text("Login"), button:has-text("登录"), input[type="submit"]' }}">
+        <span class="form-tip">用于定位登录按钮。</span>
+      </label>
+
+      <label>
+        成功选择器
+        <input name="success_selector" id="success_selector" value="{{ profile.success_selector or '' }}" placeholder="不确定可留空">
+        <span class="form-tip">用于判断登录成功；Grafana 默认 .react-grid-layout，Kibana 默认 dashboardViewport。</span>
+      </label>
+
+      <label class="span-2">
+        浏览器状态文件
+        <input name="storage_state_path" value="{{ profile.storage_state_path or '' }}" placeholder="通常留空，由系统自动管理">
+      </label>
+    </div>
+  </details>
 
   <div class="form-actions span-2">
     <button class="primary" type="submit" style="font-weight: 600;">保存认证配置</button>
@@ -64,6 +110,17 @@
 <script>
   const eyeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
   const eyeOffSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
+  const selectorDefaults = {
+    username: 'input[name="user"], input[name="username"], input[type="email"], input[placeholder*="username"], input[placeholder*="email"], input[placeholder*="user"]',
+    password: 'input[name="password"], input[type="password"], input[placeholder*="password"]',
+    submit: 'button[type="submit"], button:has-text("Log in"), button:has-text("Login"), button:has-text("登录"), input[type="submit"]',
+  };
+  const successDefaults = {
+    grafana: ".react-grid-layout",
+    kibana: "[data-test-subj='dashboardViewport']",
+    custom: "",
+    none: "",
+  };
 
   function togglePasswordVisibility(inputId, btn) {
     const input = document.getElementById(inputId);
@@ -77,5 +134,32 @@
       btn.setAttribute('aria-label', '显示密码');
     }
   }
+
+  function applySystemPreset(forceSuccessSelector) {
+    const preset = document.getElementById("system_preset").value;
+    const isNoLogin = preset === "none";
+    document.getElementById("auth_type").value = isNoLogin ? "none" : "form";
+    document.querySelectorAll("[data-login-field]").forEach((field) => {
+      field.style.display = isNoLogin ? "none" : "";
+    });
+    ["login_url", "username_value", "auth_password_input"].forEach((id) => {
+      const input = document.getElementById(id);
+      if (input) {
+        input.required = !isNoLogin;
+      }
+    });
+
+    document.getElementById("username_selector").value ||= selectorDefaults.username;
+    document.getElementById("password_selector").value ||= selectorDefaults.password;
+    document.getElementById("submit_selector").value ||= selectorDefaults.submit;
+
+    const successSelector = document.getElementById("success_selector");
+    if (forceSuccessSelector || !successSelector.value.trim()) {
+      successSelector.value = successDefaults[preset] || "";
+    }
+  }
+
+  document.getElementById("system_preset").addEventListener("change", () => applySystemPreset(true));
+  applySystemPreset(false);
 </script>
 {% endblock %}

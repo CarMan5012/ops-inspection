@@ -86,7 +86,7 @@
       
       const id = this.getAttribute('data-id');
       this.classList.add('btn-loading');
-      window.showToast('🔍 正在测试登录认证配置，请稍候...', 'info');
+      window.showToast('正在测试登录认证配置，请稍候...', 'info');
       
       try {
         const response = await fetch(`/auth-profiles/${id}/test-async`, {

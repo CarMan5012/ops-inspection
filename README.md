@@ -148,3 +148,14 @@ data/
   logs/
   browser-state/
 ```
+
+## 前后端分离入口
+
+当前登录后的 `/` 已切换为静态前端应用，资源位于 `app/static/frontend/`，页面通过 `/api/*` JSON 接口读取和更新数据。
+
+- `/api/dashboard`：总览数据、任务、最近运行、认证和邮件配置摘要
+- `/api/jobs`、`/api/jobs/{job_id}`：任务列表、创建、更新、删除
+- `/api/jobs/{job_id}/run`：触发巡检任务
+- `/api/runs`、`/api/runs/{run_id}`：运行记录与截图结果
+- `/api/auth-profiles`、`/api/mail-profiles`：认证与邮件配置
+- `/api/periodic-reports`：周期报告配置和历史包

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.db import connect, dict_row, dict_rows
+from app.db import connect
 
 
 def list_jobs() -> list[dict[str, Any]]:
@@ -15,7 +15,7 @@ def list_jobs() -> list[dict[str, Any]]:
             ORDER BY j.id DESC
             """
         ).fetchall()
-    return dict_rows(rows)
+    return [dict(row) for row in rows]
 
 
 def get_job(job_id: int) -> dict[str, Any] | None:
@@ -29,7 +29,7 @@ def get_job(job_id: int) -> dict[str, Any] | None:
             """,
             (job_id,),
         ).fetchone()
-    return dict_row(row)
+    return dict(row) if row is not None else None
 
 
 def save_job(data: dict[str, Any], job_id: int | None = None) -> int:
@@ -83,7 +83,7 @@ def list_screenshot_items(job_id: int) -> list[dict[str, Any]]:
             """,
             (job_id,),
         ).fetchall()
-    return dict_rows(rows)
+    return [dict(row) for row in rows]
 
 
 def get_screenshot_item(item_id: int) -> dict[str, Any] | None:
@@ -97,7 +97,7 @@ def get_screenshot_item(item_id: int) -> dict[str, Any] | None:
             """,
             (item_id,),
         ).fetchone()
-    return dict_row(row)
+    return dict(row) if row is not None else None
 
 
 def save_screenshot_item(data: dict[str, Any], item_id: int | None = None) -> int:
@@ -144,7 +144,7 @@ def delete_screenshot_item(item_id: int) -> None:
 def list_auth_profiles() -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute("SELECT * FROM auth_profiles ORDER BY id ASC").fetchall()
-    return dict_rows(rows)
+    return [dict(row) for row in rows]
 
 
 def get_auth_profile(auth_id: int | None) -> dict[str, Any] | None:
@@ -152,7 +152,7 @@ def get_auth_profile(auth_id: int | None) -> dict[str, Any] | None:
         return None
     with connect() as conn:
         row = conn.execute("SELECT * FROM auth_profiles WHERE id = ?", (auth_id,)).fetchone()
-    return dict_row(row)
+    return dict(row) if row is not None else None
 
 
 def save_auth_profile(data: dict[str, Any], auth_id: int | None = None) -> int:
@@ -199,7 +199,7 @@ def delete_auth_profile(auth_id: int) -> None:
 def list_mail_profiles() -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute("SELECT * FROM mail_profiles ORDER BY id ASC").fetchall()
-    return dict_rows(rows)
+    return [dict(row) for row in rows]
 
 
 def get_mail_profile(mail_id: int | None) -> dict[str, Any] | None:
@@ -207,7 +207,7 @@ def get_mail_profile(mail_id: int | None) -> dict[str, Any] | None:
         return None
     with connect() as conn:
         row = conn.execute("SELECT * FROM mail_profiles WHERE id = ?", (mail_id,)).fetchone()
-    return dict_row(row)
+    return dict(row) if row is not None else None
 
 
 def save_mail_profile(data: dict[str, Any], mail_id: int | None = None) -> int:
@@ -298,13 +298,13 @@ def list_runs(limit: int = 50) -> list[dict[str, Any]]:
             """,
             (limit,),
         ).fetchall()
-    return dict_rows(rows)
+    return [dict(row) for row in rows]
 
 
 def get_run(run_id: int) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM run_records WHERE id = ?", (run_id,)).fetchone()
-    return dict_row(row)
+    return dict(row) if row is not None else None
 
 
 def list_screenshot_results(run_id: int) -> list[dict[str, Any]]:
@@ -318,7 +318,7 @@ def list_screenshot_results(run_id: int) -> list[dict[str, Any]]:
             """,
             (run_id,),
         ).fetchall()
-    return dict_rows(rows)
+    return [dict(row) for row in rows]
 
 
 def get_previous_run_today(job_id: int, current_run_id: int) -> dict[str, Any] | None:
@@ -366,13 +366,13 @@ def get_previous_run_today(job_id: int, current_run_id: int) -> dict[str, Any] |
 def list_periodic_report_settings() -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute("SELECT * FROM periodic_report_settings ORDER BY id ASC").fetchall()
-    return dict_rows(rows)
+    return [dict(row) for row in rows]
 
 
 def get_periodic_report_setting(report_type: str) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM periodic_report_settings WHERE report_type = ?", (report_type,)).fetchone()
-    return dict_row(row)
+    return dict(row) if row is not None else None
 
 
 def save_periodic_report_setting(report_type: str, data: dict[str, Any]) -> None:
@@ -408,13 +408,13 @@ def list_periodic_report_runs(limit: int = 50) -> list[dict[str, Any]]:
             "SELECT * FROM periodic_report_runs ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    return dict_rows(rows)
+    return [dict(row) for row in rows]
 
 
 def get_periodic_report_run(run_id: int) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM periodic_report_runs WHERE id = ?", (run_id,)).fetchone()
-    return dict_row(row)
+    return dict(row) if row is not None else None
 
 
 def save_periodic_report_run(data: dict[str, Any], run_id: int | None = None) -> int:

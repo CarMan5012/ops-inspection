@@ -37,12 +37,6 @@ def resolve_env_placeholders(text: str) -> str:
     return re.sub(r"\{([A-Za-z0-9_]+)\}", replace_match, text)
 
 
-def resolve_url_placeholders(url: str, auth_profile: dict[str, Any] | None) -> str:
-    if not url:
-        return url
-    return resolve_env_placeholders(url)
-
-
 
 def capture_item(
     item: dict[str, Any],
@@ -216,7 +210,7 @@ def _capture_once(
     output_path = screenshot_dir / file_name
 
     raw_url = str(item["url"])
-    resolved_url = resolve_url_placeholders(raw_url, auth_profile)
+    resolved_url = resolve_env_placeholders(raw_url)
     logger.info(f"原始 URL: {raw_url} | 解析后 URL: {resolved_url}")
 
     with sync_playwright() as p:
@@ -358,6 +352,7 @@ def _take_screenshot(page: Page, item: dict[str, Any], output_path: Path) -> Non
         locator.wait_for(state="visible")
         locator.screenshot(path=str(output_path))
         return
+
     page.screenshot(path=str(output_path), full_page=(capture_mode == "full_page"))
 
 

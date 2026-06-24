@@ -15,13 +15,6 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
-def dict_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    return dict(row) if row is not None else None
-
-
-def dict_rows(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
-    return [dict(row) for row in rows]
-
 
 def init_db() -> None:
     settings.ensure_dirs()
@@ -132,13 +125,6 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(run_id) REFERENCES run_records(id) ON DELETE CASCADE,
                 FOREIGN KEY(item_id) REFERENCES screenshot_items(id) ON DELETE SET NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS audit_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                action TEXT NOT NULL,
-                detail TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS periodic_report_settings (
@@ -457,14 +443,6 @@ def seed_defaults(conn: sqlite3.Connection) -> None:
         )
 
 
-def audit(action: str, detail: str = "") -> None:
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO audit_logs (action, detail) VALUES (?, ?)",
-            (action, detail),
-        )
-
-
 def reset_database_data() -> None:
     """一键删除重置所有本地测试数据及物理目录文件"""
     import shutil
@@ -489,7 +467,6 @@ def reset_database_data() -> None:
             "report_jobs",
             "mail_profiles",
             "auth_profiles",
-            "audit_logs",
         ]
         for t in tables:
             try:
