@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +93,13 @@ def init_db() -> None:
                 sort_order INTEGER NOT NULL DEFAULT 100,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 real_browser_capture INTEGER NOT NULL DEFAULT 1,
+                watermark_enabled INTEGER NOT NULL DEFAULT 0,
+                watermark_text TEXT DEFAULT '',
+                watermark_opacity INTEGER NOT NULL DEFAULT 65,
+                watermark_font_size INTEGER NOT NULL DEFAULT 24,
+                watermark_gap_x INTEGER NOT NULL DEFAULT 140,
+                watermark_gap_y INTEGER NOT NULL DEFAULT 140,
+                watermark_angle INTEGER NOT NULL DEFAULT -45,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(job_id) REFERENCES report_jobs(id) ON DELETE CASCADE,
@@ -229,6 +235,13 @@ def init_db() -> None:
             ("report_jobs", "dingtalk_secret", "TEXT DEFAULT ''"),
             ("report_jobs", "dingtalk_keyword", "TEXT DEFAULT ''"),
             ("run_records", "dingtalk_status", "TEXT DEFAULT ''"),
+            ("screenshot_items", "watermark_enabled", "INTEGER DEFAULT 0"),
+            ("screenshot_items", "watermark_text", "TEXT DEFAULT ''"),
+            ("screenshot_items", "watermark_opacity", "INTEGER DEFAULT 65"),
+            ("screenshot_items", "watermark_font_size", "INTEGER DEFAULT 24"),
+            ("screenshot_items", "watermark_gap_x", "INTEGER DEFAULT 140"),
+            ("screenshot_items", "watermark_gap_y", "INTEGER DEFAULT 140"),
+            ("screenshot_items", "watermark_angle", "INTEGER DEFAULT -45"),
         ]
         for table, col, t in migrations:
             try:

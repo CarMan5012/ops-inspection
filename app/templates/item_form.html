@@ -105,8 +105,52 @@
     </label>
   </div>
 
-  <!-- 第三部分：调试与尺寸选项 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、 自定义浏览器尺寸与排序</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、截图水印配置</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <div style="display: flex; align-items: flex-end; padding-bottom: 8px;" class="span-2">
+      <label class="check">
+        <input type="checkbox" id="watermark_enabled" name="watermark_enabled" {% if item.watermark_enabled %}checked{% endif %} onchange="onWatermarkChange(this.checked)">
+        启用截图水印
+        <span class="form-tip" style="display: block; margin-top: 4px; font-weight: normal;">
+          默认关闭。开启后会按最终截图尺寸自动铺满浅色斜向水印。
+        </span>
+      </label>
+    </div>
+    <div id="watermark_config" class="span-2 form-grid" style="padding: 0;">
+      <label class="span-2">
+        水印内容
+        <textarea name="watermark_text" rows="3" placeholder="{time}&#10;省客户服务中心&#10;dwangchengyi7(王诚毅)">{% if item.watermark_text %}{{ item.watermark_text }}{% else %}{time}
+省客户服务中心
+dwangchengyi7(王诚毅){% endif %}</textarea>
+        <span class="form-tip">{time} 会自动替换为截图时间。默认内容即参考图样式。</span>
+      </label>
+      <label>
+        透明度
+        <input name="watermark_opacity" type="number" min="0" max="255" value="{{ item.watermark_opacity if item.watermark_opacity is not none else 65 }}">
+        <span class="form-tip">默认 65。数值越大越明显。</span>
+      </label>
+      <label>
+        字号
+        <input name="watermark_font_size" type="number" min="10" max="72" value="{{ item.watermark_font_size if item.watermark_font_size is not none else 24 }}">
+      </label>
+      <label>
+        横向间距
+        <input name="watermark_gap_x" type="number" min="20" max="800" value="{{ item.watermark_gap_x if item.watermark_gap_x is not none else 140 }}">
+      </label>
+      <label>
+        纵向间距
+        <input name="watermark_gap_y" type="number" min="20" max="800" value="{{ item.watermark_gap_y if item.watermark_gap_y is not none else 140 }}">
+      </label>
+      <label>
+        倾斜角度
+        <input name="watermark_angle" type="number" min="-90" max="90" value="{{ item.watermark_angle if item.watermark_angle is not none else -45 }}">
+        <span class="form-tip">默认 -45，和参考图一致。</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- 第四部分：调试与尺寸选项 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">四、 自定义浏览器尺寸与排序</h3>
   <div class="form-grid" style="margin-bottom: 24px;">
     <label>
       单独浏览器宽度 (px)
@@ -181,6 +225,14 @@
     }
   }
 
+  function onWatermarkChange(checked) {
+    const config = document.getElementById('watermark_config');
+    if (!config) {
+      return;
+    }
+    config.style.opacity = checked ? '1' : '0.55';
+  }
+
   // Initialize state
   document.addEventListener('DOMContentLoaded', () => {
     const checkbox = document.getElementById('real_browser_capture');
@@ -188,6 +240,10 @@
       onRealBrowserCaptureChange(checkbox.checked);
     }
     toggleCssSelector(document.getElementsByName('capture_mode')[0].value);
+    const watermarkCheckbox = document.getElementById('watermark_enabled');
+    if (watermarkCheckbox) {
+      onWatermarkChange(watermarkCheckbox.checked);
+    }
   });
 </script>
 {% endblock %}

@@ -209,6 +209,13 @@ def item_form(
     sort_order: int = Form(100),
     enabled: str | None = Form(None),
     real_browser_capture: str | None = Form(None),
+    watermark_enabled: str | None = Form(None),
+    watermark_text: str = Form(""),
+    watermark_opacity: int = Form(65),
+    watermark_font_size: int = Form(24),
+    watermark_gap_x: int = Form(140),
+    watermark_gap_y: int = Form(140),
+    watermark_angle: int = Form(-45),
 ) -> dict[str, Any]:
     real_capture_enabled = 1 if real_browser_capture else 0
     normalized_capture_mode = capture_mode
@@ -235,6 +242,13 @@ def item_form(
         "sort_order": sort_order,
         "enabled": 1 if enabled else 0,
         "real_browser_capture": real_capture_enabled,
+        "watermark_enabled": 1 if watermark_enabled else 0,
+        "watermark_text": watermark_text,
+        "watermark_opacity": max(0, min(255, int(watermark_opacity))),
+        "watermark_font_size": max(10, min(72, int(watermark_font_size))),
+        "watermark_gap_x": max(20, min(800, int(watermark_gap_x))),
+        "watermark_gap_y": max(20, min(800, int(watermark_gap_y))),
+        "watermark_angle": max(-90, min(90, int(watermark_angle))),
     }
 
 
@@ -392,6 +406,16 @@ def float_value(payload: dict[str, Any], key: str, default: float) -> float:
         raise HTTPException(status_code=400, detail="参数格式错误") from e
 
 
+def clamp_int(value: Any, default: int, min_value: int, max_value: int) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = int(value)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail="参数格式错误") from e
+    return max(min_value, min(max_value, parsed))
+
+
 def public_auth_profile(profile: dict[str, Any]) -> dict[str, Any]:
     data = dict(profile)
     for key in ("password", "password_secret"):
@@ -479,6 +503,17 @@ def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
         "sort_order": int_value(payload, "sort_order", 100),
         "enabled": bool_value(payload.get("enabled"), True),
         "real_browser_capture": 1 if real_browser_capture else 0,
+        "watermark_enabled": bool_value(payload.get("watermark_enabled"), False),
+        "watermark_text": text_value(
+            payload,
+            "watermark_text",
+            "{time}\n省客户服务中心\ndwangchengyi7(王诚毅)",
+        ),
+        "watermark_opacity": clamp_int(payload.get("watermark_opacity"), 65, 0, 255),
+        "watermark_font_size": clamp_int(payload.get("watermark_font_size"), 24, 10, 72),
+        "watermark_gap_x": clamp_int(payload.get("watermark_gap_x"), 140, 20, 800),
+        "watermark_gap_y": clamp_int(payload.get("watermark_gap_y"), 140, 20, 800),
+        "watermark_angle": clamp_int(payload.get("watermark_angle"), -45, -90, 90),
     }
 
 
@@ -938,7 +973,19 @@ def new_item(request: Request, job_id: int) -> HTMLResponse:
         "item_form.html",
         {
             "request": request,
-            "item": {"job_id": job_id, "enabled": 1, "capture_mode": "viewport", "item_type": "grafana"},
+            "item": {
+                "job_id": job_id,
+                "enabled": 1,
+                "capture_mode": "viewport",
+                "item_type": "grafana",
+                "watermark_enabled": 0,
+                "watermark_text": "{time}\n省客户服务中心\ndwangchengyi7(王诚毅)",
+                "watermark_opacity": 65,
+                "watermark_font_size": 24,
+                "watermark_gap_x": 140,
+                "watermark_gap_y": 140,
+                "watermark_angle": -45,
+            },
             "job_id": job_id,
             "auth_profiles": list_auth_profiles(),
             "template_sections": list_template_sections(),
@@ -1126,7 +1173,14 @@ def seed_local_test_item(job_id: int) -> RedirectResponse:
         "browser_width": 1920,
         "browser_height": 1080,
         "sort_order": 10,
-        "enabled": 1
+        "enabled": 1,
+        "watermark_enabled": 0,
+        "watermark_text": "{time}\n省客户服务中心\ndwangchengyi7(王诚毅)",
+        "watermark_opacity": 65,
+        "watermark_font_size": 24,
+        "watermark_gap_x": 140,
+        "watermark_gap_y": 140,
+        "watermark_angle": -45,
     }
     save_screenshot_item(item_data)
     from urllib.parse import quote

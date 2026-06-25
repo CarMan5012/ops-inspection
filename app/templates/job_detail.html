@@ -112,6 +112,9 @@
             局部区域
             {% endif %}
           </div>
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+            水印：{% if item.watermark_enabled %}开启{% else %}关闭{% endif %}
+          </div>
         </td>
         <td>
           {% if item.auth_profile_name %}

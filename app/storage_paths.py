@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -140,19 +139,3 @@ def resolve_artifact_path(file_path: str | Path) -> Path:
                 return new_path.resolve()
 
     return path
-
-
-def is_legacy_screenshot_path(path: str | Path) -> bool:
-    """
-    判断当前路径是否为旧版的扁平截图路径（父目录是纯数字）
-    """
-    p = Path(path)
-    return "screenshots" in str(path).replace("\\", "/") and p.parent.name.isdigit()
-
-
-def is_legacy_report_path(path: str | Path) -> bool:
-    """
-    判断当前路径是否为旧版的扁平报告路径（父目录是纯数字）
-    """
-    p = Path(path)
-    return "reports" in str(path).replace("\\", "/") and p.parent.name.isdigit()

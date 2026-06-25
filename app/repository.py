@@ -124,8 +124,28 @@ def save_screenshot_item(data: dict[str, Any], item_id: int | None = None) -> in
         "sort_order",
         "enabled",
         "real_browser_capture",
+        "watermark_enabled",
+        "watermark_text",
+        "watermark_opacity",
+        "watermark_font_size",
+        "watermark_gap_x",
+        "watermark_gap_y",
+        "watermark_angle",
     )
-    values = [data.get(field) for field in fields]
+    defaults = {
+        "real_browser_capture": 1,
+        "watermark_enabled": 0,
+        "watermark_text": "",
+        "watermark_opacity": 65,
+        "watermark_font_size": 24,
+        "watermark_gap_x": 140,
+        "watermark_gap_y": 140,
+        "watermark_angle": -45,
+    }
+    values = [
+        defaults[field] if field in defaults and data.get(field) is None else data.get(field)
+        for field in fields
+    ]
     with connect() as conn:
         if item_id:
             assignments = ", ".join(f"{field} = ?" for field in fields)
@@ -459,5 +479,3 @@ def save_periodic_report_run(data: dict[str, Any], run_id: int | None = None) ->
 def delete_periodic_report_run(run_id: int) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM periodic_report_runs WHERE id = ?", (run_id,))
-
-

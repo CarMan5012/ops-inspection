@@ -4,6 +4,7 @@ import os
 import re
 import time
 import logging
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,15 @@ from app.utils import safe_name, timestamp_text, resolve_auth_credential
 from app.storage_paths import get_screenshot_dir
 
 logger = logging.getLogger("app.screenshot")
+
+DEFAULT_WATERMARK_TEMPLATE = "{time}\n省客户服务中心\ndwangchengyi7(王诚毅)"
+DEFAULT_WATERMARK_FONT_SIZE = 24
+DEFAULT_WATERMARK_TEXT_SPACING = 10
+DEFAULT_WATERMARK_TILE_PADDING = 45
+DEFAULT_WATERMARK_TILE_GAP_X = 140
+DEFAULT_WATERMARK_TILE_GAP_Y = 140
+DEFAULT_WATERMARK_OPACITY = 65
+DEFAULT_WATERMARK_ANGLE = -45
 
 
 @dataclass
@@ -321,6 +331,7 @@ def _capture_with_browser(
 
         _wait_for_page(page, item, timeout_ms)
         _take_screenshot(page, item, output_path, is_real_capture)
+        _apply_configured_watermark(output_path, item)
         _persist_storage_state(context, auth_profile)
     finally:
         try:
@@ -494,6 +505,163 @@ def _wait_for_page(page: Page, item: dict[str, Any], timeout_ms: int) -> None:
     if wait_seconds > 0:
         logger.info(f"额外等待页面静止渲染: {wait_seconds} 秒")
         page.wait_for_timeout(int(wait_seconds * 1000))
+
+
+def _current_watermark_time() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+
+        now = datetime.now(ZoneInfo(settings.default_timezone))
+    except Exception:
+        now = datetime.now()
+    return now.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _watermark_text(template: str | None = None) -> str:
+    raw_template = (template or DEFAULT_WATERMARK_TEMPLATE).strip() or DEFAULT_WATERMARK_TEMPLATE
+    try:
+        return raw_template.format(time=_current_watermark_time())
+    except Exception:
+        return raw_template.replace("{time}", _current_watermark_time())
+
+
+def _watermark_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _watermark_int(value: Any, default: int, min_value: int, max_value: int) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(min_value, min(max_value, parsed))
+
+
+def _apply_configured_watermark(image_path: Path, item: dict[str, Any]) -> None:
+    if not _watermark_bool(item.get("watermark_enabled"), False):
+        return
+
+    _apply_watermark(
+        image_path=image_path,
+        text=_watermark_text(str(item.get("watermark_text") or "")),
+        opacity=_watermark_int(item.get("watermark_opacity"), DEFAULT_WATERMARK_OPACITY, 0, 255),
+        font_size=_watermark_int(item.get("watermark_font_size"), DEFAULT_WATERMARK_FONT_SIZE, 10, 72),
+        gap_x=_watermark_int(item.get("watermark_gap_x"), DEFAULT_WATERMARK_TILE_GAP_X, 20, 800),
+        gap_y=_watermark_int(item.get("watermark_gap_y"), DEFAULT_WATERMARK_TILE_GAP_Y, 20, 800),
+        angle=_watermark_int(item.get("watermark_angle"), DEFAULT_WATERMARK_ANGLE, -90, 90),
+    )
+
+
+def _apply_default_watermark(image_path: Path) -> None:
+    _apply_watermark(
+        image_path=image_path,
+        text=_watermark_text(DEFAULT_WATERMARK_TEMPLATE),
+        opacity=DEFAULT_WATERMARK_OPACITY,
+        font_size=DEFAULT_WATERMARK_FONT_SIZE,
+        gap_x=DEFAULT_WATERMARK_TILE_GAP_X,
+        gap_y=DEFAULT_WATERMARK_TILE_GAP_Y,
+        angle=DEFAULT_WATERMARK_ANGLE,
+    )
+
+
+def _apply_watermark(
+    image_path: Path,
+    text: str,
+    opacity: int,
+    font_size: int,
+    gap_x: int,
+    gap_y: int,
+    angle: int,
+) -> None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as err:
+        raise RuntimeError("截图水印处理失败：未安装 Pillow，请先安装 requirements.txt 中的 Pillow 依赖") from err
+
+    if not image_path.exists():
+        raise FileNotFoundError(f"截图水印处理失败：图片文件不存在 {image_path}")
+
+    font_paths = [
+        r"C:\Windows\Fonts\dengl.ttf",
+        r"C:\Windows\Fonts\deng.ttf",
+        r"C:\Windows\Fonts\msyh.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+
+    font = None
+    for path_str in font_paths:
+        font_path = Path(path_str)
+        if font_path.exists():
+            try:
+                font = ImageFont.truetype(str(font_path), font_size)
+                break
+            except Exception:
+                continue
+    if font is None:
+        font = ImageFont.load_default()
+
+    with Image.open(image_path) as orig_img:
+        img_rgba = orig_img.convert("RGBA")
+        width, height = img_rgba.size
+
+        temp_img = Image.new("RGBA", (1, 1))
+        temp_draw = ImageDraw.Draw(temp_img)
+        try:
+            bbox = temp_draw.multiline_textbbox((0, 0), text, font=font, spacing=DEFAULT_WATERMARK_TEXT_SPACING)
+            offset_x = bbox[0]
+            offset_y = bbox[1]
+            txt_w = bbox[2] - bbox[0]
+            txt_h = bbox[3] - bbox[1]
+        except AttributeError:
+            offset_x = 0
+            offset_y = 0
+            txt_w = max(len(line) for line in text.split("\n")) * font_size
+            txt_h = len(text.split("\n")) * (font_size + DEFAULT_WATERMARK_TEXT_SPACING)
+
+        txt_img_w = txt_w + DEFAULT_WATERMARK_TILE_PADDING * 2
+        txt_img_h = txt_h + DEFAULT_WATERMARK_TILE_PADDING * 2
+        txt_img = Image.new("RGBA", (txt_img_w, txt_img_h), (0, 0, 0, 0))
+        draw_txt = ImageDraw.Draw(txt_img)
+        draw_txt.multiline_text(
+            (DEFAULT_WATERMARK_TILE_PADDING - offset_x, DEFAULT_WATERMARK_TILE_PADDING - offset_y),
+            text,
+            font=font,
+            fill=(0, 0, 0, 0),
+            stroke_width=1,
+            stroke_fill=(160, 160, 160, opacity),
+            spacing=DEFAULT_WATERMARK_TEXT_SPACING,
+            align="center",
+        )
+
+        resample_bilinear = getattr(getattr(Image, "Resampling", Image), "BILINEAR", Image.BILINEAR)
+        rotated_txt = txt_img.rotate(angle, expand=True, resample=resample_bilinear)
+        rot_w, rot_h = rotated_txt.size
+
+        watermark_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        step_x = rot_w + gap_x
+        step_y = rot_h + gap_y
+
+        for y in range(-rot_h, height + rot_h, step_y):
+            for x in range(-rot_w, width + rot_w, step_x):
+                watermark_layer.paste(rotated_txt, (x, y), rotated_txt)
+
+        combined = Image.alpha_composite(img_rgba, watermark_layer)
+        if image_path.suffix.lower() in {".jpg", ".jpeg"}:
+            combined.convert("RGB").save(image_path)
+        else:
+            combined.save(image_path)
+
+    logger.info(f"已为截图添加水印: {image_path}")
 
 
 def _take_screenshot(page: Page, item: dict[str, Any], output_path: Path, is_real_capture: bool) -> None:
