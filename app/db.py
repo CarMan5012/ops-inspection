@@ -9,9 +9,10 @@ from app.settings import settings
 
 
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(settings.db_path)
+    conn = sqlite3.connect(settings.db_path, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL;")
     return conn
 
 
@@ -223,6 +224,11 @@ def init_db() -> None:
             ("screenshot_items", "real_browser_capture", "INTEGER DEFAULT 1"),
             ("report_jobs", "send_mail_on_complete", "INTEGER DEFAULT 1"),
             ("report_jobs", "send_mail_on_error", "INTEGER DEFAULT 1"),
+            ("report_jobs", "dingtalk_enabled", "INTEGER DEFAULT 0"),
+            ("report_jobs", "dingtalk_webhook", "TEXT DEFAULT ''"),
+            ("report_jobs", "dingtalk_secret", "TEXT DEFAULT ''"),
+            ("report_jobs", "dingtalk_keyword", "TEXT DEFAULT ''"),
+            ("run_records", "dingtalk_status", "TEXT DEFAULT ''"),
         ]
         for table, col, t in migrations:
             try:
@@ -237,7 +243,7 @@ def init_db() -> None:
             pass
 
         seed_defaults(conn)
-        sync_from_env_if_empty()
+    sync_from_env_if_empty()
 
 
 def sync_from_env_if_empty() -> None:

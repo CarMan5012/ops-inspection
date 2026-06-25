@@ -35,8 +35,8 @@
         <td><a href="/runs/{{ run.id }}" style="font-weight: 600;">#{{ run.id }}</a></td>
         <td><strong>{{ run.job_name }}</strong></td>
         <td><span class="badge {{ 'ok' if run.status == 'success' else 'warn' if run.status == 'partial_success' else 'bad' if run.status == 'failed' else '' }}">{{ run.status | status_label }}</span></td>
-        <td>{{ run.started_at }}</td>
-        <td>{{ run.finished_at or "-" }}</td>
+        <td>{{ run.started_at | short_date }}</td>
+        <td>{{ run.finished_at | short_date }}</td>
         <td><span style="color: var(--success); font-weight: 600;">{{ run.success_count }}</span></td>
         <td><span style="{{ 'color: var(--danger); font-weight: 600;' if run.failed_count > 0 else 'color: var(--text-muted);' }}">{{ run.failed_count }}</span></td>
         <td>{{ run.mail_status | mail_status_label }}</td>
@@ -50,31 +50,99 @@
 
 <script>
   (function() {
-    // 自动刷新逻辑：有运行中任务，或刚触发后台任务时，短时间轮询新数据。
-    const badges = document.querySelectorAll('.badge');
-    const params = new URLSearchParams(window.location.search);
-    const watch = params.get('watch') === '1';
-    let hasRunning = false;
-    badges.forEach(b => {
-      if (b.textContent.trim() === '运行中') {
-        hasRunning = true;
+    let watchTimer = null;
+
+    function checkAndScheduleRefresh() {
+      const badges = document.querySelectorAll('.badge');
+      let hasRunning = false;
+      badges.forEach(b => {
+        if (b.textContent.trim() === '运行中') {
+          hasRunning = true;
+        }
+      });
+
+      if (hasRunning) {
+        if (!watchTimer) {
+          watchTimer = setInterval(refreshDataSilently, 4000);
+        }
+      } else {
+        if (watchTimer) {
+          clearInterval(watchTimer);
+          watchTimer = null;
+        }
       }
-    });
-
-    let refreshCount = Number(sessionStorage.getItem('runsWatchRefreshCount') || '0');
-    if (!watch && hasRunning) {
-      refreshCount = 0;
-      sessionStorage.setItem('runsWatchRefreshCount', '0');
     }
 
-    if (hasRunning || (watch && refreshCount < 20)) {
-      sessionStorage.setItem('runsWatchRefreshCount', String(refreshCount + 1));
-      setTimeout(function() {
-        location.href = '/runs?watch=1';
-      }, 4000);
-    } else if (!watch) {
-      sessionStorage.removeItem('runsWatchRefreshCount');
+    async function refreshDataSilently() {
+      try {
+        const res = await fetch('/api/runs');
+        if (!res.ok) return;
+        const data = await res.json();
+        const runs = data.runs || [];
+        updateRunsTable(runs);
+      } catch (e) {
+        console.error("Failed to silently refresh runs:", e);
+      }
     }
+
+    function updateRunsTable(runs) {
+      const tbody = document.querySelector('tbody');
+      if (!tbody) return;
+
+      if (!runs.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无运行记录。</td></tr>';
+        checkAndScheduleRefresh();
+        return;
+      }
+
+      const filterJob = document.getElementById('filter-job');
+      const filterStatus = document.getElementById('filter-status');
+      const jobQuery = filterJob ? filterJob.value.toLowerCase().trim() : '';
+      const statusQuery = filterStatus ? filterStatus.value : '';
+
+      let html = '';
+      runs.forEach(run => {
+        const statusLabel = run.status_label || run.status;
+        const badgeClass = run.status === 'success' ? 'ok' : run.status === 'partial_success' ? 'warn' : run.status === 'failed' ? 'bad' : '';
+        const finishedAt = run.finished_at || '-';
+        const mailStatusLabel = run.mail_status_label || run.mail_status || '-';
+
+        const jobMatch = !jobQuery || (run.job_name || '').toLowerCase().includes(jobQuery);
+        const statusMatch = !statusQuery || statusLabel === statusQuery;
+        const displayStyle = (jobMatch && statusMatch) ? '' : 'style="display: none;"';
+
+        html += `
+          <tr ${displayStyle}>
+            <td><a href="/runs/${run.id}" style="font-weight: 600;">#${run.id}</a></td>
+            <td><strong>${escapeHtml(run.job_name || '-')}</strong></td>
+            <td><span class="badge ${badgeClass}">${escapeHtml(statusLabel)}</span></td>
+            <td>${escapeHtml(shortDate(run.started_at))}</td>
+            <td>${escapeHtml(shortDate(finishedAt))}</td>
+            <td><span style="color: var(--success); font-weight: 600;">${run.success_count}</span></td>
+            <td><span style="${Number(run.failed_count || 0) > 0 ? 'color: var(--danger); font-weight: 600;' : 'color: var(--text-muted);'}">${run.failed_count}</span></td>
+            <td>${escapeHtml(mailStatusLabel)}</td>
+          </tr>
+        `;
+      });
+      tbody.innerHTML = html;
+      checkAndScheduleRefresh();
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function shortDate(value) {
+      if (!value) return "-";
+      return String(value).replace("T", " ").split("+")[0].slice(0, 19);
+    }
+
+    checkAndScheduleRefresh();
   })();
 
   // 纯前端实时过滤机制

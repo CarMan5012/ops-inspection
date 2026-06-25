@@ -82,8 +82,30 @@ def mail_status_label(value: Any) -> str:
     return labels.get(raw, raw)
 
 
+def dingtalk_status_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "-"
+    labels = {
+        "skipped": "未发送",
+        "sent": "已发送",
+        "success": "已发送",
+    }
+    if raw.startswith("failed:"):
+        return "发送失败：" + raw.removeprefix("failed:").strip()
+    return labels.get(raw, raw)
+
+
+def short_date(value: Any) -> str:
+    if not value:
+        return "-"
+    return str(value).replace("T", " ").split("+")[0][:19]
+
+
 templates.env.filters["status_label"] = status_label
 templates.env.filters["mail_status_label"] = mail_status_label
+templates.env.filters["dingtalk_status_label"] = dingtalk_status_label
+templates.env.filters["short_date"] = short_date
 
 from app.utils import mask_value, resolve_auth_credential, resolve_mail_credential, decrypt_secret
 
@@ -113,6 +135,10 @@ def job_form(
     morning_time: str = Form("09:05"),
     afternoon_enabled: str | None = Form(None),
     afternoon_time: str = Form("17:05"),
+    dingtalk_enabled: str | None = Form(None),
+    dingtalk_webhook: str | None = Form(""),
+    dingtalk_secret: str | None = Form(""),
+    dingtalk_keyword: str | None = Form(""),
 ) -> dict[str, Any]:
     from app.schedule_utils import parse_simple_inspection_schedule
     
@@ -155,10 +181,14 @@ def job_form(
         "send_mail_on_error": 1 if send_err else 0,
         "browser_width": browser_width,
         "browser_height": browser_height,
-        "headless": 1 if headless else 0,
+        "headless": 1,
         "schedule_mode": schedule_mode,
         "schedule_label": label_expr,
         "schedule_config": schedule_config,
+        "dingtalk_enabled": 1 if dingtalk_enabled else 0,
+        "dingtalk_webhook": (dingtalk_webhook or "").strip(),
+        "dingtalk_secret": (dingtalk_secret or "").strip(),
+        "dingtalk_keyword": (dingtalk_keyword or "").strip(),
     }
 
 
@@ -180,6 +210,13 @@ def item_form(
     enabled: str | None = Form(None),
     real_browser_capture: str | None = Form(None),
 ) -> dict[str, Any]:
+    real_capture_enabled = 1 if real_browser_capture else 0
+    normalized_capture_mode = capture_mode
+    normalized_css_selector = css_selector
+    if real_capture_enabled:
+        normalized_capture_mode = "viewport"
+        normalized_css_selector = ""
+
     return {
         "job_id": None,
         "auth_profile_id": parse_optional_int(auth_profile_id),
@@ -187,8 +224,8 @@ def item_form(
         "item_type": item_type,
         "url": url,
         "section": section,
-        "capture_mode": capture_mode,
-        "css_selector": css_selector,
+        "capture_mode": normalized_capture_mode,
+        "css_selector": normalized_css_selector,
         "wait_selector": wait_selector,
         "wait_seconds": wait_seconds,
         "timeout_seconds": timeout_seconds,
@@ -197,7 +234,7 @@ def item_form(
         "browser_height": parse_optional_int(browser_height),
         "sort_order": sort_order,
         "enabled": 1 if enabled else 0,
-        "real_browser_capture": 1 if real_browser_capture else 0,
+        "real_browser_capture": real_capture_enabled,
     }
 
 
@@ -339,14 +376,20 @@ def int_value(payload: dict[str, Any], key: str, default: int) -> int:
     value = payload.get(key, default)
     if value in (None, ""):
         return default
-    return int(value)
+    try:
+        return int(value)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail="参数格式错误") from e
 
 
 def float_value(payload: dict[str, Any], key: str, default: float) -> float:
     value = payload.get(key, default)
     if value in (None, ""):
         return default
-    return float(value)
+    try:
+        return float(value)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail="参数格式错误") from e
 
 
 def public_auth_profile(profile: dict[str, Any]) -> dict[str, Any]:
@@ -399,14 +442,25 @@ def api_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "send_mail_on_error": 1 if send_mail_on_error else 0,
         "browser_width": int_value(payload, "browser_width", 1920),
         "browser_height": int_value(payload, "browser_height", 1080),
-        "headless": bool_value(payload.get("headless"), True),
+        "headless": True,
         "schedule_mode": schedule_mode,
         "schedule_label": schedule_label,
         "schedule_config": schedule_config,
+        "dingtalk_enabled": bool_value(payload.get("dingtalk_enabled"), False),
+        "dingtalk_webhook": text_value(payload, "dingtalk_webhook", ""),
+        "dingtalk_secret": text_value(payload, "dingtalk_secret", ""),
+        "dingtalk_keyword": text_value(payload, "dingtalk_keyword", ""),
     }
 
 
 def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
+    real_browser_capture = bool_value(payload.get("real_browser_capture"), True)
+    capture_mode = text_value(payload, "capture_mode", "viewport")
+    css_selector = text_value(payload, "css_selector", "")
+    if real_browser_capture:
+        capture_mode = "viewport"
+        css_selector = ""
+
     return {
         "job_id": job_id,
         "auth_profile_id": parse_optional_int(str(payload.get("auth_profile_id") or "")),
@@ -414,8 +468,8 @@ def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
         "item_type": text_value(payload, "item_type", "grafana"),
         "url": text_value(payload, "url", ""),
         "section": text_value(payload, "section", "服务器资源"),
-        "capture_mode": text_value(payload, "capture_mode", "viewport"),
-        "css_selector": text_value(payload, "css_selector", ""),
+        "capture_mode": capture_mode,
+        "css_selector": css_selector,
         "wait_selector": text_value(payload, "wait_selector", ""),
         "wait_seconds": float_value(payload, "wait_seconds", 3.0),
         "timeout_seconds": int_value(payload, "timeout_seconds", 60),
@@ -424,7 +478,7 @@ def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
         "browser_height": parse_optional_int(str(payload.get("browser_height") or "")),
         "sort_order": int_value(payload, "sort_order", 100),
         "enabled": bool_value(payload.get("enabled"), True),
-        "real_browser_capture": bool_value(payload.get("real_browser_capture"), True),
+        "real_browser_capture": 1 if real_browser_capture else 0,
     }
 
 
@@ -497,6 +551,7 @@ def enrich_run(run: dict[str, Any]) -> dict[str, Any]:
     data = dict(run)
     data["status_label"] = api_status_label(data.get("status"))
     data["mail_status_label"] = api_mail_status_label(data.get("mail_status"))
+    data["dingtalk_status_label"] = dingtalk_status_label(data.get("dingtalk_status"))
     if data.get("report_path"):
         filename = artifact_filename(data["report_path"])
         local_path = resolve_artifact_path(data["report_path"])
@@ -1314,7 +1369,10 @@ def is_under(path: Path, base: Path) -> bool:
 def parse_optional_int(value: str | None) -> int | None:
     if value is None or value == "":
         return None
-    return int(value)
+    try:
+        return int(value)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail="参数格式错误") from e
 
 
 # ==============================================================================
@@ -1666,4 +1724,3 @@ def api_get_cleanup_runs() -> dict[str, Any]:
 
 
 app.include_router(api_router)
-

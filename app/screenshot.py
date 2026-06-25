@@ -44,6 +44,8 @@ def capture_item(
     job: dict[str, Any],
     run_id: int,
     suffix: str = "",
+    browser: Any = None,
+    contexts: dict[Any, Any] = None,
 ) -> CaptureResult:
     last_error = ""
     retry_count = int(item.get("retry_count") or 0)
@@ -52,7 +54,7 @@ def capture_item(
         try:
             if attempt > 0:
                 logger.info(f"第 {attempt} 次重试...")
-            return _capture_once(item, job, run_id, suffix=suffix)
+            return _capture_once(item, job, run_id, suffix=suffix, browser=browser, contexts=contexts)
         except Exception as exc:  # noqa: BLE001 - the error is saved into run history.
             last_error = f"{type(exc).__name__}: {exc}"
             logger.error(f"截图尝试失败 (当前第 {attempt} 次/最多 {retry_count} 次重试): {last_error}", exc_info=True)
@@ -200,6 +202,8 @@ def _capture_once(
     job: dict[str, Any],
     run_id: int,
     suffix: str = "",
+    browser: Any = None,
+    contexts: dict[Any, Any] = None,
 ) -> CaptureResult:
     auth_profile = get_auth_profile(item.get("auth_profile_id"))
     width = int(item.get("browser_width") or job.get("browser_width") or 1920)
@@ -218,57 +222,112 @@ def _capture_once(
     if is_real_capture and capture_mode == "full_page":
         logger.warning("启用真实浏览器截图时不支持整页长截图 (full_page)，已自动降级为视口截图 (viewport) 模式。")
 
-    with sync_playwright() as p:
-        headless_val = False if is_real_capture else bool(job.get("headless", 1))
-        launch_kwargs = {"headless": headless_val}
-        if is_real_capture:
-            launch_kwargs["args"] = [
-                f"--window-size={width},{height}",
-                "--start-maximized",
-                "--no-sandbox",
-                "--disable-dev-shm-usage"
-            ]
-        logger.info(f"启动 chromium 浏览器 (headless={headless_val})...")
-        browser = p.chromium.launch(**launch_kwargs)
+    if browser is None:
+        with sync_playwright() as p:
+            headless_val = False if is_real_capture else True
+            launch_kwargs = {"headless": headless_val}
+            if is_real_capture:
+                launch_kwargs["args"] = [
+                    f"--window-size={width},{height}",
+                    "--start-maximized",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage"
+                ]
+            logger.info(f"启动单次使用 chromium 浏览器 (headless={headless_val})...")
+            tmp_browser = p.chromium.launch(**launch_kwargs)
+            try:
+                local_contexts = {}
+                res = _capture_with_browser(
+                    item, job, run_id, suffix, tmp_browser, width, height, timeout_ms,
+                    screenshot_dir, file_name, output_path, resolved_url, is_real_capture,
+                    auth_profile, local_contexts
+                )
+                return res
+            finally:
+                for ctx in list(local_contexts.values()):
+                    try:
+                        ctx.close()
+                    except Exception:
+                        pass
+                tmp_browser.close()
+    else:
+        return _capture_with_browser(
+            item, job, run_id, suffix, browser, width, height, timeout_ms,
+            screenshot_dir, file_name, output_path, resolved_url, is_real_capture,
+            auth_profile, contexts
+        )
+
+
+def _capture_with_browser(
+    item: dict[str, Any],
+    job: dict[str, Any],
+    run_id: int,
+    suffix: str,
+    browser: Any,
+    width: int,
+    height: int,
+    timeout_ms: int,
+    screenshot_dir: Path,
+    file_name: str,
+    output_path: Path,
+    resolved_url: str,
+    is_real_capture: bool,
+    auth_profile: dict[str, Any] | None,
+    contexts: dict[Any, Any] | None,
+) -> CaptureResult:
+    auth_id = auth_profile["id"] if auth_profile else None
+    
+    if contexts is not None and auth_id in contexts:
+        context = contexts[auth_id]
+    else:
         context = _new_context(browser, auth_profile, width, height)
-        try:
+        if contexts is not None:
+            contexts[auth_id] = context
+            
+    page = context.new_page()
+    try:
+        page.set_default_timeout(timeout_ms)
+        page.set_viewport_size({"width": width, "height": height})
+        
+        _ensure_logged_in(context, page, auth_profile, timeout_ms)
+        
+        logger.info(f"正在加载截图 URL: {resolved_url}")
+        page.goto(resolved_url, wait_until="domcontentloaded", timeout=timeout_ms)
+        
+        state_path = _storage_state_path(auth_profile)
+        if state_path and state_path.exists() and _is_on_login_page(page, auth_profile):
+            logger.warning("载入缓存状态文件后访问目标页面，却被重定向回了登录页。将清空失效的缓存文件并尝试重新登录自愈！")
+            safe_delete_auth_state(auth_profile)
+            
+            page.close()
+            if contexts is not None and auth_id in contexts:
+                try:
+                    contexts[auth_id].close()
+                except Exception:
+                    pass
+                del contexts[auth_id]
+                
+            context = _new_context(browser, auth_profile, width, height)
+            if contexts is not None:
+                contexts[auth_id] = context
+                
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
+            page.set_viewport_size({"width": width, "height": height})
+            
             _ensure_logged_in(context, page, auth_profile, timeout_ms)
-            
-            logger.info(f"正在加载截图 URL: {resolved_url}")
+            logger.info(f"登录自愈重试完毕，再次载入截图页面 URL: {resolved_url}")
             page.goto(resolved_url, wait_until="domcontentloaded", timeout=timeout_ms)
+
+        _wait_for_page(page, item, timeout_ms)
+        _take_screenshot(page, item, output_path, is_real_capture)
+        _persist_storage_state(context, auth_profile)
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
             
-            # 检测登录态是否失效（如被重定向回登录表单）
-            state_path = _storage_state_path(auth_profile)
-            if state_path and state_path.exists() and _is_on_login_page(page, auth_profile):
-                logger.warning("载入缓存状态文件后访问目标页面，却被重定向回了登录页。将清空失效的缓存文件并尝试重新登录自愈！")
-                safe_delete_auth_state(auth_profile)
-                
-                # 关闭过期的 context 并重新创建一个干净的 context
-                context.close()
-                context = browser.new_context(
-                    viewport={"width": width, "height": height},
-                    ignore_https_errors=True,
-                    locale="zh-CN",
-                    timezone_id=settings.default_timezone,
-                )
-                page = context.new_page()
-                page.set_default_timeout(timeout_ms)
-                
-                # 重新表单登录与缓存
-                _ensure_logged_in(context, page, auth_profile, timeout_ms)
-                
-                logger.info(f"登录自愈重试完毕，再次载入截图页面 URL: {resolved_url}")
-                page.goto(resolved_url, wait_until="domcontentloaded", timeout=timeout_ms)
-
-            _wait_for_page(page, item, timeout_ms)
-            _take_screenshot(page, item, output_path, is_real_capture)
-            _persist_storage_state(context, auth_profile)
-        finally:
-            context.close()
-            browser.close()
-
     logger.info(f"截图成功并保存至: {output_path}")
     return CaptureResult(status="success", file_path=str(output_path))
 
@@ -445,11 +504,7 @@ def _take_screenshot(page: Page, item: dict[str, Any], output_path: Path, is_rea
         import os
         display = os.getenv("DISPLAY")
         if not display:
-            raise RuntimeError(
-                "真实浏览器窗口截图失败：未检测到 DISPLAY 环境变量。\n"
-                "请检查容器环境是否已安装并启动了 Xvfb 虚拟显示服务（如通过 Xvfb :99 并在环境变量中配置了 DISPLAY=:99）。\n"
-                "如果您在非 Linux 容器环境测试，也可以在前端关闭“真实浏览器窗口截图”选项，使用普通截图模式。"
-            )
+            raise RuntimeError("真实浏览器窗口截图需要启用 Xvfb 或虚拟桌面环境")
             
         # 2. 验证 mss 库是否安装
         try:

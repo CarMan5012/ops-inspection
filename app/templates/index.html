@@ -127,7 +127,7 @@
           <span class="badge">{{ run.status | status_label }}</span>
           {% endif %}
         </td>
-        <td>{{ run.started_at }}</td>
+        <td>{{ run.started_at | short_date }}</td>
         <td><span style="color: var(--success); font-weight: 600;">{{ run.success_count }} 张</span></td>
         <td>
           {% if run.failed_count > 0 %}

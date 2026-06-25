@@ -95,6 +95,31 @@
       </select>
       <span class="form-tip">选择巡检报告生成后，用于执行发信的 SMTP 邮箱配置。</span>
     </label>
+
+    <!-- 钉钉群组推送 -->
+    <div class="span-2" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 16px; border-radius: 6px; margin-top: 10px;">
+      <label class="check" style="margin-bottom: 12px; display: block; font-weight: 600;">
+        <input name="dingtalk_enabled" type="checkbox" id="dingtalk_enabled_chk" onchange="toggleDingtalkFields(this.checked)" {% if job.dingtalk_enabled %}checked{% endif %}>
+        启用钉钉群组推送
+      </label>
+      <div id="dingtalk_fields_container" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; transition: opacity 0.2s;">
+        <label class="span-2">
+          Webhook 地址
+          <input name="dingtalk_webhook" id="dingtalk_webhook_input" value="{{ job.dingtalk_webhook or '' }}" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
+          <span class="form-tip">自定义机器人的 Webhook 地址。</span>
+        </label>
+        <label>
+          加签密钥 (Secret)
+          <input name="dingtalk_secret" id="dingtalk_secret_input" value="{{ job.dingtalk_secret or '' }}" placeholder="SEC... (可选)">
+          <span class="form-tip">若开启加签安全设置，在此输入 SEC 开头的密钥，否则留空。</span>
+        </label>
+        <label>
+          自定义关键词 (Keyword)
+          <input name="dingtalk_keyword" id="dingtalk_keyword_input" value="{{ job.dingtalk_keyword or '' }}" placeholder="巡检 (可选)">
+          <span class="form-tip">若开启自定义关键词，在此输入一个匹配的关键词，否则留空。</span>
+        </label>
+      </div>
+    </div>
   </div>
 
   <!-- 第四部分：浏览器运行配置 -->
@@ -124,10 +149,7 @@
         <input name="send_mail_on_error" type="checkbox" {% if job.send_mail_on_error is not defined or job.send_mail_on_error %}checked{% endif %}>
         巡检异常时发送邮件
       </label>
-      <label class="check">
-        <input name="headless" type="checkbox" {% if job.headless is not defined or job.headless %}checked{% endif %}>
-        无头模式运行 (Headless, 推荐开启)
-      </label>
+
     </div>
   </div>
 
@@ -258,6 +280,22 @@
       afternoonTimeInput.value = '17:05';
     }
     updateTimeInputs();
+    
+    // 初始化钉钉推送字段状态
+    toggleDingtalkFields(document.getElementById('dingtalk_enabled_chk').checked);
   });
+
+  function toggleDingtalkFields(enabled) {
+    const webhook = document.getElementById('dingtalk_webhook_input');
+    const container = document.getElementById('dingtalk_fields_container');
+    
+    if (enabled) {
+      container.style.opacity = '1';
+      webhook.setAttribute('required', 'required');
+    } else {
+      container.style.opacity = '0.5';
+      webhook.removeAttribute('required');
+    }
+  }
 </script>
 {% endblock %}

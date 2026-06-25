@@ -230,10 +230,14 @@ def trigger_periodic_report(report_type: str, is_manual: bool = False) -> int | 
     else:
         # monthly
         # 本月1号 00:00:00 至本月最后一天 23:59:59
+        # 如果是手动触发且今天不是当月最后一天，截止时间设为当天 23:59:59
         first_day = now_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        import calendar
-        last_day_num = calendar.monthrange(now_dt.year, now_dt.month)[1]
-        last_day = now_dt.replace(day=last_day_num, hour=23, minute=59, second=59, microsecond=0)
+        if is_manual and not is_last_day_of_month(now_dt):
+            last_day = now_dt.replace(hour=23, minute=59, second=59, microsecond=0)
+        else:
+            import calendar
+            last_day_num = calendar.monthrange(now_dt.year, now_dt.month)[1]
+            last_day = now_dt.replace(day=last_day_num, hour=23, minute=59, second=59, microsecond=0)
         
         start_dt = first_day
         end_dt = last_day

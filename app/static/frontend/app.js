@@ -9,6 +9,8 @@ const state = {
   storage: { usage: {}, config: {}, cleanupRuns: [] }
 };
 
+let silentRefreshTimer = null;
+
 let config = {
   apiBase: "/api",
   frontendBase: "/",
@@ -227,6 +229,7 @@ async function loadAll(showToast = false) {
     if (showToast) {
       showSuccess("数据已刷新");
     }
+    checkAndScheduleSilentRefresh();
   } catch (error) {
     renderGlobalError(error);
   }
@@ -239,8 +242,50 @@ async function loadPeriodic(showToast = false) {
     if (showToast) {
       showSuccess("周期报告数据已刷新");
     }
+    checkAndScheduleSilentRefresh();
   } catch (error) {
     renderError(regions.periodic, error);
+  }
+}
+
+function checkAndScheduleSilentRefresh() {
+  const hasRunning = state.runs.some(run => run.status === 'running') || 
+                     (state.periodic.runs || []).some(run => run.status === 'running');
+  
+  if (hasRunning) {
+    if (!silentRefreshTimer) {
+      silentRefreshTimer = setInterval(refreshAllSilently, 4000);
+    }
+  } else {
+    if (silentRefreshTimer) {
+      clearInterval(silentRefreshTimer);
+      silentRefreshTimer = null;
+    }
+  }
+}
+
+async function refreshAllSilently() {
+  try {
+    const dashboard = await apiGet("/dashboard");
+    state.jobs = dashboard.jobs || [];
+    state.runs = dashboard.runs || [];
+    state.authProfiles = dashboard.auth_profiles || [];
+    state.mailProfiles = dashboard.mail_profiles || [];
+    state.metrics = dashboard.metrics || {};
+
+    renderMetrics();
+    renderJobs();
+    renderRecentRuns();
+    renderRuns();
+    renderAuthProfiles();
+    renderMailProfiles();
+    
+    state.periodic = await apiGet("/periodic-reports");
+    renderPeriodic();
+    
+    checkAndScheduleSilentRefresh();
+  } catch (error) {
+    console.error("静默刷新数据失败:", error);
   }
 }
 
@@ -688,14 +733,35 @@ function openJobModal(job = null) {
         <input type="checkbox" name="send_mail_on_error" ${sendMailOnError ? "checked" : ""}>
         巡检异常时发送邮件
       </label>
+
+      <div class="span-2" style="border-top: 1px solid #ddd; margin: 5px 0; padding-top: 10px;">
+        <strong>钉钉推送配置：</strong>
+      </div>
+      <label class="check span-2">
+        <input type="checkbox" name="dingtalk_enabled" id="spa_dingtalk_enabled_chk" ${job && asBool(job.dingtalk_enabled) ? "checked" : ""}>
+        启用钉钉群组推送
+      </label>
+      <div id="spa_dingtalk_fields" class="span-2 form-grid wide" style="padding: 0; gap: 15px; grid-template-columns: 1fr 1fr;">
+        <label class="span-2">
+          Webhook 地址
+          <input name="dingtalk_webhook" id="spa_dingtalk_webhook_input" value="${escapeAttr(job?.dingtalk_webhook || '')}" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
+        </label>
+        <label>
+          加签密钥 (Secret)
+          <input name="dingtalk_secret" value="${escapeAttr(job?.dingtalk_secret || '')}" placeholder="SEC... (可选)">
+        </label>
+        <label>
+          自定义关键词 (Keyword)
+          <input name="dingtalk_keyword" value="${escapeAttr(job?.dingtalk_keyword || '')}" placeholder="巡检 (可选)">
+        </label>
+      </div>
       
-      <details class="advanced-settings span-2">
+      <details class="advanced-settings span-2" style="margin-top: 10px;">
         <summary>高级浏览器设置</summary>
         <div class="form-grid wide advanced-grid">
           ${field("报告标题", "report_title", job?.report_title || "自动化巡检报告")}
           ${field("浏览器宽度", "browser_width", job?.browser_width || 1920, "number")}
           ${field("浏览器高度", "browser_height", job?.browser_height || 1080, "number")}
-          ${checkField("无头浏览器", "headless", job ? asBool(job.headless) : true)}
         </div>
       </details>
       
@@ -710,6 +776,23 @@ function openJobModal(job = null) {
  
   const form = regions.modal.querySelector('[data-form="job"]');
   bindJobFormEvents(form);
+
+  const dtCheck = form.querySelector('#spa_dingtalk_enabled_chk');
+  const dtWebhook = form.querySelector('#spa_dingtalk_webhook_input');
+  const dtFields = form.querySelector('#spa_dingtalk_fields');
+  if (dtCheck && dtWebhook && dtFields) {
+    const updateDingtalkFields = () => {
+      if (dtCheck.checked) {
+        dtFields.style.opacity = '1';
+        dtWebhook.setAttribute('required', 'required');
+      } else {
+        dtFields.style.opacity = '0.5';
+        dtWebhook.removeAttribute('required');
+      }
+    };
+    dtCheck.addEventListener('change', updateDingtalkFields);
+    updateDingtalkFields();
+  }
   
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -897,6 +980,7 @@ async function runJob(jobId, btn = null) {
     showSuccess(`任务已开始运行，运行记录 #${result.run_id}`);
     await loadAll();
     location.hash = viewToHash["runs"];
+    checkAndScheduleSilentRefresh();
   } catch (error) {
     showError(error.message || "启动任务失败。");
   } finally {
@@ -927,6 +1011,7 @@ async function runPeriodic(reportType, btn = null) {
     await apiJson(`/periodic-reports/${encodeURIComponent(reportType)}/run`, { method: "POST" });
     showSuccess("周期报告生成任务已启动。");
     await loadPeriodic(false);
+    checkAndScheduleSilentRefresh();
   } catch (error) {
     showError(error.message || "启动周期报告失败。");
   } finally {

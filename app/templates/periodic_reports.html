@@ -117,7 +117,7 @@
           {% endif %}
         </td>
         <td>{{ run.size_str }}</td>
-        <td class="url-text">{{ run.started_at }}</td>
+        <td class="url-text">{{ run.started_at | short_date }}</td>
         <td class="actions">
           {% if run.zip_path %}
           <a class="button" href="/periodic-reports/download/{{ run.id }}" style="padding: 4px 8px; font-size: 12px; background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.2); color: var(--success); font-weight: 600;">下载 ZIP</a>

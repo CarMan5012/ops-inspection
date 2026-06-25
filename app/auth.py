@@ -15,7 +15,7 @@ COOKIE_NAME = "inspection_auth"
 def create_token(username: str) -> str:
     timestamp = str(int(time.time()))
     payload = f"{username}:{timestamp}"
-    signature = _sign(payload)
+    signature = _sign(payload, settings.admin_password)
     return f"{payload}:{signature}"
 
 
@@ -34,7 +34,7 @@ def verify_token(token: str | None) -> bool:
         return False
     if time.time() - issued_at > 7 * 24 * 3600:
         return False
-    expected = _sign(f"{username}:{timestamp}")
+    expected = _sign(f"{username}:{timestamp}", settings.admin_password)
     return hmac.compare_digest(signature, expected)
 
 
@@ -54,9 +54,10 @@ def require_login(request: Request) -> None:
     )
 
 
-def _sign(payload: str) -> str:
+def _sign(payload: str, extra: str = "") -> str:
+    full_payload = f"{payload}:{extra}"
     return hmac.new(
         settings.secret_key.encode("utf-8"),
-        payload.encode("utf-8"),
+        full_payload.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()

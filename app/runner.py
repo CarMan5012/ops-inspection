@@ -19,11 +19,13 @@ from app.repository import (
     update_run,
 )
 from app.screenshot import capture_item
+from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger("app.runner")
 
 
 def run_job(job_id: int, run_id: int | None = None) -> int:
+    is_scheduled = (run_id is None)
     job = get_job(job_id)
     if not job:
         logger.error(f"任务不存在: {job_id}")
@@ -64,23 +66,50 @@ def run_job(job_id: int, run_id: int | None = None) -> int:
         success_count = 0
         failed_count = 0
 
-        for item in items:
-            result = capture_item(item, job, run_id)
-            if result.status == "success":
-                success_count += 1
-            else:
-                failed_count += 1
-            add_screenshot_result(
-                {
-                    "run_id": run_id,
-                    "item_id": item["id"],
-                    "item_name": item["name"],
-                    "section": item["section"],
-                    "status": result.status,
-                    "file_path": result.file_path,
-                    "error_message": result.error_message,
-                }
-            )
+        any_real_capture = any(bool(item.get("real_browser_capture") if "real_browser_capture" in item else 1) for item in items)
+        headless_val = False if any_real_capture else True
+        launch_kwargs = {"headless": headless_val}
+        
+        if any_real_capture:
+            first_w = int(items[0].get("browser_width") or job.get("browser_width") or 1920)
+            first_h = int(items[0].get("browser_height") or job.get("browser_height") or 1080)
+            launch_kwargs["args"] = [
+                f"--window-size={first_w},{first_h}",
+                "--start-maximized",
+                "--no-sandbox",
+                "--disable-dev-shm-usage"
+            ]
+
+        logger.info(f"启动批处理 Chromium 浏览器 (headless={launch_kwargs['headless']})...")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(**launch_kwargs)
+            contexts = {}
+            try:
+                for item in items:
+                    result = capture_item(item, job, run_id, browser=browser, contexts=contexts)
+                    if result.status == "success":
+                        success_count += 1
+                    else:
+                        failed_count += 1
+                    add_screenshot_result(
+                        {
+                            "run_id": run_id,
+                            "item_id": item["id"],
+                            "item_name": item["name"],
+                            "section": item["section"],
+                            "status": result.status,
+                            "file_path": result.file_path,
+                            "error_message": result.error_message,
+                        }
+                    )
+            finally:
+                logger.info("正在关闭所有浏览器 context 及进程...")
+                for ctx in list(contexts.values()):
+                    try:
+                        ctx.close()
+                    except Exception:
+                        pass
+                browser.close()
 
         status = "success" if failed_count == 0 else "partial_success"
         logger.info(f"截图环节结束. 状态: {status}, 成功数: {success_count}, 失败数: {failed_count}")
@@ -110,13 +139,23 @@ def run_job(job_id: int, run_id: int | None = None) -> int:
         if send_error is None:
             send_error = 1
 
+        mail_status = "skipped"
         should_send = False
         if status == "success":
-            should_send = int(send_complete) == 1
+            if int(send_complete) == 1:
+                if is_scheduled:
+                    from app.utils import has_more_scheduled_runs_today
+                    started_at = run.get("started_at") or ""
+                    if has_more_scheduled_runs_today(job.get("cron_expression") or "", started_at, settings.default_timezone):
+                        logger.info("检测到今天后续还有定时巡检任务，且本次运行成功，跳过发送邮件。")
+                        mail_status = "skipped"
+                    else:
+                        should_send = True
+                else:
+                    should_send = True
         else:
             should_send = int(send_error) == 1
 
-        mail_status = "skipped"
         if should_send:
             logger.info(f"触发邮件发信：状态是 {status}，开始准备发信...")
             try:
@@ -134,6 +173,15 @@ def run_job(job_id: int, run_id: int | None = None) -> int:
             run_id,
             mail_status=mail_status,
             finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
+        )
+        _send_dingtalk_notification(
+            job,
+            run_id,
+            status=status,
+            success_count=success_count,
+            failed_count=failed_count,
+            error_summary=run.get("error_summary") or ("" if failed_count == 0 else f"本次巡检有 {failed_count} 个截图项抓取失败。"),
+            mail_status=mail_status,
         )
         logger.info(f"======> 巡检任务 '{job['name']}' (ID: {job_id}, 运行 ID: {run_id}) 执行完毕 <======")
     except Exception as exc:  # noqa: BLE001 - run should keep failure details.
@@ -160,6 +208,15 @@ def run_job(job_id: int, run_id: int | None = None) -> int:
             error_summary=err_summary,
             mail_status=mail_status,
             finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
+        )
+        _send_dingtalk_notification(
+            job,
+            run_id,
+            status="failed",
+            success_count=0,
+            failed_count=0,
+            error_summary=err_summary,
+            mail_status=mail_status,
         )
     return run_id
 
@@ -195,3 +252,56 @@ def test_capture_item(item_id: int) -> int:
         finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
     )
     return run_id
+
+
+def _send_dingtalk_notification(
+    job: dict[str, Any],
+    run_id: int,
+    status: str,
+    success_count: int,
+    failed_count: int,
+    error_summary: str,
+    mail_status: str,
+) -> None:
+    if job.get("dingtalk_enabled") != 1:
+        return
+
+    webhook = job.get("dingtalk_webhook")
+    if not webhook:
+        logger.warning(f"任务 {job.get('id')} 启用了钉钉推送但 Webhook 为空，跳过推送。")
+        return
+
+    secret = job.get("dingtalk_secret")
+    keyword = job.get("dingtalk_keyword")
+
+    title = f"巡检任务执行结果 - {job.get('name')}"
+
+    from app.main import status_label, mail_status_label
+    status_cn = status_label(status)
+    mail_status_cn = mail_status_label(mail_status)
+
+    failed_text = f"**{failed_count}**" if failed_count > 0 else "0"
+
+    md_lines = [
+        "### 巡检任务报告",
+        f"- **任务名称**: {job.get('name')}",
+        f"- **运行环境**: {job.get('environment')}",
+        f"- **执行状态**: {status_cn}",
+        f"- **截图成功**: {success_count} 张",
+        f"- **截图失败**: {failed_text} 张",
+        f"- **邮件状态**: {mail_status_cn}",
+    ]
+
+    if error_summary:
+        clean_err = error_summary.strip()
+        if len(clean_err) > 300:
+            clean_err = clean_err[:300] + "..."
+        md_lines.append(f"- **异常摘要**:\n```\n{clean_err}\n```")
+
+    text = "\n".join(md_lines)
+
+    from app.dingtalk import send_dingtalk_msg
+    logger.info("正在发送钉钉 Webhook 推送...")
+    dt_status = send_dingtalk_msg(webhook, secret, keyword, title, text)
+    update_run(run_id, dingtalk_status=dt_status)
+

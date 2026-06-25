@@ -246,3 +246,46 @@ def get_next_run_times(cron_expression: str, limit: int = 3) -> list[str]:
         
     unique_times = sorted(list(set(fire_times)))
     return [t.strftime("%Y-%m-%d %H:%M:%S") for t in unique_times[:limit]]
+
+
+def has_more_scheduled_runs_today(cron_expression: str, start_time_str: str, timezone_str: str) -> bool:
+    from apscheduler.triggers.cron import CronTrigger
+    from zoneinfo import ZoneInfo
+    from datetime import datetime, timedelta
+    
+    if not cron_expression:
+        return False
+        
+    local_tz = ZoneInfo(timezone_str)
+    
+    try:
+        if "T" in start_time_str:
+            base_dt = datetime.fromisoformat(start_time_str)
+        else:
+            base_dt = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S")
+        if base_dt.tzinfo is None:
+            base_dt = base_dt.replace(tzinfo=local_tz)
+    except Exception:
+        base_dt = datetime.now(local_tz)
+        
+    check_time = base_dt + timedelta(seconds=60)
+    
+    cron_parts = [p.strip() for p in cron_expression.split(";") if p.strip()]
+    for cron_str in cron_parts:
+        cron_str_for_trigger = cron_str.replace("L", "*")
+        parts = cron_str_for_trigger.split()
+        if len(parts) == 6:
+            cron_str_for_trigger = " ".join(parts[1:])
+        try:
+            trigger = CronTrigger.from_crontab(cron_str_for_trigger, timezone=local_tz)
+            next_time = trigger.get_next_fire_time(None, check_time)
+            if next_time:
+                next_time_local = next_time.astimezone(local_tz)
+                if (next_time_local.year == base_dt.year and 
+                    next_time_local.month == base_dt.month and 
+                    next_time_local.day == base_dt.day):
+                    return True
+        except Exception:
+            continue
+    return False
+

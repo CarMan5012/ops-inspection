@@ -79,7 +79,7 @@
         <th>截图项名称 / 目标链接</th>
         <th style="width: 100px;">应用类型</th>
         <th style="width: 130px;">Word 关联章节</th>
-        <th style="width: 100px;">截图模式</th>
+        <th style="width: 120px;">截图模式/窗口</th>
         <th>关联登录凭证</th>
         <th style="width: 80px;">状态</th>
         <th class="actions" style="width: 220px; justify-content: flex-end;">操作</th>
@@ -98,13 +98,20 @@
         </td>
         <td><code>{{ item.section }}</code></td>
         <td>
-          {% if item.capture_mode == 'full_page' %}
-          整页滚动
-          {% elif item.capture_mode == 'viewport' %}
-          当前视口
+          {% if item.real_browser_capture %}
+          <span class="badge ok">真实窗口</span>
           {% else %}
-          局部区域
+          <span class="badge">普通截图</span>
           {% endif %}
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+            {% if item.capture_mode == 'full_page' %}
+            整页滚动
+            {% elif item.capture_mode == 'viewport' %}
+            当前视口
+            {% else %}
+            局部区域
+            {% endif %}
+          </div>
         </td>
         <td>
           {% if item.auth_profile_name %}

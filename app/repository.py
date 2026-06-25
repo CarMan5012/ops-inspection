@@ -49,6 +49,10 @@ def save_job(data: dict[str, Any], job_id: int | None = None) -> int:
         "schedule_config",
         "send_mail_on_complete",
         "send_mail_on_error",
+        "dingtalk_enabled",
+        "dingtalk_webhook",
+        "dingtalk_secret",
+        "dingtalk_keyword",
     )
     values = [data.get(field) for field in fields]
     with connect() as conn:

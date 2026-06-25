@@ -2,11 +2,72 @@ from __future__ import annotations
 
 import os
 import smtplib
+import time
+import socket
+import logging
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
 from app.utils import parse_csv, render_template, today_text, resolve_mail_credential
+
+logger = logging.getLogger("app.mailer")
+
+
+def _execute_send_mail(mail_profile: dict[str, Any], message: EmailMessage, password: str, all_recipients: list[str]) -> None:
+    host = str(mail_profile["smtp_host"])
+    port = int(mail_profile.get("smtp_port") or 465)
+    username = str(mail_profile.get("username") or "")
+    use_ssl = int(mail_profile.get("use_ssl") or 0)
+    use_starttls = int(mail_profile.get("use_starttls") or 0)
+
+    max_retries = 3
+    retry_delay = 5  # seconds
+
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                logger.info(f"正在尝试重新发送邮件 (第 {attempt} 次重试)...")
+            
+            if use_ssl:
+                with smtplib.SMTP_SSL(host, port, timeout=30) as smtp:
+                    if username:
+                        smtp.login(username, password)
+                    smtp.send_message(message, to_addrs=all_recipients)
+            else:
+                with smtplib.SMTP(host, port, timeout=30) as smtp:
+                    if use_starttls:
+                        smtp.starttls()
+                    if username:
+                        smtp.login(username, password)
+                    smtp.send_message(message, to_addrs=all_recipients)
+            
+            return
+            
+        except (smtplib.SMTPDataError, smtplib.SMTPConnectError, smtplib.SMTPHeloError, 
+                socket.timeout, TimeoutError, ConnectionError) as exc:
+            is_transient = True
+            if isinstance(exc, smtplib.SMTPDataError):
+                if 500 <= exc.smtp_code < 600:
+                    is_transient = False
+            
+            if not is_transient:
+                logger.error(f"遭遇永久性 SMTP 错误 (code {exc.smtp_code})，放弃发送。错误详情: {exc}")
+                raise exc
+                
+            if attempt < max_retries:
+                logger.warning(
+                    f"发送邮件遭遇临时错误 (尝试 {attempt + 1}/{max_retries + 1}): "
+                    f"{type(exc).__name__}: {exc}。将在 {retry_delay} 秒后重试。"
+                )
+                time.sleep(retry_delay)
+            else:
+                logger.error(f"邮件发送最终失败，已达最大重试次数: {type(exc).__name__}: {exc}")
+                raise exc
+        except Exception as exc:
+            logger.error(f"遭遇无法重试的非预期发信错误: {type(exc).__name__}: {exc}")
+            raise exc
+
 
 
 def send_report_mail(mail_profile: dict[str, Any], job: dict[str, Any], report_path: str | None, error_msg: str = "") -> str:
@@ -54,20 +115,7 @@ def send_report_mail(mail_profile: dict[str, Any], job: dict[str, Any], report_p
     port = int(mail_profile.get("smtp_port") or 465)
     username = str(mail_profile.get("username") or "")
     all_recipients = recipients + cc
-
-    if int(mail_profile.get("use_ssl") or 0):
-        with smtplib.SMTP_SSL(host, port, timeout=30) as smtp:
-            if username:
-                smtp.login(username, password)
-            smtp.send_message(message, to_addrs=all_recipients)
-    else:
-        with smtplib.SMTP(host, port, timeout=30) as smtp:
-            if int(mail_profile.get("use_starttls") or 0):
-                smtp.starttls()
-            if username:
-                smtp.login(username, password)
-            smtp.send_message(message, to_addrs=all_recipients)
-
+    _execute_send_mail(mail_profile, message, password, all_recipients)
     return "sent"
 
 
@@ -115,19 +163,6 @@ def send_periodic_report_mail(
     port = int(mail_profile.get("smtp_port") or 465)
     username = str(mail_profile.get("username") or "")
     all_recipients = recipients + cc
-
-    if int(mail_profile.get("use_ssl") or 0):
-        with smtplib.SMTP_SSL(host, port, timeout=30) as smtp:
-            if username:
-                smtp.login(username, password)
-            smtp.send_message(message, to_addrs=all_recipients)
-    else:
-        with smtplib.SMTP(host, port, timeout=30) as smtp:
-            if int(mail_profile.get("use_starttls") or 0):
-                smtp.starttls()
-            if username:
-                smtp.login(username, password)
-            smtp.send_message(message, to_addrs=all_recipients)
-
+    _execute_send_mail(mail_profile, message, password, all_recipients)
     return "sent"
 
