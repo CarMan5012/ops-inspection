@@ -266,12 +266,14 @@ def _send_dingtalk_notification(
     if job.get("dingtalk_enabled") != 1:
         return
 
-    webhook = job.get("dingtalk_webhook")
+    from app.utils import decrypt_secret
+
+    webhook = decrypt_secret(str(job.get("dingtalk_webhook") or ""))
     if not webhook:
         logger.warning(f"任务 {job.get('id')} 启用了钉钉推送但 Webhook 为空，跳过推送。")
         return
 
-    secret = job.get("dingtalk_secret")
+    secret = decrypt_secret(str(job.get("dingtalk_secret") or ""))
     keyword = job.get("dingtalk_keyword")
 
     title = f"巡检任务执行结果 - {job.get('name')}"
@@ -304,4 +306,3 @@ def _send_dingtalk_notification(
     logger.info("正在发送钉钉 Webhook 推送...")
     dt_status = send_dingtalk_msg(webhook, secret, keyword, title, text)
     update_run(run_id, dingtalk_status=dt_status)
-

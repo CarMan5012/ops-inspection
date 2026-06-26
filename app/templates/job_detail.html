@@ -64,11 +64,6 @@
 
 <div class="section-title">
   <h2>关联截图项列表</h2>
-  <form method="post" action="/jobs/{{ job.id }}/seed-local" style="margin: 0;">
-    <button type="submit" class="button" style="background: rgba(2, 132, 199, 0.05); border-color: rgba(2, 132, 199, 0.2); color: var(--primary); font-size: 12px; min-height: 30px;">
-      自动填充本地 Grafana 测试项
-    </button>
-  </form>
 </div>
 
 <section class="panel">
@@ -143,12 +138,8 @@
       {% else %}
       <tr>
         <td colspan="8" class="empty" style="padding: 48px; text-align: center;">
-          <p class="muted" style="margin-bottom: 16px; font-size: 14px;">此任务下暂无截图项。请手动添加您的 Grafana/Kibana看板，或者一键导入测试项。</p>
-          <form method="post" action="/jobs/{{ job.id }}/seed-local" style="display: inline-block;">
-            <button type="submit" class="button primary" style="font-size: 13px;">
-              立即一键导入本地 Grafana 测试项
-            </button>
-          </form>
+          <p class="muted" style="margin-bottom: 16px; font-size: 14px;">此任务下暂无截图项，请手动添加需要巡检的页面。</p>
+          <a class="button primary" href="/jobs/{{ job.id }}/items/new" style="font-size: 13px;">新增截图项</a>
         </td>
       </tr>
       {% endfor %}

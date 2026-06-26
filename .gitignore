@@ -4,6 +4,8 @@ __pycache__/
 venv/
 .env
 data/
+secrets/*
+!secrets/README.md
 *.db
 *.sqlite3
 .pytest_cache/

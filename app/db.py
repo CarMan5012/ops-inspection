@@ -206,6 +206,12 @@ def init_db() -> None:
                 error_summary TEXT DEFAULT '',
                 detail_json TEXT DEFAULT ''
             );
+
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         
@@ -255,244 +261,82 @@ def init_db() -> None:
         except sqlite3.OperationalError:
             pass
 
-        seed_defaults(conn)
-    sync_from_env_if_empty()
-
-
-def sync_from_env_if_empty() -> None:
-    import os
-    from app.utils import encrypt_secret
-    
-    # 1. 同步 Grafana 凭据
-    grafana_url = os.getenv("GRAFANA_URL", "")
-    grafana_user = os.getenv("GRAFANA_USER", "")
-    grafana_pass = os.getenv("GRAFANA_PASS", "")
-    
+        seed_system_defaults(conn)
+        migrate_sensitive_values(conn)
     with connect() as conn:
-        row = conn.execute("SELECT * FROM auth_profiles WHERE name = ?", ("Grafana 用户名密码",)).fetchone()
-        if row:
-            p = dict(row)
-            need_update = False
-            update_data = {}
-            if not p.get("username_value") and not p.get("username") and grafana_user:
-                update_data["username_value"] = grafana_user
-                update_data["username"] = grafana_user
-                need_update = True
-            if not p.get("password_secret") and not p.get("password") and grafana_pass:
-                update_data["password_secret"] = encrypt_secret(grafana_pass)
-                update_data["password"] = grafana_pass
-                need_update = True
-            if not p.get("login_url") and grafana_url:
-                update_data["login_url"] = grafana_url
-                need_update = True
-                
-            if need_update:
-                set_clauses = ", ".join([f"{k} = ?" for k in update_data.keys()])
-                conn.execute(
-                    f"UPDATE auth_profiles SET {set_clauses}, updated_at = CURRENT_TIMESTAMP WHERE name = ?",
-                    (*update_data.values(), "Grafana 用户名密码")
-                )
-                
-        # 2. 同步 Kibana 凭据
-        kibana_url = os.getenv("KIBANA_URL", "")
-        kibana_user = os.getenv("KIBANA_USER", "")
-        kibana_pass = os.getenv("KIBANA_PASS", "")
-        
-        row = conn.execute("SELECT * FROM auth_profiles WHERE name = ?", ("Kibana 用户名密码",)).fetchone()
-        if row:
-            p = dict(row)
-            need_update = False
-            update_data = {}
-            if not p.get("username_value") and not p.get("username") and kibana_user:
-                update_data["username_value"] = kibana_user
-                update_data["username"] = kibana_user
-                need_update = True
-            if not p.get("password_secret") and not p.get("password") and kibana_pass:
-                update_data["password_secret"] = encrypt_secret(kibana_pass)
-                update_data["password"] = kibana_pass
-                need_update = True
-            if not p.get("login_url") and kibana_url:
-                update_data["login_url"] = kibana_url
-                need_update = True
-                
-            if need_update:
-                set_clauses = ", ".join([f"{k} = ?" for k in update_data.keys()])
-                conn.execute(
-                    f"UPDATE auth_profiles SET {set_clauses}, updated_at = CURRENT_TIMESTAMP WHERE name = ?",
-                    (*update_data.values(), "Kibana 用户名密码")
-                )
-                
-        # 3. 同步 SMTP 邮件配置
-        smtp_host = os.getenv("SMTP_HOST", "")
-        smtp_port = os.getenv("SMTP_PORT", "")
-        smtp_user = os.getenv("SMTP_USER", "")
-        smtp_pass = os.getenv("SMTP_PASS", "")
-        smtp_from = os.getenv("SMTP_FROM", "")
-        smtp_to = os.getenv("SMTP_TO", "")
-        
-        row = conn.execute("SELECT * FROM mail_profiles WHERE name = ?", ("默认邮件配置",)).fetchone()
-        if row:
-            p = dict(row)
-            need_update = False
-            update_data = {}
-            if not p.get("smtp_host") and smtp_host:
-                update_data["smtp_host"] = smtp_host
-                need_update = True
-            if not p.get("smtp_port") or p.get("smtp_port") == 465:
-                if smtp_port:
-                    try:
-                        update_data["smtp_port"] = int(smtp_port)
-                        need_update = True
-                    except ValueError:
-                        pass
-            if not p.get("username") and smtp_user:
-                update_data["username"] = smtp_user
-                need_update = True
-            if not p.get("password_secret") and not p.get("password") and smtp_pass:
-                update_data["password_secret"] = encrypt_secret(smtp_pass)
-                update_data["password"] = smtp_pass
-                need_update = True
-            if not p.get("sender") and smtp_from:
-                update_data["sender"] = smtp_from
-                need_update = True
-            if not p.get("recipients") and smtp_to:
-                update_data["recipients"] = smtp_to
-                need_update = True
-                
-            if need_update:
-                set_clauses = ", ".join([f"{k} = ?" for k in update_data.keys()])
-                conn.execute(
-                    f"UPDATE mail_profiles SET {set_clauses}, updated_at = CURRENT_TIMESTAMP WHERE name = ?",
-                    (*update_data.values(), "默认邮件配置")
-                )
+        migrate_sensitive_values(conn)
 
 
-def seed_defaults(conn: sqlite3.Connection) -> None:
-    import os
+def migrate_sensitive_values(conn: sqlite3.Connection) -> None:
+    from app.utils import normalize_secret_for_storage
 
-    grafana_base_url = str(os.getenv("GRAFANA_URL") or "http://localhost:3000").rstrip("/")
+    for row in conn.execute("SELECT id, password, password_secret FROM auth_profiles").fetchall():
+        data = dict(row)
+        raw_secret = str(data.get("password_secret") or data.get("password") or "")
+        encrypted = normalize_secret_for_storage(raw_secret, legacy_base64=True)
+        if encrypted or data.get("password"):
+            conn.execute(
+                """
+                UPDATE auth_profiles
+                SET password = '', password_secret = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (encrypted, data["id"]),
+            )
 
-    auth_count = conn.execute("SELECT COUNT(*) FROM auth_profiles").fetchone()[0]
-    if auth_count == 0:
-        conn.execute(
-            """
-            INSERT INTO auth_profiles
-            (name, auth_type, login_url, username_env, password_env, success_selector)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            ("无需登录", "none", "", "", "", ""),
-        )
-        conn.execute(
-            """
-            INSERT INTO auth_profiles
-            (name, auth_type, login_url, username_env, password_env, success_selector)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            ("Grafana 用户名密码", "form", "", "", "", "body"),
-        )
-        conn.execute(
-            """
-            INSERT INTO auth_profiles
-            (name, auth_type, login_url, username_env, password_env, success_selector)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            ("Kibana 用户名密码", "form", "", "", "", "[data-test-subj='dashboardViewport']"),
-        )
-    else:
-        conn.execute(
-            """
-            UPDATE auth_profiles
-            SET success_selector = CASE
-                    WHEN success_selector = '' OR success_selector = '.react-grid-layout' THEN ?
-                    ELSE success_selector
-                END,
-                username_selector = CASE 
-                    WHEN username_selector = 'input[name="user"], input[name="username"], input[type="email"]' OR username_selector = '' 
-                    THEN 'input[name="user"], input[name="username"], input[type="email"], input[placeholder*="username"], input[placeholder*="email"], input[placeholder*="user"]'
-                    ELSE username_selector
-                END,
-                password_selector = CASE 
-                    WHEN password_selector = 'input[name="password"], input[type="password"]' OR password_selector = '' 
-                    THEN 'input[name="password"], input[type="password"], input[placeholder*="password"]'
-                    ELSE password_selector
-                END
-            WHERE name = ?
-            """,
-            ("body", "Grafana 用户名密码"),
-        )
+    for row in conn.execute("SELECT id, password, password_secret FROM mail_profiles").fetchall():
+        data = dict(row)
+        raw_secret = str(data.get("password_secret") or data.get("password") or "")
+        encrypted = normalize_secret_for_storage(raw_secret, legacy_base64=True)
+        if encrypted or data.get("password"):
+            conn.execute(
+                """
+                UPDATE mail_profiles
+                SET password = '', password_secret = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (encrypted, data["id"]),
+            )
 
-    mail_count = conn.execute("SELECT COUNT(*) FROM mail_profiles").fetchone()[0]
-    if mail_count == 0:
-        conn.execute(
-            """
-            INSERT INTO mail_profiles
-            (name, smtp_host, smtp_port, use_ssl, username, password_env, sender, recipients)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            ("默认邮件配置", "", 465, 1, "", "", "", ""),
-        )
+    for row in conn.execute("SELECT id, dingtalk_webhook, dingtalk_secret FROM report_jobs").fetchall():
+        data = dict(row)
+        webhook = normalize_secret_for_storage(str(data.get("dingtalk_webhook") or ""), legacy_base64=True)
+        secret = normalize_secret_for_storage(str(data.get("dingtalk_secret") or ""), legacy_base64=True)
+        if webhook != str(data.get("dingtalk_webhook") or "") or secret != str(data.get("dingtalk_secret") or ""):
+            conn.execute(
+                """
+                UPDATE report_jobs
+                SET dingtalk_webhook = ?, dingtalk_secret = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (webhook, secret, data["id"]),
+            )
 
-    job_count = conn.execute("SELECT COUNT(*) FROM report_jobs").fetchone()[0]
-    if job_count == 0:
-        cur = conn.execute(
-            """
-            INSERT INTO report_jobs
-            (name, environment, cron_expression, time_range_label, report_title, mail_profile_id, send_mail)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            ("生产环境每日巡检", "生产环境", "0 9 * * *", "最近24小时", "自动化巡检报告", 1, 0),
-        )
-        job_id = int(cur.lastrowid)
-    else:
-        first_job = conn.execute("SELECT id FROM report_jobs ORDER BY id LIMIT 1").fetchone()
-        job_id = int(first_job[0]) if first_job else None
 
-    item_count = conn.execute("SELECT COUNT(*) FROM screenshot_items").fetchone()[0]
-    if item_count == 0 and job_id:
-        grafana_auth = conn.execute(
-            "SELECT id FROM auth_profiles WHERE name = ?",
-            ("Grafana 用户名密码",),
-        ).fetchone()
-        conn.execute(
-            """
-            INSERT INTO screenshot_items
-            (job_id, auth_profile_id, name, item_type, url, section, capture_mode, css_selector,
-             wait_selector, wait_seconds, timeout_seconds, retry_count, browser_width, browser_height,
-             sort_order, enabled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                job_id,
-                int(grafana_auth[0]) if grafana_auth else None,
-                "本地 Grafana 测试看板",
-                "grafana",
-                f"{grafana_base_url}/d/local-inspection-test/local-grafana-inspection-test?orgId=1&from=now-1h&to=now&kiosk",
-                "Grafana 看板",
-                "viewport",
-                "",
-                ".react-grid-layout",
-                5,
-                90,
-                2,
-                1920,
-                1080,
-                100,
-                1,
-            ),
-        )
-
-    # Seed periodic report configurations (weekly / monthly)
+def seed_system_defaults(conn: sqlite3.Connection) -> None:
     weekly_count = conn.execute("SELECT COUNT(*) FROM periodic_report_settings WHERE report_type = 'weekly'").fetchone()[0]
     if weekly_count == 0:
         conn.execute(
             """
             INSERT INTO periodic_report_settings
-            (report_type, enabled, name, schedule_mode, schedule_label, cron_expression, mail_profile_id, 
+            (report_type, enabled, name, schedule_mode, schedule_label, cron_expression, mail_profile_id,
              include_screenshots, include_docx, send_empty_report, wait_for_daily_jobs, schedule_config)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("weekly", 0, "每周汇总报告", "simple", "每周一 上午09:00", "0 9 * * 1", 1, 0, 1, 0, 0,
-             '{"frequency": "weekly", "day_of_week": "1", "day_of_month": "1", "times": [{"ampm": "am", "hour": 9, "minute": 0}]}'),
+            (
+                "weekly",
+                0,
+                "每周汇总报告",
+                "simple",
+                "每周一 上午09:00",
+                "0 9 * * 1",
+                None,
+                0,
+                1,
+                0,
+                0,
+                '{"frequency": "weekly", "day_of_week": "1", "day_of_month": "1", "times": [{"ampm": "am", "hour": 9, "minute": 0}]}',
+            ),
         )
 
     monthly_count = conn.execute("SELECT COUNT(*) FROM periodic_report_settings WHERE report_type = 'monthly'").fetchone()[0]
@@ -500,15 +344,26 @@ def seed_defaults(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT INTO periodic_report_settings
-            (report_type, enabled, name, schedule_mode, schedule_label, cron_expression, mail_profile_id, 
+            (report_type, enabled, name, schedule_mode, schedule_label, cron_expression, mail_profile_id,
              include_screenshots, include_docx, send_empty_report, wait_for_daily_jobs, schedule_config)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("monthly", 0, "每月汇总报告", "simple", "每月最后一天 下午18:00", "0 18 L * *", 1, 0, 1, 0, 1,
-             '{"frequency": "monthly_last", "day_of_week": "1", "day_of_month": "1", "times": [{"ampm": "pm", "hour": 6, "minute": 0}]}'),
+            (
+                "monthly",
+                0,
+                "每月汇总报告",
+                "simple",
+                "每月最后一天 下午18:00",
+                "0 18 L * *",
+                None,
+                0,
+                1,
+                0,
+                1,
+                '{"frequency": "monthly_last", "day_of_week": "1", "day_of_month": "1", "times": [{"ampm": "pm", "hour": 6, "minute": 0}]}',
+            ),
         )
 
-    # Seed storage cleanup settings
     cleanup_count = conn.execute("SELECT COUNT(*) FROM storage_cleanup_settings").fetchone()[0]
     if cleanup_count == 0:
         conn.execute(
@@ -527,7 +382,21 @@ def seed_defaults(conn: sqlite3.Connection) -> None:
             )
         )
 
-
+    default_settings = {
+        "swagger_enabled": "0",
+        "mfa_enabled": "0",
+        "mfa_totp_secret": "",
+        "session_ttl_minutes": "30",
+    }
+    for key, value in default_settings.items():
+        conn.execute(
+            """
+            INSERT INTO system_settings (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO NOTHING
+            """,
+            (key, value),
+        )
 def reset_database_data() -> None:
     """一键删除重置所有本地测试数据及物理目录文件"""
     import shutil
@@ -544,6 +413,7 @@ def reset_database_data() -> None:
     with connect() as conn:
         conn.execute("PRAGMA foreign_keys = OFF")
         tables = [
+            "system_settings",
             "storage_cleanup_runs",
             "storage_cleanup_settings",
             "periodic_report_runs",
@@ -564,5 +434,5 @@ def reset_database_data() -> None:
                 pass  # 防御表不存在
         conn.execute("PRAGMA foreign_keys = ON")
         
-        # 3. 重新导入默认种子数据
-        seed_defaults(conn)
+        # 3. 仅恢复系统级默认配置，不再导入演示任务、认证或截图项。
+        seed_system_defaults(conn)

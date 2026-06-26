@@ -4,13 +4,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ title or "自动化巡检报告系统" }}</title>
+  <title>{{ title or "运维管理后台" }}</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 
 <body>
   <header class="topbar">
-    <a class="brand" href="/">自动化巡检</a>
+    <a class="brand" href="/"><span class="brand-mark"><img src="/static/images/logo.svg" alt=""></span><span>运维管理后台</span></a>
     <nav class="nav">
       <a href="/#/jobs">巡检任务</a>
       <a href="/#/runs">运行记录</a>
@@ -57,9 +57,91 @@
       }, duration);
     };
 
+    function getValidationLabel(field) {
+      const label = field.closest('label');
+      if (!label) return field.getAttribute('placeholder') || '此项';
+      const clone = label.cloneNode(true);
+      clone.querySelectorAll('input, textarea, select, button, .form-tip, .form-field-error').forEach((node) => node.remove());
+      return clone.textContent.replace(/\s+/g, ' ').trim() || field.getAttribute('placeholder') || '此项';
+    }
+
+    function clearValidationError(field) {
+      field.classList.remove('form-field-invalid');
+      field.removeAttribute('aria-invalid');
+      const label = field.closest('label');
+      const oldError = label ? label.querySelector('.form-field-error') : null;
+      if (oldError) oldError.remove();
+    }
+
+    function showValidationError(field, message) {
+      clearValidationError(field);
+      field.classList.add('form-field-invalid');
+      field.setAttribute('aria-invalid', 'true');
+      const label = field.closest('label');
+      if (!label) return;
+      const error = document.createElement('div');
+      error.className = 'form-field-error';
+      error.textContent = message;
+      label.appendChild(error);
+    }
+
+    function validateManagedForm(form) {
+      let firstInvalid = null;
+      form.querySelectorAll('input, textarea, select').forEach((field) => {
+        clearValidationError(field);
+        if (field.disabled || field.type === 'hidden') return;
+        const value = String(field.value || '').trim();
+        const label = getValidationLabel(field);
+        let message = '';
+        if (field.required && field.type === 'checkbox' && !field.checked) {
+          message = `请勾选${label}`;
+        } else if (field.required && !value) {
+          message = `请填写${label}`;
+        } else if (value && field.type === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+          message = `${label}格式不正确`;
+        } else if (value && field.type === 'number') {
+          const numberValue = Number(value);
+          const min = field.getAttribute('min');
+          const max = field.getAttribute('max');
+          if (Number.isNaN(numberValue)) message = `${label}必须是数字`;
+          if (!message && min !== null && numberValue < Number(min)) message = `${label}不能小于 ${min}`;
+          if (!message && max !== null && numberValue > Number(max)) message = `${label}不能大于 ${max}`;
+        }
+        if (message) {
+          showValidationError(field, message);
+          if (!firstInvalid) firstInvalid = field;
+        }
+      });
+      if (firstInvalid) {
+        window.showToast('请先完善表单中的必填信息', 'error');
+        try {
+          firstInvalid.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          firstInvalid.focus({ preventScroll: true });
+        } catch (_) {
+          firstInvalid.focus();
+        }
+        return false;
+      }
+      return true;
+    }
+
+    function bindManagedValidation(root = document) {
+      root.querySelectorAll('form').forEach((form) => {
+        form.setAttribute('novalidate', 'novalidate');
+        form.querySelectorAll('input, textarea, select').forEach((field) => {
+          field.addEventListener('input', () => clearValidationError(field));
+          field.addEventListener('change', () => clearValidationError(field));
+        });
+      });
+    }
+
     // Global Form Submit Handlers for Loading States
     document.addEventListener('submit', function (e) {
       const form = e.target;
+      if (!validateManagedForm(form)) {
+        e.preventDefault();
+        return;
+      }
       const action = form.getAttribute('action') || '';
       const submitBtn = form.querySelector('button[type="submit"]');
 
@@ -95,6 +177,7 @@
 
     // Make active link in navbar highlighted & show success/error toasts from URL
     document.addEventListener('DOMContentLoaded', () => {
+      bindManagedValidation();
       const currentPath = window.location.pathname;
       const navLinks = document.querySelectorAll('.nav a');
       navLinks.forEach(link => {

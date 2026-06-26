@@ -10,6 +10,18 @@ from app.settings import settings
 
 
 COOKIE_NAME = "inspection_auth"
+DEFAULT_SESSION_TTL_SECONDS = 30 * 60
+
+
+def get_session_ttl_seconds() -> int:
+    try:
+        from app.repository import get_system_setting
+
+        minutes = int(get_system_setting("session_ttl_minutes", "30") or "30")
+    except Exception:
+        minutes = 30
+    minutes = max(5, min(minutes, 7 * 24 * 60))
+    return minutes * 60
 
 
 def create_token(username: str) -> str:
@@ -32,10 +44,13 @@ def verify_token(token: str | None) -> bool:
         issued_at = int(timestamp)
     except ValueError:
         return False
-    if time.time() - issued_at > 7 * 24 * 3600:
+    if time.time() - issued_at > get_session_ttl_seconds():
         return False
-    expected = _sign(f"{username}:{timestamp}", settings.admin_password)
-    return hmac.compare_digest(signature, expected)
+    for secret_value in [settings.secret_key, *getattr(settings, "legacy_secret_keys", [])]:
+        expected = _sign(f"{username}:{timestamp}", settings.admin_password, secret_value)
+        if hmac.compare_digest(signature, expected):
+            return True
+    return False
 
 
 def check_password(username: str, password: str) -> bool:
@@ -54,10 +69,10 @@ def require_login(request: Request) -> None:
     )
 
 
-def _sign(payload: str, extra: str = "") -> str:
+def _sign(payload: str, extra: str = "", secret_value: str | None = None) -> str:
     full_payload = f"{payload}:{extra}"
     return hmac.new(
-        settings.secret_key.encode("utf-8"),
+        (secret_value or settings.secret_key).encode("utf-8"),
         full_payload.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()

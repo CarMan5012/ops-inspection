@@ -11,10 +11,12 @@ services:
       - .env
     environment:
       APP_DATA_DIR: /app/data
+      APP_SECRET_KEY_FILE: /run/secrets/app_secret_key
       DISPLAY: ":99"
       TZ: Asia/Shanghai
     volumes:
       - ./data:/app/data
+      - ./secrets:/run/secrets
     depends_on:
       - grafana
     restart: unless-stopped

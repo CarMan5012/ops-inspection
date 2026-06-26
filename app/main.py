@@ -4,11 +4,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.auth import COOKIE_NAME, check_password, create_token, require_login, verify_token
+from app.auth import COOKIE_NAME, check_password, create_token, get_session_ttl_seconds, require_login, verify_token
 from app.db import init_db
 from app.repository import (
     create_run,
@@ -31,12 +32,16 @@ from app.repository import (
     save_job,
     save_mail_profile,
     save_screenshot_item,
+    get_system_setting,
+    set_system_setting,
 )
 from app.runner import run_job, test_capture_item
 from app.scheduler import reload_jobs, shutdown_scheduler, start_scheduler
 from app.settings import settings
 from app.storage_paths import get_run_date, resolve_artifact_path
 from app.report import list_template_sections
+from app.openapi import configure_openapi
+from app.login_crypto import LoginPayloadError, decrypt_login_payload, get_login_public_jwk
 import os
 import logging
 import sys
@@ -50,7 +55,14 @@ if not app_logger.handlers:
     app_logger.addHandler(handler)
     app_logger.propagate = False
 
-app = FastAPI(title=settings.app_name)
+app = FastAPI(
+    title=settings.app_name,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    openapi_tags=[],
+)
+configure_openapi(app, settings.api_prefix, settings.app_name)
 
 api_router = APIRouter(prefix=settings.api_prefix)
 
@@ -107,7 +119,15 @@ templates.env.filters["mail_status_label"] = mail_status_label
 templates.env.filters["dingtalk_status_label"] = dingtalk_status_label
 templates.env.filters["short_date"] = short_date
 
-from app.utils import mask_value, resolve_auth_credential, resolve_mail_credential, decrypt_secret
+from app.utils import (
+    build_totp_uri,
+    decrypt_secret,
+    generate_totp_secret,
+    mask_value,
+    resolve_auth_credential,
+    resolve_mail_credential,
+    verify_totp_code,
+)
 
 templates.env.globals["mask_value"] = mask_value
 templates.env.globals["resolve_auth_credential"] = resolve_auth_credential
@@ -328,18 +348,47 @@ def on_shutdown() -> None:
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request) -> HTMLResponse:
+    security = security_settings()
     return templates.TemplateResponse(
         "login.html",
-        {"request": request, "error": request.query_params.get("error", "")},
+        {
+            "request": request,
+            "error": request.query_params.get("error", ""),
+            "mfa_enabled": security["mfa_enabled"],
+            "login_public_key": get_login_public_jwk(),
+        },
     )
 
 
 @app.post("/login")
-def login(username: str = Form(...), password: str = Form(...)) -> RedirectResponse:
+def login(
+    login_payload: str = Form(""),
+) -> RedirectResponse:
+    if not login_payload:
+        return RedirectResponse("/login?error=1", status_code=303)
+    try:
+        payload = decrypt_login_payload(login_payload)
+    except LoginPayloadError:
+        return RedirectResponse("/login?error=1", status_code=303)
+    username = payload["username"]
+    password = payload["password"]
+    mfa_code = payload["mfa_code"]
+
     if not check_password(username, password):
         return RedirectResponse("/login?error=1", status_code=303)
+    security = security_settings()
+    if security["mfa_enabled"]:
+        secret = current_mfa_secret()
+        if not secret or not verify_totp_code(secret, mfa_code):
+            return RedirectResponse("/login?error=mfa", status_code=303)
     response = RedirectResponse("/", status_code=303)
-    response.set_cookie(COOKIE_NAME, create_token(username), httponly=True, samesite="lax")
+    response.set_cookie(
+        COOKIE_NAME,
+        create_token(username),
+        httponly=True,
+        samesite="lax",
+        max_age=get_session_ttl_seconds(),
+    )
     return response
 
 
@@ -359,6 +408,60 @@ def get_app_config() -> dict[str, str]:
     }
 
 
+SWAGGER_SETTING_KEY = "swagger_enabled"
+MFA_ENABLED_KEY = "mfa_enabled"
+MFA_SECRET_KEY = "mfa_totp_secret"
+SESSION_TTL_MINUTES_KEY = "session_ttl_minutes"
+
+
+def security_settings() -> dict[str, Any]:
+    return {
+        "mfa_enabled": get_system_setting(MFA_ENABLED_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"},
+        "session_ttl_minutes": max(5, min(int(get_system_setting(SESSION_TTL_MINUTES_KEY, "30") or "30"), 7 * 24 * 60)),
+        "mfa_configured": bool(get_system_setting(MFA_SECRET_KEY, "")),
+    }
+
+
+def current_mfa_secret() -> str:
+    return decrypt_secret(get_system_setting(MFA_SECRET_KEY, ""))
+
+
+def swagger_docs_enabled() -> bool:
+    return get_system_setting(SWAGGER_SETTING_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def require_swagger_access(request: Request) -> None:
+    require_login(request)
+    if not swagger_docs_enabled():
+        raise HTTPException(status_code=404, detail="接口文档未开启")
+
+
+@app.get("/openapi.json", include_in_schema=False)
+def openapi_json(_: None = Depends(require_swagger_access)) -> dict[str, Any]:
+    return app.openapi()
+
+
+@app.get("/docs", include_in_schema=False)
+def swagger_docs(_: None = Depends(require_swagger_access)) -> HTMLResponse:
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title=f"{settings.app_name} API 文档",
+    )
+
+
+@app.get("/redoc", include_in_schema=False)
+def redoc_docs(_: None = Depends(require_swagger_access)) -> HTMLResponse:
+    return get_redoc_html(
+        openapi_url="/openapi.json",
+        title=f"{settings.app_name} API 文档",
+    )
+
+
+@app.get("/swagger", include_in_schema=False)
+def swagger_page(_: None = Depends(require_swagger_access)) -> RedirectResponse:
+    return RedirectResponse("/docs", status_code=303)
+
+
 def require_api_login(request: Request) -> None:
     if verify_token(request.cookies.get(COOKIE_NAME)):
         return
@@ -369,14 +472,14 @@ api_status_label = status_label
 api_mail_status_label = mail_status_label
 
 
-def bool_value(value: Any, default: bool = False) -> int:
+def bool_value(value: Any, default: bool = False) -> bool:
     if value is None:
-        return 1 if default else 0
+        return bool(default)
     if isinstance(value, bool):
-        return 1 if value else 0
+        return value
     if isinstance(value, (int, float)):
-        return 1 if value else 0
-    return 1 if str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"} else 0
+        return value != 0
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def text_value(payload: dict[str, Any], key: str, default: str = "") -> str:
@@ -431,6 +534,82 @@ def public_mail_profile(profile: dict[str, Any]) -> dict[str, Any]:
         data.pop(key, None)
     data["has_password"] = bool(profile.get("password") or profile.get("password_secret"))
     return data
+
+
+def public_job(job: dict[str, Any]) -> dict[str, Any]:
+    data = dict(job)
+    data["has_dingtalk_webhook"] = bool(job.get("dingtalk_webhook"))
+    data["has_dingtalk_secret"] = bool(job.get("dingtalk_secret"))
+    data["dingtalk_webhook"] = ""
+    data["dingtalk_secret"] = ""
+    return data
+
+
+def public_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [public_job(job) for job in jobs]
+
+
+@api_router.get("/swagger-settings", dependencies=[Depends(require_api_login)])
+def api_get_swagger_settings() -> dict[str, Any]:
+    return {"enabled": swagger_docs_enabled()}
+
+
+@api_router.put("/swagger-settings", dependencies=[Depends(require_api_login)])
+def api_update_swagger_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    enabled = bool_value(payload.get("enabled"), False)
+    set_system_setting(SWAGGER_SETTING_KEY, "1" if enabled else "0")
+    return {"ok": True, "enabled": bool(enabled)}
+
+
+@api_router.get("/security-settings", dependencies=[Depends(require_api_login)])
+def api_get_security_settings() -> dict[str, Any]:
+    data = security_settings()
+    data["mfa_secret"] = ""
+    data["mfa_otpauth_url"] = ""
+    data["qr_uri"] = ""
+    return data
+
+
+@api_router.put("/security-settings", dependencies=[Depends(require_api_login)])
+def api_update_security_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    session_minutes = max(5, min(int_value(payload, "session_ttl_minutes", 30), 7 * 24 * 60))
+    was_mfa_enabled = security_settings()["mfa_enabled"]
+    mfa_enabled = bool_value(payload.get("mfa_enabled"), False)
+    verify_code = text_value(payload, "mfa_code", "")
+    if verify_code:
+        mfa_enabled = True
+    current_secret = current_mfa_secret()
+
+    if mfa_enabled and not current_secret:
+        raise HTTPException(status_code=400, detail="请先生成并绑定 MFA 认证")
+
+    if mfa_enabled and (verify_code or not was_mfa_enabled):
+        if not verify_totp_code(current_secret, verify_code):
+            raise HTTPException(status_code=400, detail="MFA 验证码不正确")
+
+    set_system_setting(SESSION_TTL_MINUTES_KEY, str(session_minutes))
+    set_system_setting(MFA_ENABLED_KEY, "1" if mfa_enabled else "0")
+
+    return {"ok": True, **security_settings()}
+
+
+@api_router.post("/security-settings/mfa-secret", dependencies=[Depends(require_api_login)])
+def api_generate_mfa_secret() -> dict[str, Any]:
+    from app.utils import encrypt_secret
+
+    secret = generate_totp_secret()
+    set_system_setting(MFA_SECRET_KEY, encrypt_secret(secret))
+    set_system_setting(MFA_ENABLED_KEY, "0")
+    otpauth_url = build_totp_uri(secret, settings.admin_username, settings.app_name)
+    return {
+        "ok": True,
+        "mfa_enabled": False,
+        "mfa_configured": True,
+        "mfa_secret": secret,
+        "mfa_otpauth_url": otpauth_url,
+        "secret": secret,
+        "qr_uri": otpauth_url,
+    }
 
 
 def api_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -606,7 +785,7 @@ def api_dashboard() -> dict[str, Any]:
     runs = [enrich_run(run) for run in list_runs(12)]
     return {
         "app_name": "自动化巡检控制台",
-        "jobs": jobs,
+        "jobs": public_jobs(jobs),
         "runs": runs,
         "metrics": dashboard_metrics(jobs, runs),
         "auth_profiles": [public_auth_profile(profile) for profile in list_auth_profiles()],
@@ -617,7 +796,7 @@ def api_dashboard() -> dict[str, Any]:
 @api_router.get("/jobs", dependencies=[Depends(require_api_login)])
 def api_list_jobs() -> dict[str, Any]:
     jobs = list_jobs()
-    return {"jobs": jobs, "metrics": dashboard_metrics(jobs, list_runs(20))}
+    return {"jobs": public_jobs(jobs), "metrics": dashboard_metrics(jobs, list_runs(20))}
 
 
 @api_router.post("/jobs", dependencies=[Depends(require_api_login)])
@@ -628,7 +807,7 @@ def api_create_job(payload: dict[str, Any]) -> dict[str, Any]:
     validate_cron_expression(data["cron_expression"])
     job_id = save_job(data)
     reload_jobs()
-    return {"ok": True, "job": get_job(job_id)}
+    return {"ok": True, "job": public_job(require_value(get_job(job_id), "任务不存在"))}
 
 
 @api_router.get("/jobs/{job_id}", dependencies=[Depends(require_api_login)])
@@ -642,7 +821,7 @@ def api_get_job(job_id: int) -> dict[str, Any]:
         next_runs = get_next_run_times(job.get("cron_expression") or "", limit=3)
     latest = next((run for run in list_runs(50) if run.get("job_id") == job_id), None)
     return {
-        "job": job,
+        "job": public_job(job),
         "items": items,
         "next_runs": next_runs,
         "last_status": api_status_label(latest.get("status") if latest else ""),
@@ -656,12 +835,16 @@ def api_get_job(job_id: int) -> dict[str, Any]:
 def api_update_job(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     from app.utils import validate_cron_expression
 
-    require_value(get_job(job_id), "任务不存在")
+    old = require_value(get_job(job_id), "任务不存在")
     data = api_job_payload(payload)
+    if not data.get("dingtalk_webhook"):
+        data["dingtalk_webhook"] = old.get("dingtalk_webhook") or ""
+    if not data.get("dingtalk_secret"):
+        data["dingtalk_secret"] = old.get("dingtalk_secret") or ""
     validate_cron_expression(data["cron_expression"])
     save_job(data, job_id)
     reload_jobs()
-    return {"ok": True, "job": get_job(job_id)}
+    return {"ok": True, "job": public_job(require_value(get_job(job_id), "任务不存在"))}
 
 
 @api_router.delete("/jobs/{job_id}", dependencies=[Depends(require_api_login)])
@@ -729,19 +912,13 @@ def api_list_auth_profiles() -> dict[str, Any]:
 
 @api_router.post("/auth-profiles", dependencies=[Depends(require_api_login)])
 def api_create_auth_profile(payload: dict[str, Any]) -> dict[str, Any]:
-    from app.utils import encrypt_secret
-
     data = api_auth_payload(payload)
-    if data.get("password"):
-        data["password_secret"] = encrypt_secret(data["password"])
     auth_id = save_auth_profile(data)
     return {"ok": True, "profile": public_auth_profile(require_value(get_auth_profile(auth_id), "认证配置不存在"))}
 
 
 @api_router.put("/auth-profiles/{auth_id}", dependencies=[Depends(require_api_login)])
 def api_update_auth_profile(auth_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-    from app.utils import encrypt_secret
-
     old = require_value(get_auth_profile(auth_id), "认证配置不存在")
     data = api_auth_payload(payload)
     changed = any(
@@ -754,11 +931,8 @@ def api_update_auth_profile(auth_id: int, payload: dict[str, Any]) -> dict[str, 
         )
     )
     if data.get("password"):
-        data["password_secret"] = encrypt_secret(data["password"])
-        if data["password_secret"] != old.get("password_secret"):
-            changed = True
+        changed = True
     else:
-        data["password"] = old.get("password")
         data["password_secret"] = old.get("password_secret")
     if not data.get("username_value"):
         data["username"] = old.get("username")
@@ -793,25 +967,16 @@ def api_list_mail_profiles() -> dict[str, Any]:
 
 @api_router.post("/mail-profiles", dependencies=[Depends(require_api_login)])
 def api_create_mail_profile(payload: dict[str, Any]) -> dict[str, Any]:
-    from app.utils import encrypt_secret
-
     data = api_mail_payload(payload)
-    if data.get("password"):
-        data["password_secret"] = encrypt_secret(data["password"])
     mail_id = save_mail_profile(data)
     return {"ok": True, "profile": public_mail_profile(require_value(get_mail_profile(mail_id), "邮件配置不存在"))}
 
 
 @api_router.put("/mail-profiles/{mail_id}", dependencies=[Depends(require_api_login)])
 def api_update_mail_profile(mail_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-    from app.utils import encrypt_secret
-
     old = require_value(get_mail_profile(mail_id), "邮件配置不存在")
     data = api_mail_payload(payload)
-    if data.get("password"):
-        data["password_secret"] = encrypt_secret(data["password"])
-    else:
-        data["password"] = old.get("password")
+    if not data.get("password"):
         data["password_secret"] = old.get("password_secret")
     save_mail_profile(data, mail_id)
     return {"ok": True, "profile": public_mail_profile(require_value(get_mail_profile(mail_id), "邮件配置不存在"))}
@@ -941,11 +1106,16 @@ def edit_job(request: Request, job_id: int) -> HTMLResponse:
 def update_job(job_id: int, form: dict[str, Any] = Depends(job_form)) -> RedirectResponse:
     from app.utils import validate_cron_expression
     from urllib.parse import quote
+    old = require_value(get_job(job_id), "任务不存在")
     try:
         validate_cron_expression(form["cron_expression"])
     except ValueError as e:
         return RedirectResponse(f"/jobs/{job_id}/edit?error={quote(str(e))}", status_code=303)
 
+    if not form.get("dingtalk_webhook"):
+        form["dingtalk_webhook"] = old.get("dingtalk_webhook") or ""
+    if not form.get("dingtalk_secret"):
+        form["dingtalk_secret"] = old.get("dingtalk_secret") or ""
     save_job(form, job_id)
     reload_jobs()
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
@@ -1056,10 +1226,6 @@ def new_auth_profile(request: Request) -> HTMLResponse:
 
 @app.post("/auth-profiles/new", dependencies=[Depends(require_login)])
 def create_auth_profile(form: dict[str, Any] = Depends(auth_form)) -> RedirectResponse:
-    from app.utils import encrypt_secret
-    # 密码加密存储
-    if form.get("password"):
-        form["password_secret"] = encrypt_secret(form["password"])
     auth_id = save_auth_profile(form)
     return RedirectResponse("/auth-profiles", status_code=303)
 
@@ -1075,15 +1241,11 @@ def edit_auth_profile(request: Request, auth_id: int) -> HTMLResponse:
 
 @app.post("/auth-profiles/{auth_id}/edit", dependencies=[Depends(require_login)])
 def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form)) -> RedirectResponse:
-    from app.utils import encrypt_secret
     old = get_auth_profile(auth_id)
     if old:
         # 若留空代表不修改，沿用旧凭据
         if not form.get("password"):
             form["password_secret"] = old.get("password_secret")
-            form["password"] = old.get("password")
-        else:
-            form["password_secret"] = encrypt_secret(form["password"])
             
         if not form.get("username_value"):
             form["username_value"] = old.get("username_value")
@@ -1103,7 +1265,7 @@ def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form))
                 "username_env", "password_env", "storage_state_path"
             )
         )
-        if form.get("password_secret") != old.get("password_secret"):
+        if form.get("password"):
             changed = True
 
         if changed:
@@ -1138,55 +1300,6 @@ def test_auth_profile_route_async(auth_id: int) -> dict[str, Any]:
     return test_auth_profile_login(auth_id)
 
 
-@app.post("/jobs/{job_id}/seed-local", dependencies=[Depends(require_login)])
-def seed_local_test_item(job_id: int) -> RedirectResponse:
-    require_value(get_job(job_id), "任务不存在")
-    
-    # 自动搜索本地 Grafana 配置关联
-    grafana_auth = None
-    grafana_base_url = "http://localhost:3000"
-    for profile in list_auth_profiles():
-        if "Grafana" in profile["name"]:
-            grafana_auth = profile["id"]
-            login_url = str(profile.get("login_url") or "").strip()
-            if login_url:
-                from urllib.parse import urlparse
-                parsed = urlparse(login_url)
-                if parsed.scheme and parsed.netloc:
-                    grafana_base_url = f"{parsed.scheme}://{parsed.netloc}"
-            break
-            
-    from app.repository import save_screenshot_item
-    item_data = {
-        "job_id": job_id,
-        "auth_profile_id": grafana_auth,
-        "name": "本地 Grafana 测试看板",
-        "item_type": "grafana",
-        "url": f"{grafana_base_url}/d/local-inspection-test/local-grafana-inspection-test?orgId=1&from=now-1h&to=now&kiosk",
-        "section": "1服务器资源",
-        "capture_mode": "viewport",
-        "css_selector": "",
-        "wait_selector": ".react-grid-layout",
-        "wait_seconds": 5.0,
-        "timeout_seconds": 90,
-        "retry_count": 2,
-        "browser_width": 1920,
-        "browser_height": 1080,
-        "sort_order": 10,
-        "enabled": 1,
-        "watermark_enabled": 0,
-        "watermark_text": "{time}\n省客户服务中心\ndwangchengyi7(王诚毅)",
-        "watermark_opacity": 65,
-        "watermark_font_size": 24,
-        "watermark_gap_x": 140,
-        "watermark_gap_y": 140,
-        "watermark_angle": -45,
-    }
-    save_screenshot_item(item_data)
-    from urllib.parse import quote
-    return RedirectResponse(f"/jobs/{job_id}?success={quote('成功自动填充本地测试截图项！')}", status_code=303)
-
-
 @app.get("/mail-profiles", dependencies=[Depends(require_login)])
 def mail_profiles(request: Request) -> RedirectResponse:
     params = request.query_params
@@ -1204,9 +1317,6 @@ def new_mail_profile(request: Request) -> HTMLResponse:
 
 @app.post("/mail-profiles/new", dependencies=[Depends(require_login)])
 def create_mail_profile(form: dict[str, Any] = Depends(mail_form)) -> RedirectResponse:
-    from app.utils import encrypt_secret
-    if form.get("password"):
-        form["password_secret"] = encrypt_secret(form["password"])
     mail_id = save_mail_profile(form)
     return RedirectResponse("/mail-profiles", status_code=303)
 
@@ -1222,14 +1332,10 @@ def edit_mail_profile(request: Request, mail_id: int) -> HTMLResponse:
 
 @app.post("/mail-profiles/{mail_id}/edit", dependencies=[Depends(require_login)])
 def update_mail_profile(mail_id: int, form: dict[str, Any] = Depends(mail_form)) -> RedirectResponse:
-    from app.utils import encrypt_secret
     old = get_mail_profile(mail_id)
     if old:
         if not form.get("password"):
             form["password_secret"] = old.get("password_secret")
-            form["password"] = old.get("password")
-        else:
-            form["password_secret"] = encrypt_secret(form["password"])
     save_mail_profile(form, mail_id)
     return RedirectResponse("/mail-profiles", status_code=303)
 

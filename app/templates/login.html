@@ -3,27 +3,208 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>登录 - 自动化巡检报告系统</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <title>登录 - 运维管理后台</title>
+  <link rel="stylesheet" href="/static/app.css?v=login-validation-20260626-1">
 </head>
 <body class="login-page">
   <main class="login-panel">
-    <h1>自动化巡检报告系统</h1>
-    <p class="muted">登录后管理截图任务、巡检报告和邮件推送。</p>
+    <div class="login-heading">
+      <div class="login-mark" aria-hidden="true">
+        <img src="/static/images/logo.svg" alt="">
+      </div>
+      <h1>运维管理后台</h1>
+      <p class="login-sub">请输入管理员凭证以访问控制台</p>
+    </div>
     {% if error %}
-      <div class="notice error">用户名或密码错误。</div>
+      <div class="notice error">
+        {% if error == "mfa" %}
+          MFA 验证码错误，请重新输入。
+        {% else %}
+          用户名或密码错误，请重试。
+        {% endif %}
+      </div>
     {% endif %}
-    <form method="post" action="/login" class="form-stack">
-      <label>
-        用户名
-        <input name="username" autocomplete="username" required>
-      </label>
-      <label>
-        密码
-        <input name="password" type="password" autocomplete="current-password" required>
-      </label>
-      <button class="primary" type="submit">登录</button>
+    <form method="post" action="/login" class="form-stack" data-login-form data-public-key='{{ login_public_key | tojson }}' novalidate>
+      <input data-login-username autocomplete="username" placeholder="管理员用户名" required>
+      <span class="login-password-wrap">
+        <input id="login-password" data-login-password type="password" autocomplete="current-password" placeholder="密码" required>
+        <button class="login-eye" type="button" aria-label="显示密码" aria-pressed="false" data-password-toggle></button>
+      </span>
+      {% if mfa_enabled %}
+        <input data-login-mfa inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="MFA 验证码" required>
+      {% endif %}
+      <input type="hidden" name="login_payload" data-login-payload>
+      <button class="login-btn" type="submit">立即登录</button>
     </form>
   </main>
+  <script src="/static/vendor/login-rsa-fallback.js?v=20260626-1"></script>
+  <script>
+    (function () {
+      const button = document.querySelector("[data-password-toggle]");
+      const input = document.getElementById("login-password");
+      if (!button || !input) return;
+
+      button.addEventListener("click", function (event) {
+        event.preventDefault();
+        const shouldShow = input.type === "password";
+        input.type = shouldShow ? "text" : "password";
+        button.setAttribute("aria-pressed", shouldShow ? "true" : "false");
+        button.setAttribute("aria-label", shouldShow ? "隐藏密码" : "显示密码");
+        try {
+          input.focus({ preventScroll: true });
+        } catch (_) {
+          input.focus();
+        }
+      });
+    })();
+
+    (function () {
+      const form = document.querySelector("[data-login-form]");
+      if (!form) return;
+      const submitButton = form.querySelector('button[type="submit"]');
+
+      function showLoginFormError(message) {
+        const oldNotice = form.parentNode.querySelector(".login-form-error");
+        if (oldNotice) oldNotice.remove();
+        const notice = document.createElement("div");
+        notice.className = "notice error login-form-error";
+        notice.textContent = message;
+        form.parentNode.insertBefore(notice, form);
+      }
+
+      function b64url(bytes) {
+        let binary = "";
+        bytes.forEach((byte) => {
+          binary += String.fromCharCode(byte);
+        });
+        return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+      }
+
+      function publicKey() {
+        return JSON.parse(form.dataset.publicKey || "{}");
+      }
+
+      function canUseWebCrypto() {
+        return Boolean(window.crypto && window.crypto.subtle && window.TextEncoder);
+      }
+
+      async function importKey() {
+        const jwk = publicKey();
+        return crypto.subtle.importKey(
+          "jwk",
+          jwk,
+          { name: "RSA-OAEP", hash: "SHA-256" },
+          false,
+          ["encrypt"]
+        );
+      }
+
+      async function encryptWithWebCrypto(payload) {
+        const key = await importKey();
+        const encrypted = await crypto.subtle.encrypt(
+          { name: "RSA-OAEP" },
+          key,
+          new TextEncoder().encode(payload)
+        );
+        return "oaep256:" + b64url(new Uint8Array(encrypted));
+      }
+
+      function encryptWithFallback(payload) {
+        if (!window.LoginRsaFallback || typeof window.LoginRsaFallback.encryptPayload !== "function") {
+          throw new Error("Login RSA fallback is unavailable");
+        }
+        return window.LoginRsaFallback.encryptPayload(payload, publicKey());
+      }
+
+      async function encryptLoginPayload(payload) {
+        if (canUseWebCrypto()) {
+          try {
+            return await encryptWithWebCrypto(payload);
+          } catch (error) {
+            console.warn("WebCrypto login encryption failed, using local RSA fallback.", error);
+          }
+        }
+        return encryptWithFallback(payload);
+      }
+
+      function clearLoginError(input) {
+        if (!input) return;
+        input.classList.remove("login-field-invalid");
+        input.removeAttribute("aria-invalid");
+        const anchor = input.closest(".login-password-wrap") || input;
+        const next = anchor.nextElementSibling;
+        if (next && next.classList.contains("login-field-error")) {
+          next.remove();
+        }
+      }
+
+      function showLoginError(input, message) {
+        if (!input) return;
+        clearLoginError(input);
+        input.classList.add("login-field-invalid");
+        input.setAttribute("aria-invalid", "true");
+        const error = document.createElement("div");
+        error.className = "login-field-error";
+        error.textContent = message;
+        const anchor = input.closest(".login-password-wrap") || input;
+        anchor.insertAdjacentElement("afterend", error);
+      }
+
+      function validateLoginForm() {
+        const fields = [
+          [form.querySelector("[data-login-username]"), "请输入账号"],
+          [form.querySelector("[data-login-password]"), "请输入密码"],
+          [form.querySelector("[data-login-mfa]"), "请输入 MFA 验证码"]
+        ].filter(([input]) => input);
+        let firstInvalid = null;
+        fields.forEach(([input, message]) => {
+          clearLoginError(input);
+          if (!String(input.value || "").trim()) {
+            showLoginError(input, message);
+            if (!firstInvalid) firstInvalid = input;
+          }
+        });
+        if (firstInvalid) {
+          try {
+            firstInvalid.focus({ preventScroll: true });
+          } catch (_) {
+            firstInvalid.focus();
+          }
+          return false;
+        }
+        return true;
+      }
+
+      form.querySelectorAll("[data-login-username], [data-login-password], [data-login-mfa]").forEach(function (input) {
+        input.addEventListener("input", function () {
+          clearLoginError(input);
+        });
+      });
+
+      form.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const usernameInput = form.querySelector("[data-login-username]");
+        const passwordInput = form.querySelector("[data-login-password]");
+        const mfaInput = form.querySelector("[data-login-mfa]");
+        const payloadInput = form.querySelector("[data-login-payload]");
+        if (!validateLoginForm()) return;
+
+        try {
+          if (submitButton) submitButton.disabled = true;
+          const payload = JSON.stringify({
+            username: usernameInput ? usernameInput.value : "",
+            password: passwordInput ? passwordInput.value : "",
+            mfa_code: mfaInput ? mfaInput.value : "",
+            ts: Date.now()
+          });
+          payloadInput.value = await encryptLoginPayload(payload);
+          form.submit();
+        } catch (error) {
+          if (submitButton) submitButton.disabled = false;
+          showLoginFormError("登录加密失败，请刷新页面后重试或联系管理员开启 HTTPS 访问。");
+        }
+      });
+    })();
+  </script>
 </body>
 </html>

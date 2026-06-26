@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
 
 class Settings:
     def __init__(self) -> None:
         self.app_name = os.getenv("APP_NAME", "自动化巡检报告系统")
-        self.secret_key = os.getenv("APP_SECRET_KEY", "change-me")
         self.admin_username = os.getenv("ADMIN_USERNAME", "admin")
         self.admin_password = os.getenv("ADMIN_PASSWORD", "admin")
 
         self.data_dir = Path(os.getenv("APP_DATA_DIR", "data")).resolve()
+        raw_secret_key = self._load_secret_from_file() or os.getenv("APP_SECRET_KEY", "").strip()
+        self.secret_key = raw_secret_key or self._load_or_create_secret_key()
+        self.legacy_secret_keys = ["change-me"] if self.secret_key != "change-me" else []
         self.db_path = self.data_dir / "app.db"
         self.screenshot_dir = self.data_dir / "screenshots"
         self.report_dir = self.data_dir / "reports"
@@ -40,6 +43,49 @@ class Settings:
         if len(raw_frontend) > 1 and raw_frontend.endswith("/"):
             raw_frontend = raw_frontend.rstrip("/")
         self.frontend_base_path = raw_frontend
+
+    def _load_secret_from_file(self) -> str:
+        explicit_path = os.getenv("APP_SECRET_KEY_FILE", "").strip()
+        if explicit_path:
+            return self._read_or_create_secret_file(Path(explicit_path))
+
+        default_secret_path = Path("/run/secrets/app_secret_key")
+        if default_secret_path.exists():
+            return self._read_or_create_secret_file(default_secret_path)
+        return ""
+
+    def _read_or_create_secret_file(self, path: Path) -> str:
+        try:
+            if path.exists():
+                if path.is_dir():
+                    raise RuntimeError(f"APP secret file path is a directory: {path}")
+                secret = path.read_text(encoding="utf-8").strip()
+                if secret:
+                    return secret
+            path.parent.mkdir(parents=True, exist_ok=True)
+            secret = secrets.token_urlsafe(48)
+            path.write_text(secret + "\n", encoding="utf-8")
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+            return secret
+        except OSError as exc:
+            raise RuntimeError(f"APP secret file is not readable or writable: {path}") from exc
+
+    def _load_or_create_secret_key(self) -> str:
+        key_path = self.data_dir / "app-secret.key"
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            if key_path.exists():
+                value = key_path.read_text(encoding="utf-8").strip()
+                if value:
+                    return value
+            value = secrets.token_urlsafe(48)
+            key_path.write_text(value, encoding="utf-8")
+            return value
+        except OSError:
+            return "change-me"
 
     def ensure_dirs(self) -> None:
         for path in (

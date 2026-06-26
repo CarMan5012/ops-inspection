@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
 from app.db import connect
+from app.utils import normalize_secret_for_storage
 
 
 def list_jobs() -> list[dict[str, Any]]:
@@ -32,6 +34,11 @@ def get_job(job_id: int) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 def save_job(data: dict[str, Any], job_id: int | None = None) -> int:
+    data = dict(data)
+    for secret_field in ("dingtalk_webhook", "dingtalk_secret"):
+        if data.get(secret_field):
+            data[secret_field] = normalize_secret_for_storage(str(data.get(secret_field) or ""))
+
     fields = (
         "name",
         "environment",
@@ -182,6 +189,13 @@ def get_auth_profile(auth_id: int | None) -> dict[str, Any] | None:
 
 
 def save_auth_profile(data: dict[str, Any], auth_id: int | None = None) -> int:
+    data = dict(data)
+    if data.get("password"):
+        data["password_secret"] = normalize_secret_for_storage(str(data.get("password") or ""))
+    elif data.get("password_secret"):
+        data["password_secret"] = normalize_secret_for_storage(str(data.get("password_secret") or ""))
+    data["password"] = ""
+
     fields = (
         "name",
         "auth_type",
@@ -237,6 +251,13 @@ def get_mail_profile(mail_id: int | None) -> dict[str, Any] | None:
 
 
 def save_mail_profile(data: dict[str, Any], mail_id: int | None = None) -> int:
+    data = dict(data)
+    if data.get("password"):
+        data["password_secret"] = normalize_secret_for_storage(str(data.get("password") or ""))
+    elif data.get("password_secret"):
+        data["password_secret"] = normalize_secret_for_storage(str(data.get("password_secret") or ""))
+    data["password"] = ""
+
     fields = (
         "name",
         "smtp_host",
@@ -479,3 +500,26 @@ def save_periodic_report_run(data: dict[str, Any], run_id: int | None = None) ->
 def delete_periodic_report_run(run_id: int) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM periodic_report_runs WHERE id = ?", (run_id,))
+
+
+def get_system_setting(key: str, default: str = "") -> str:
+    with connect() as conn:
+        try:
+            row = conn.execute("SELECT value FROM system_settings WHERE key = ?", (key,)).fetchone()
+        except sqlite3.OperationalError:
+            return default
+    return str(row["value"]) if row is not None else default
+
+
+def set_system_setting(key: str, value: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, value),
+        )

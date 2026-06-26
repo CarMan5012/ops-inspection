@@ -4,24 +4,29 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="自动化巡检报告系统">
-  <title>自动化巡检报告系统</title>
-  <link rel="stylesheet" href="/static/app.css">
-  <link rel="stylesheet" href="/static/frontend/styles.css">
-  <script src="/static/frontend/app.js" defer></script>
+  <meta name="description" content="运维管理后台">
+  <title>运维管理后台</title>
+  <link rel="stylesheet" href="/static/vendor/modern-normalize.css">
+  <link rel="stylesheet" href="/static/app.css?v=20260626-validation1">
+  <link rel="stylesheet" href="/static/frontend/styles.css?v=20260626-validation1">
+  <script src="/static/vendor/lucide.min.js?v=20260626-validation1" defer></script>
+  <script src="/static/frontend/app.js?v=20260626-validation1" defer></script>
 </head>
 
 <body>
   <header class="topbar">
-    <a class="brand" href="/">自动化巡检</a>
-    <nav class="nav">
-      <a class="nav-link active" href="/#/jobs" data-view="dashboard">巡检任务</a>
-      <a class="nav-link" href="/#/runs" data-view="runs">运行记录</a>
-      <a class="nav-link" href="/#/periodic" data-view="periodic">周期报告</a>
-      <a class="nav-link" href="/#/auth" data-view="auth">认证配置</a>
-      <a class="nav-link" href="/#/mail" data-view="mail">邮件配置</a>
-      <a class="nav-link" href="/#/storage" data-view="storage">存储管理</a>
-      <a href="/logout">退出登录</a>
+    <a class="brand" href="/" aria-label="运维管理后台">
+      <span class="brand-mark"><img src="/static/images/logo.svg" alt=""></span>
+      <span>运维管理后台</span>
+    </a>
+    <nav class="nav" aria-label="主导航">
+      <a class="nav-link active" href="/#/jobs" data-view="dashboard"><span data-lucide="clipboard-list"></span>巡检任务</a>
+      <a class="nav-link" href="/#/runs" data-view="runs"><span data-lucide="history"></span>运检记录</a>
+      <a class="nav-link" href="/#/periodic" data-view="periodic"><span data-lucide="file-archive"></span>周期报告</a>
+      <a class="nav-link" href="/#/auth" data-view="auth"><span data-lucide="key-round"></span>认证配置</a>
+      <a class="nav-link" href="/#/mail" data-view="mail"><span data-lucide="mail"></span>邮件配置</a>
+      <a class="nav-link" href="/#/storage" data-view="storage"><span data-lucide="settings"></span>系统配置</a>
+      <a class="nav-link nav-logout" href="/logout"><span data-lucide="log-out"></span>退出</a>
     </nav>
   </header>
 
@@ -30,11 +35,12 @@
       <div class="page-head">
         <div>
           <h1>巡检任务</h1>
-          <p class="muted">通过前端静态页面调用后端 <code>/api</code> 接口管理任务、运行记录和基础配置。</p>
+          <p class="muted">配置巡检任务、截图项和报告发送，按中文选项填写即可。</p>
         </div>
         <div class="action-row">
-          <button class="button" type="button" data-action="refresh">刷新数据</button>
-          <button class="button primary" type="button" data-action="new-job">新增任务</button>
+          <button class="button" type="button" data-action="refresh"><span data-lucide="refresh-cw"></span>刷新数据</button>
+          <button class="button primary" type="button" data-action="new-job"><span
+              data-lucide="plus"></span>新增任务</button>
         </div>
       </div>
 
@@ -42,7 +48,7 @@
 
       <div class="section-title">
         <h2>巡检任务</h2>
-        <button class="button" type="button" data-action="new-job">新增任务</button>
+        <button class="button" type="button" data-action="new-job"><span data-lucide="plus"></span>新增任务</button>
       </div>
       <section class="panel" data-region="jobs"></section>
 
@@ -56,10 +62,10 @@
     <section data-view-panel="runs" hidden>
       <div class="page-head">
         <div>
-          <h1>运行记录</h1>
-          <p class="muted">查看巡检任务执行状态、截图数量、报告下载和邮件发送结果。</p>
+          <h1>运检记录</h1>
+          <p class="muted">查看每次巡检状态、截图数量、邮件状态和报告下载。</p>
         </div>
-        <button class="button" type="button" data-action="refresh">刷新数据</button>
+        <button class="button" type="button" data-action="refresh"><span data-lucide="refresh-cw"></span>刷新数据</button>
       </div>
       <section class="panel" data-region="runs"></section>
     </section>
@@ -68,9 +74,10 @@
       <div class="page-head">
         <div>
           <h1>周期报告</h1>
-          <p class="muted">查看周期汇总配置和历史压缩包。</p>
+          <p class="muted">按周或按月汇总巡检 Word 文档，并发送压缩包。</p>
         </div>
-        <button class="button" type="button" data-action="refresh-periodic">刷新数据</button>
+        <button class="button" type="button" data-action="refresh-periodic"><span
+            data-lucide="refresh-cw"></span>刷新数据</button>
       </div>
       <section class="panel" data-region="periodic"></section>
     </section>
@@ -79,10 +86,11 @@
       <div class="page-head">
         <div>
           <h1>认证配置</h1>
-          <p class="muted">管理登录凭据，认证配置可直接在当前页面测试登录。</p>
+          <p class="muted">管理需要登录的目标系统账号，普通用户只填写简单信息。</p>
         </div>
         <div class="action-row">
-          <button class="button primary" type="button" data-action="new-auth">新增认证</button>
+          <button class="button primary" type="button" data-action="new-auth"><span
+              data-lucide="plus"></span>新增认证</button>
         </div>
       </div>
       <section class="panel" data-region="auth-profiles"></section>
@@ -92,10 +100,11 @@
       <div class="page-head">
         <div>
           <h1>邮件配置</h1>
-          <p class="muted">管理发送巡检报告的 SMTP 邮箱配置。</p>
+          <p class="muted">配置报告发送邮箱，保存后可直接测试发送。</p>
         </div>
         <div class="action-row">
-          <button class="button primary" type="button" data-action="new-mail">新增邮箱</button>
+          <button class="button primary" type="button" data-action="new-mail"><span
+              data-lucide="plus"></span>新增邮箱</button>
         </div>
       </div>
       <section class="panel" data-region="mail-profiles"></section>
@@ -104,11 +113,12 @@
     <section data-view-panel="storage" hidden>
       <div class="page-head">
         <div>
-          <h1>存储管理</h1>
-          <p class="muted">监控数据目录空间占用，配置数据保留清理策略，查看最近清理结果。</p>
+          <h1>系统配置</h1>
+          <p class="muted">查看数据占用，设置截图、报告和日志保留时间。</p>
         </div>
         <div class="action-row">
-          <button class="button" type="button" data-action="refresh-storage">刷新数据</button>
+          <button class="button" type="button" data-action="refresh-storage"><span
+              data-lucide="refresh-cw"></span>刷新数据</button>
         </div>
       </div>
       <section class="panel" data-region="storage-panel"></section>

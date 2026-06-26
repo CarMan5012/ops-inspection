@@ -58,7 +58,7 @@
     <label data-login-field>
       登录密码 <span style="color: var(--danger);">* (必填)</span>
       <div style="position: relative; display: flex; align-items: center; width: 100%;">
-        <input name="password" id="auth_password_input" type="password" value="{{ decrypt_secret(profile.password_secret) or profile.password or '' }}" placeholder="请输入密码" style="padding-right: 40px; width: 100%;">
+        <input name="password" id="auth_password_input" type="password" value="" placeholder="{{ '已保存，留空沿用原密码' if profile.id else '请输入密码' }}" style="padding-right: 40px; width: 100%;">
         <button type="button" onclick="togglePasswordVisibility('auth_password_input', this)" style="position: absolute; right: 10px; background: none; border: none; cursor: pointer; color: var(--text-muted); display: flex; align-items: center; min-height: auto; border-radius: 0; border: 0; padding: 0;" title="显示/隐藏密码" aria-label="显示密码">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
         </button>

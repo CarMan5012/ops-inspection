@@ -105,12 +105,12 @@
       <div id="dingtalk_fields_container" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; transition: opacity 0.2s;">
         <label class="span-2">
           Webhook 地址
-          <input name="dingtalk_webhook" id="dingtalk_webhook_input" value="{{ job.dingtalk_webhook or '' }}" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
+          <input name="dingtalk_webhook" id="dingtalk_webhook_input" value="" placeholder="{{ '已保存，留空沿用原地址' if job.dingtalk_webhook else 'https://oapi.dingtalk.com/robot/send?access_token=...' }}">
           <span class="form-tip">自定义机器人的 Webhook 地址。</span>
         </label>
         <label>
           加签密钥 (Secret)
-          <input name="dingtalk_secret" id="dingtalk_secret_input" value="{{ job.dingtalk_secret or '' }}" placeholder="SEC... (可选)">
+          <input name="dingtalk_secret" id="dingtalk_secret_input" value="" placeholder="{{ '已保存，留空沿用原密钥' if job.dingtalk_secret else 'SEC... (可选)' }}">
           <span class="form-tip">若开启加签安全设置，在此输入 SEC 开头的密钥，否则留空。</span>
         </label>
         <label>
@@ -289,9 +289,14 @@
     const webhook = document.getElementById('dingtalk_webhook_input');
     const container = document.getElementById('dingtalk_fields_container');
     
+    const hasSavedWebhook = {{ 'true' if job.dingtalk_webhook else 'false' }};
     if (enabled) {
       container.style.opacity = '1';
-      webhook.setAttribute('required', 'required');
+      if (hasSavedWebhook) {
+        webhook.removeAttribute('required');
+      } else {
+        webhook.setAttribute('required', 'required');
+      }
     } else {
       container.style.opacity = '0.5';
       webhook.removeAttribute('required');
