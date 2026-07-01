@@ -110,29 +110,9 @@
 
     <!-- 钉钉推送开关 -->
     <label class="check" style="margin-top: 16px; margin-bottom: 16px; font-weight: 600; display: block;">
-      <input name="dingtalk_enabled" type="checkbox" {% if setting.dingtalk_enabled %}checked{% endif %} onchange="toggleDingtalkFields(this.checked)">
-      开启钉钉群机器人 Webhook 通知 (推荐)
+      <input name="dingtalk_enabled" type="checkbox" {% if setting.dingtalk_enabled %}checked{% endif %}>
+      开启钉钉群机器人 Webhook 通知 (使用全局配置)
     </label>
-
-    <div id="dingtalk_fields_container" class="form-grid" style="padding-left: 20px; border-left: 2px dashed #cbd5e1; display: none;">
-      <label class="span-2">
-        钉钉 Webhook 地址 (选填)
-        <input name="dingtalk_webhook" value="{{ setting.dingtalk_webhook or '' }}" placeholder="选填，留空则默认使用全局 DINGTALK_WEBHOOK 环境变量">
-        <span class="form-tip">钉钉群机器人的 Webhook 发信接口完整 URL。留空则直接使用全局配置。</span>
-      </label>
-
-      <label>
-        加签密钥 (Secret) (选填)
-        <input name="dingtalk_secret" value="{{ setting.dingtalk_secret or '' }}" type="password" placeholder="选填，留空则使用全局 DINGTALK_SECRET 环境变量">
-        <span class="form-tip">以 SEC 开头的加签签名密钥。留空则直接使用全局配置。</span>
-      </label>
-
-      <label>
-        安全关键词 (选填)
-        <input name="dingtalk_keyword" value="{{ setting.dingtalk_keyword or '' }}" placeholder="选填，留空则使用全局 DINGTALK_KEYWORD 环境变量">
-        <span class="form-tip">钉钉机器人的安全设置自定义关键词。留空则直接使用全局配置。</span>
-      </label>
-    </div>
   </div>
 
   <!-- 第四部分：月报专属等待与重试参数 -->
@@ -283,17 +263,10 @@
     container.style.display = checked ? 'grid' : 'none';
   }
 
-  function toggleDingtalkFields(checked) {
-    const container = document.getElementById('dingtalk_fields_container');
-    container.style.display = checked ? 'grid' : 'none';
-  }
-
   document.addEventListener('DOMContentLoaded', () => {
     // 根据初始勾选状态显示/隐藏字段
     const enableEmailCheckbox = document.getElementsByName('enable_email')[0];
-    const enableDingtalkCheckbox = document.getElementsByName('dingtalk_enabled')[0];
     toggleMailFields(enableEmailCheckbox.checked);
-    toggleDingtalkFields(enableDingtalkCheckbox.checked);
 
     const configStr = '{{ setting.schedule_config | safe if setting.schedule_config else "" }}';
     let config = null;

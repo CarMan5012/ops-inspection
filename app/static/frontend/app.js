@@ -1095,22 +1095,8 @@ function openJobModal(job = null) {
       </div>
       <label class="check span-2">
         <input type="checkbox" name="dingtalk_enabled" id="spa_dingtalk_enabled_chk" ${job && asBool(job.dingtalk_enabled) ? "checked" : ""}>
-        启用钉钉群组推送
+        启用钉钉群组推送 (使用全局配置)
       </label>
-      <div id="spa_dingtalk_fields" class="span-2 form-grid wide" style="padding: 0; gap: 15px; grid-template-columns: 1fr 1fr;">
-        <label class="span-2">
-          机器人地址
-          <input name="dingtalk_webhook" id="spa_dingtalk_webhook_input" value="" placeholder="${job?.has_dingtalk_webhook ? "已保存，留空沿用原地址或使用全局 DINGTALK_WEBHOOK" : "选填，留空则使用全局 DINGTALK_WEBHOOK"}">
-        </label>
-        <label>
-          加签密钥
-          <input name="dingtalk_secret" value="" placeholder="${job?.has_dingtalk_secret ? "已保存，留空沿用原密钥或使用全局 DINGTALK_SECRET" : "选填，留空则使用全局 DINGTALK_SECRET"}">
-        </label>
-        <label>
-          自定义关键词
-          <input name="dingtalk_keyword" value="${escapeAttr(job?.dingtalk_keyword || '')}" placeholder="选填，留空则使用全局 DINGTALK_KEYWORD">
-        </label>
-      </div>
       
       <details class="advanced-settings span-2" style="margin-top: 10px;">
         <summary>高级浏览器设置</summary>

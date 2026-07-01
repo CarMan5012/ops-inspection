@@ -553,7 +553,6 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
         from app.utils import decrypt_secret
         from app.dingtalk import send_dingtalk_msg
 
-        webhook_val = decrypt_secret(str(setting.get("dingtalk_webhook") or ""))
         from app.repository import get_system_setting
         db_webhook = get_system_setting("dingtalk_webhook", "")
         if db_webhook:
@@ -561,21 +560,18 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
                 db_webhook = decrypt_secret(db_webhook)
             except Exception:
                 pass
-        webhook = webhook_val or db_webhook or settings.dingtalk_webhook
+        webhook = db_webhook or settings.dingtalk_webhook
         
         if webhook:
-            secret_val = decrypt_secret(str(setting.get("dingtalk_secret") or ""))
             db_secret = get_system_setting("dingtalk_secret", "")
             if db_secret:
                 try:
                     db_secret = decrypt_secret(db_secret)
                 except Exception:
                     pass
-            secret = secret_val or db_secret or settings.dingtalk_secret
+            secret = db_secret or settings.dingtalk_secret
 
-            keyword_val = setting.get("dingtalk_keyword")
-            db_keyword = get_system_setting("dingtalk_keyword", "")
-            keyword = keyword_val or db_keyword or settings.dingtalk_keyword
+            keyword = get_system_setting("dingtalk_keyword", "") or settings.dingtalk_keyword
 
             report_type_cn = "周报" if report_type == "weekly" else "月报"
             title = f"周期汇总报告生成通知 - {setting['name']}"

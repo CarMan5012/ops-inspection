@@ -270,31 +270,27 @@ def _send_dingtalk_notification(
 
     from app.repository import get_system_setting
 
-    webhook_val = decrypt_secret(str(job.get("dingtalk_webhook") or ""))
     db_webhook = get_system_setting("dingtalk_webhook", "")
     if db_webhook:
         try:
             db_webhook = decrypt_secret(db_webhook)
         except Exception:
             pass
-    webhook = webhook_val or db_webhook or settings.dingtalk_webhook
+    webhook = db_webhook or settings.dingtalk_webhook
     
     if not webhook:
-        logger.warning(f"任务 {job.get('id')} 启用了钉钉推送，但任务级 Webhook、网页端全局 Webhook 和全局 DINGTALK_WEBHOOK 均为空，跳过推送。")
+        logger.warning(f"任务 {job.get('id')} 启用了钉钉推送，但未配置网页端全局 Webhook 或本地环境变量 DINGTALK_WEBHOOK，跳过推送。")
         return
 
-    secret_val = decrypt_secret(str(job.get("dingtalk_secret") or ""))
     db_secret = get_system_setting("dingtalk_secret", "")
     if db_secret:
         try:
             db_secret = decrypt_secret(db_secret)
         except Exception:
             pass
-    secret = secret_val or db_secret or settings.dingtalk_secret
+    secret = db_secret or settings.dingtalk_secret
 
-    keyword_val = job.get("dingtalk_keyword")
-    db_keyword = get_system_setting("dingtalk_keyword", "")
-    keyword = keyword_val or db_keyword or settings.dingtalk_keyword
+    keyword = get_system_setting("dingtalk_keyword", "") or settings.dingtalk_keyword
 
     title = f"巡检任务执行结果 - {job.get('name')}"
 
