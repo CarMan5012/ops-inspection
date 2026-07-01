@@ -553,19 +553,28 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
         from app.utils import decrypt_secret
         from app.dingtalk import send_dingtalk_msg
 
-        webhook = decrypt_secret(str(setting.get("dingtalk_webhook") or ""))
+        webhook_val = decrypt_secret(str(setting.get("dingtalk_webhook") or ""))
+        webhook = webhook_val or settings.dingtalk_webhook
         if webhook:
-            secret = decrypt_secret(str(setting.get("dingtalk_secret") or ""))
-            keyword = setting.get("dingtalk_keyword")
+            secret_val = decrypt_secret(str(setting.get("dingtalk_secret") or ""))
+            secret = secret_val or settings.dingtalk_secret
+
+            keyword_val = setting.get("dingtalk_keyword")
+            keyword = keyword_val or settings.dingtalk_keyword
 
             report_type_cn = "周报" if report_type == "weekly" else "月报"
             title = f"周期汇总报告生成通知 - {setting['name']}"
 
-            status_text = "成功"
-            if run["status"] == "failed":
-                status_text = "失败"
-            elif run["status"] == "partial_success":
-                status_text = "部分成功"
+            # 状态高亮样式
+            status_state = run["status"]
+            if status_state == "success":
+                status_html = '<font color="#4caf50"><b>生成并归档成功</b></font>'
+            elif status_state == "partial_success":
+                status_html = '<font color="#ff9800"><b>部分成功 (超时强发)</b></font>'
+            elif status_state == "failed":
+                status_html = '<font color="#f44336"><b>生成失败</b></font>'
+            else:
+                status_html = f'<font color="#38adff"><b>{status_state}</b></font>'
 
             # 计算压缩包大小
             size_str = "-"
@@ -576,19 +585,40 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
             except Exception:
                 pass
 
+            current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            mail_status_html = ""
+            # 仅在开启了邮件时展现邮件状态
+            if setting.get("enable_email") == 1:
+                mail_status = run.get("mail_status") or ""
+                if "sent" in mail_status.lower() or "success" in mail_status.lower():
+                    mail_status_html = '<font color="#4caf50">发送成功</font>'
+                elif "failed" in mail_status.lower() or "error" in mail_status.lower():
+                    mail_status_html = f'<font color="#f44336">发送失败 ({mail_status})</font>'
+                else:
+                    mail_status_html = f'<font color="#9e9e9e">{mail_status}</font>'
+
+            docx_enabled_str = "🟢 已打入归档包" if setting.get("include_docx", 1) == 1 else "⚪ 仅打包截图"
+
             md_lines = [
-                f"### 周期汇总报告 ({report_type_cn})",
-                f"- **配置名称**: {setting['name']}",
-                f"- **统计周期**: {period_start[:10]} 至 {period_end[:10]}",
-                f"- **执行状态**: **{status_text}**",
+                f"### 📊 周期汇总报告通知 ({report_type_cn})",
+                "---",
+                f"- **配置名称**: `{setting['name']}`",
+                f"- **统计周期**: `{period_start[:10]}` 至 `{period_end[:10]}`",
+                f"- **执行状态**: {status_html}",
+                f"- **Word 报告**: {docx_enabled_str} ({len(runs_in_period)} 个任务报告)",
             ]
+            if mail_status_html:
+                md_lines.append(f"- **邮件状态**: {mail_status_html}")
+            md_lines.append(f"- **包含报告**: `{len(runs_in_period)}` 个 Word 报告")
+            md_lines.append(f"- **归档大小**: `{size_str}`")
+            md_lines.append(f"- **通知时间**: `{current_time_str}`")
+            md_lines.append("---")
 
             if run["status"] == "failed":
-                md_lines.append(f"- **失败原因**: {run.get('error_summary') or '未知异常'}")
+                md_lines.append(f"❌ **失败原因**: {run.get('error_summary') or '未知异常'}")
             else:
-                md_lines.append(f"- **包含报告**: {len(runs_in_period)} 个 Word 报告")
-                md_lines.append(f"- **归档大小**: {size_str}")
-                md_lines.append("- **操作建议**: 周期汇总包已生成完毕，请前往系统 Web 后台**【周期报告】**页面直接下载归档。")
+                md_lines.append("👉 **下载指引**: 周期汇总包已成功打包归档。请登录系统 Web 后台**【周期报告】**页面直接下载归档文件。")
 
             if force_warning and unfinished_reasons:
                 md_lines.append(f"\n⚠️ **超时未完成的任务**:\n- " + "\n- ".join(unfinished_reasons))

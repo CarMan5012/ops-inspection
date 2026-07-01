@@ -116,21 +116,21 @@
 
     <div id="dingtalk_fields_container" class="form-grid" style="padding-left: 20px; border-left: 2px dashed #cbd5e1; display: none;">
       <label class="span-2">
-        钉钉 Webhook 地址
-        <input name="dingtalk_webhook" value="{{ setting.dingtalk_webhook or '' }}" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
-        <span class="form-tip">钉钉群机器人的 Webhook 发信接口完整 URL。</span>
+        钉钉 Webhook 地址 (选填)
+        <input name="dingtalk_webhook" value="{{ setting.dingtalk_webhook or '' }}" placeholder="选填，留空则默认使用全局 DINGTALK_WEBHOOK 环境变量">
+        <span class="form-tip">钉钉群机器人的 Webhook 发信接口完整 URL。留空则直接使用全局配置。</span>
       </label>
 
       <label>
         加签密钥 (Secret) (选填)
-        <input name="dingtalk_secret" value="{{ setting.dingtalk_secret or '' }}" type="password" placeholder="SEC...">
-        <span class="form-tip">若机器人在安全设置中开启了“加签”，请填写以 SEC 开头的签名密钥。</span>
+        <input name="dingtalk_secret" value="{{ setting.dingtalk_secret or '' }}" type="password" placeholder="选填，留空则使用全局 DINGTALK_SECRET 环境变量">
+        <span class="form-tip">以 SEC 开头的加签签名密钥。留空则直接使用全局配置。</span>
       </label>
 
       <label>
         安全关键词 (选填)
-        <input name="dingtalk_keyword" value="{{ setting.dingtalk_keyword or '' }}" placeholder="例如：巡检">
-        <span class="form-tip">若开启了“自定义关键词”，消息中必须包含该词才能成功发送。</span>
+        <input name="dingtalk_keyword" value="{{ setting.dingtalk_keyword or '' }}" placeholder="选填，留空则使用全局 DINGTALK_KEYWORD 环境变量">
+        <span class="form-tip">钉钉机器人的安全设置自定义关键词。留空则直接使用全局配置。</span>
       </label>
     </div>
   </div>

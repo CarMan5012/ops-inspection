@@ -268,37 +268,75 @@ def _send_dingtalk_notification(
 
     from app.utils import decrypt_secret
 
-    webhook = decrypt_secret(str(job.get("dingtalk_webhook") or ""))
+    webhook_val = decrypt_secret(str(job.get("dingtalk_webhook") or ""))
+    webhook = webhook_val or settings.dingtalk_webhook
     if not webhook:
-        logger.warning(f"任务 {job.get('id')} 启用了钉钉推送但 Webhook 为空，跳过推送。")
+        logger.warning(f"任务 {job.get('id')} 启用了钉钉推送，但 Webhook 字段与全局 DINGTALK_WEBHOOK 均为空，跳过推送。")
         return
 
-    secret = decrypt_secret(str(job.get("dingtalk_secret") or ""))
-    keyword = job.get("dingtalk_keyword")
+    secret_val = decrypt_secret(str(job.get("dingtalk_secret") or ""))
+    secret = secret_val or settings.dingtalk_secret
+
+    keyword_val = job.get("dingtalk_keyword")
+    keyword = keyword_val or settings.dingtalk_keyword
 
     title = f"巡检任务执行结果 - {job.get('name')}"
 
     from app.main import status_label, mail_status_label
     status_cn = status_label(status)
-    mail_status_cn = mail_status_label(mail_status)
+    if status == "success":
+        status_html = '<font color="#4caf50"><b>执行成功</b></font>'
+    elif status == "failed":
+        status_html = '<font color="#f44336"><b>执行失败</b></font>'
+    else:
+        status_html = f'<font color="#38adff"><b>{status_cn}</b></font>'
 
-    failed_text = f"**{failed_count}**" if failed_count > 0 else "0"
+    mail_status_html = ""
+    # 当且仅当配置了发信服务且发信状态非跳过时才在钉钉通知中展现邮件状态
+    if job.get("mail_profile_id") and mail_status and "skipped" not in mail_status.lower() and "failed: 系统没有任何邮件配置" not in mail_status:
+        mail_status_cn = mail_status_label(mail_status)
+        if "sent" in mail_status.lower() or "success" in mail_status.lower():
+            mail_status_html = '<font color="#4caf50">发送成功</font>'
+        elif "failed" in mail_status.lower() or "error" in mail_status.lower():
+            mail_status_html = f'<font color="#f44336">发送失败 ({mail_status_cn})</font>'
+        else:
+            mail_status_html = f'<font color="#9e9e9e">{mail_status_cn}</font>'
+
+    failed_text = f"{failed_count}" if failed_count > 0 else "0"
+    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 检查 Word 报告生成状态
+    docx_status_html = ""
+    if status == "success":
+        from app.repository import get_run
+        import os
+        run_record = get_run(run_id)
+        if run_record and run_record.get("report_path") and os.path.exists(str(run_record.get("report_path") or "")):
+            docx_status_html = '🟢 <font color="#4caf50">生成成功</font>'
+        else:
+            docx_status_html = '🔴 <font color="#f44336">生成失败</font>'
+    else:
+        docx_status_html = '🔴 <font color="#f44336">未生成</font>'
 
     md_lines = [
-        "### 巡检任务报告",
-        f"- **任务名称**: {job.get('name')}",
-        f"- **运行环境**: {job.get('environment')}",
-        f"- **执行状态**: {status_cn}",
-        f"- **截图成功**: {success_count} 张",
-        f"- **截图失败**: {failed_text} 张",
-        f"- **邮件状态**: {mail_status_cn}",
+        f"### 📋 巡检任务执行报告",
+        "---",
+        f"- **任务名称**: `{job.get('name')}`",
+        f"- **运行环境**: `{job.get('environment')}`",
+        f"- **执行状态**: {status_html}",
+        f"- **Word 报告**: {docx_status_html}",
+        f"- **截图数量**: 🟢 成功 `{success_count}` 张 / 🔴 失败 `{failed_text}` 张",
     ]
+    if mail_status_html:
+        md_lines.append(f"- **邮件状态**: {mail_status_html}")
+    md_lines.append(f"- **通知时间**: `{current_time_str}`")
+    md_lines.append("---")
 
     if error_summary:
         clean_err = error_summary.strip()
         if len(clean_err) > 300:
             clean_err = clean_err[:300] + "..."
-        md_lines.append(f"- **异常摘要**:\n```\n{clean_err}\n```")
+        md_lines.append(f"⚠️ **异常摘要**:\n```\n{clean_err}\n```")
 
     text = "\n".join(md_lines)
 

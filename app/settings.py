@@ -24,6 +24,11 @@ class Settings:
         self.default_timezone = os.getenv("APP_TIMEZONE", "Asia/Shanghai")
         self.max_recent_runs = int(os.getenv("APP_MAX_RECENT_RUNS", "50"))
 
+        # 全局钉钉配置
+        self.dingtalk_webhook = os.getenv("DINGTALK_WEBHOOK", "").strip()
+        self.dingtalk_secret = os.getenv("DINGTALK_SECRET", "").strip()
+        self.dingtalk_keyword = os.getenv("DINGTALK_KEYWORD", "").strip()
+
         # 对 frontend_base_path 做规范化
         raw_frontend = os.getenv("FRONTEND_BASE_PATH", "/ops").strip()
         if not raw_frontend:
