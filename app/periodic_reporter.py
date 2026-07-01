@@ -598,10 +598,20 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
                 else:
                     mail_status_html = f'<font color="#9e9e9e">{mail_status}</font>'
 
-            docx_enabled_str = "🟢 已打入归档包" if setting.get("include_docx", 1) == 1 else "⚪ 仅打包截图"
+            from app.repository import get_system_setting
+            emoji_enabled = get_system_setting("dingtalk_emoji_enabled", "0") == "1"
+
+            green_emoji = "🟢 " if emoji_enabled else ""
+            gray_emoji = "⚪ " if emoji_enabled else ""
+            title_emoji = "📊 " if emoji_enabled else ""
+            cross_emoji = "❌ " if emoji_enabled else ""
+            finger_emoji = "👉 " if emoji_enabled else ""
+            warn_emoji = "⚠️ " if emoji_enabled else ""
+
+            docx_enabled_str = f"{green_emoji}已打入归档包" if setting.get("include_docx", 1) == 1 else f"{gray_emoji}仅打包截图"
 
             md_lines = [
-                f"### 📊 周期汇总报告通知 ({report_type_cn})",
+                f"### {title_emoji}周期汇总报告通知 ({report_type_cn})",
                 "---",
                 f"- **配置名称**: `{setting['name']}`",
                 f"- **统计周期**: `{period_start[:10]}` 至 `{period_end[:10]}`",
@@ -616,12 +626,12 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
             md_lines.append("---")
 
             if run["status"] == "failed":
-                md_lines.append(f"❌ **失败原因**: {run.get('error_summary') or '未知异常'}")
+                md_lines.append(f"{cross_emoji}**失败原因**: {run.get('error_summary') or '未知异常'}")
             else:
-                md_lines.append("👉 **下载指引**: 周期汇总包已成功打包归档。请登录系统 Web 后台**【周期报告】**页面直接下载归档文件。")
+                md_lines.append(f"{finger_emoji}**下载指引**: 周期汇总包已成功打包归档。请登录系统 Web 后台**【周期报告】**页面直接下载归档文件。")
 
             if force_warning and unfinished_reasons:
-                md_lines.append(f"\n⚠️ **超时未完成的任务**:\n- " + "\n- ".join(unfinished_reasons))
+                md_lines.append(f"\n{warn_emoji}**超时未完成的任务**:\n- " + "\n- ".join(unfinished_reasons))
 
             text = "\n".join(md_lines)
             logger.info("正在发送周期报告钉钉 Webhook 推送...")

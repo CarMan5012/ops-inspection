@@ -469,6 +469,7 @@ SWAGGER_SETTING_KEY = "swagger_enabled"
 MFA_ENABLED_KEY = "mfa_enabled"
 MFA_SECRET_KEY = "mfa_totp_secret"
 SESSION_TTL_MINUTES_KEY = "session_ttl_minutes"
+DINGTALK_EMOJI_ENABLED_KEY = "dingtalk_emoji_enabled"
 
 
 def security_settings() -> dict[str, Any]:
@@ -476,6 +477,7 @@ def security_settings() -> dict[str, Any]:
         "mfa_enabled": get_system_setting(MFA_ENABLED_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"},
         "session_ttl_minutes": max(5, min(int(get_system_setting(SESSION_TTL_MINUTES_KEY, "30") or "30"), 7 * 24 * 60)),
         "mfa_configured": bool(get_system_setting(MFA_SECRET_KEY, "")),
+        "dingtalk_emoji_enabled": get_system_setting(DINGTALK_EMOJI_ENABLED_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"},
     }
 
 
@@ -646,6 +648,10 @@ def api_update_security_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
     set_system_setting(SESSION_TTL_MINUTES_KEY, str(session_minutes))
     set_system_setting(MFA_ENABLED_KEY, "1" if mfa_enabled else "0")
+
+    # 更新全局钉钉消息表情开关
+    dingtalk_emoji_enabled = bool_value(payload.get("dingtalk_emoji_enabled"), False)
+    set_system_setting(DINGTALK_EMOJI_ENABLED_KEY, "1" if dingtalk_emoji_enabled else "0")
 
     return {"ok": True, **security_settings()}
 

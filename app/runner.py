@@ -305,6 +305,15 @@ def _send_dingtalk_notification(
     failed_text = f"{failed_count}" if failed_count > 0 else "0"
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # 查阅全局钉钉消息表情开关，决定是否加入 Emoji 表情
+    from app.repository import get_system_setting
+    emoji_enabled = get_system_setting("dingtalk_emoji_enabled", "0") == "1"
+    
+    green_emoji = "🟢 " if emoji_enabled else ""
+    red_emoji = "🔴 " if emoji_enabled else ""
+    title_emoji = "📋 " if emoji_enabled else ""
+    warn_emoji = "⚠️ " if emoji_enabled else ""
+
     # 检查 Word 报告生成状态
     docx_status_html = ""
     if status == "success":
@@ -312,20 +321,20 @@ def _send_dingtalk_notification(
         import os
         run_record = get_run(run_id)
         if run_record and run_record.get("report_path") and os.path.exists(str(run_record.get("report_path") or "")):
-            docx_status_html = '🟢 <font color="#4caf50">生成成功</font>'
+            docx_status_html = f'{green_emoji}<font color="#4caf50">生成成功</font>'
         else:
-            docx_status_html = '🔴 <font color="#f44336">生成失败</font>'
+            docx_status_html = f'{red_emoji}<font color="#f44336">生成失败</font>'
     else:
-        docx_status_html = '🔴 <font color="#f44336">未生成</font>'
+        docx_status_html = f'{red_emoji}<font color="#f44336">未生成</font>'
 
     md_lines = [
-        f"### 📋 巡检任务执行报告",
+        f"### {title_emoji}巡检任务执行报告",
         "---",
         f"- **任务名称**: `{job.get('name')}`",
         f"- **运行环境**: `{job.get('environment')}`",
         f"- **执行状态**: {status_html}",
         f"- **Word 报告**: {docx_status_html}",
-        f"- **截图数量**: 🟢 成功 `{success_count}` 张 / 🔴 失败 `{failed_text}` 张",
+        f"- **截图数量**: {green_emoji}成功 `{success_count}` 张 / {red_emoji}失败 `{failed_text}` 张",
     ]
     if mail_status_html:
         md_lines.append(f"- **邮件状态**: {mail_status_html}")
@@ -336,7 +345,7 @@ def _send_dingtalk_notification(
         clean_err = error_summary.strip()
         if len(clean_err) > 300:
             clean_err = clean_err[:300] + "..."
-        md_lines.append(f"⚠️ **异常摘要**:\n```\n{clean_err}\n```")
+        md_lines.append(f"{warn_emoji}**异常摘要**:\n```\n{clean_err}\n```")
 
     text = "\n".join(md_lines)
 

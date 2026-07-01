@@ -401,6 +401,7 @@ def seed_system_defaults(conn: sqlite3.Connection) -> None:
         "mfa_enabled": "0",
         "mfa_totp_secret": "",
         "session_ttl_minutes": "30",
+        "dingtalk_emoji_enabled": "0",
     }
     for key, value in default_settings.items():
         conn.execute(

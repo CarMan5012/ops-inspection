@@ -1479,10 +1479,12 @@ function validateForm(form) {
 
 function securityFormPayload(form) {
   const ttlInput = form.querySelector('[name="session_ttl_minutes"]');
+  const emojiInput = form.querySelector('[name="dingtalk_emoji_enabled"]');
   return {
     session_ttl_minutes: ttlInput ? ttlInput.value : "30",
     mfa_enabled: asBool(state.storage.security?.mfa_enabled),
-    mfa_code: ""
+    mfa_code: "",
+    dingtalk_emoji_enabled: emojiInput ? emojiInput.checked : false
   };
 }
 
@@ -2200,7 +2202,7 @@ function renderSecurityControl(security) {
       <h3>安全设置</h3>
     </div>
     <form class="surface-soft storage-action-box security-settings-box security-session-box" data-form="security-settings">
-      <label>
+      <label style="margin-bottom: 12px; display: block;">
         登录有效期
         <select name="session_ttl_minutes">
           <option value="30" ${ttl === 30 ? "selected" : ""}>30 分钟</option>
@@ -2209,6 +2211,10 @@ function renderSecurityControl(security) {
           <option value="1440" ${ttl === 1440 ? "selected" : ""}>1 天</option>
           <option value="10080" ${ttl === 10080 ? "selected" : ""}>7 天</option>
         </select>
+      </label>
+      <label class="check" style="margin-bottom: 16px; display: block;">
+        <input type="checkbox" name="dingtalk_emoji_enabled" ${state.storage.security?.dingtalk_emoji_enabled ? "checked" : ""}>
+        开启钉钉消息表情符号 (默认关闭)
       </label>
       <div class="action-row">
         <button class="button primary" type="submit">${icon("save")}保存安全设置</button>
