@@ -5,19 +5,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title or "运维管理后台" }}</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="{{ url_for_frontend('static/app.css') }}">
 </head>
 
 <body>
   <header class="topbar">
-    <a class="brand" href="/"><span class="brand-mark"><img src="/static/images/logo.svg" alt=""></span><span>运维管理后台</span></a>
+    <a class="brand" href="{{ url_for_frontend('/') }}"><span class="brand-mark"><img src="{{ url_for_frontend('static/images/logo.svg') }}" alt=""></span><span>运维管理后台</span></a>
     <nav class="nav">
-      <a href="/#/jobs">巡检任务</a>
-      <a href="/#/runs">运行记录</a>
-      <a href="/#/periodic">周期报告</a>
-      <a href="/#/auth">认证配置</a>
-      <a href="/#/mail">邮件配置</a>
-      <a href="/logout">退出登录</a>
+      <a href="{{ url_for_frontend('/') }}#/jobs">巡检任务</a>
+      <a href="{{ url_for_frontend('/') }}#/runs">运行记录</a>
+      <a href="{{ url_for_frontend('/') }}#/periodic">周期报告</a>
+      <a href="{{ url_for_frontend('/') }}#/auth">认证配置</a>
+      <a href="{{ url_for_frontend('/') }}#/mail">邮件配置</a>
+      <a href="{{ url_for_frontend('logout') }}">退出登录</a>
     </nav>
   </header>
   <main class="shell">

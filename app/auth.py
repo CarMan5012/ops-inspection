@@ -63,9 +63,13 @@ def check_password(username: str, password: str) -> bool:
 def require_login(request: Request) -> None:
     if verify_token(request.cookies.get(COOKIE_NAME)):
         return
+    base = settings.frontend_base_path
+    login_url = "/login"
+    if base != "/":
+        login_url = base + "/login"
     raise HTTPException(
         status_code=status.HTTP_303_SEE_OTHER,
-        headers={"Location": "/login"},
+        headers={"Location": login_url},
     )
 
 

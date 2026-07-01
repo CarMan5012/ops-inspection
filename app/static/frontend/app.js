@@ -423,16 +423,20 @@ function renderQrCodes(root = document) {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-  try {
-    const res = await fetch("/app-config.json");
-    if (res.ok) {
-      const serverConfig = await res.json();
-      config.apiBase = serverConfig.apiBase || config.apiBase;
-      config.frontendBase = serverConfig.frontendBase || config.frontendBase;
-      config.artifactBase = serverConfig.artifactBase || config.artifactBase;
+  if (window.APP_CONFIG) {
+    config = { ...config, ...window.APP_CONFIG };
+  } else {
+    try {
+      const res = await fetch("/app-config.json");
+      if (res.ok) {
+        const serverConfig = await res.json();
+        config.apiBase = serverConfig.apiBase || config.apiBase;
+        config.frontendBase = serverConfig.frontendBase || config.frontendBase;
+        config.artifactBase = serverConfig.artifactBase || config.artifactBase;
+      }
+    } catch (e) {
+      console.error("加载全局配置失败，使用默认配置:", e);
     }
-  } catch (e) {
-    console.error("加载全局配置失败，使用默认配置:", e);
   }
   bindStaticActions(document);
   renderIcons();

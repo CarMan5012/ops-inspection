@@ -285,6 +285,45 @@ def trigger_periodic_report(report_type: str, is_manual: bool = False) -> int | 
     return run_id
 
 
+def _run_local_date(run: dict[str, Any]) -> str:
+    started_at = str(run.get("started_at") or "")
+    if started_at:
+        try:
+            if "T" in started_at:
+                dt = datetime.fromisoformat(started_at)
+            else:
+                dt = datetime.strptime(started_at[:19], "%Y-%m-%d %H:%M:%S")
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(ZoneInfo(settings.default_timezone))
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return str(run.get("started_at") or "")[:10] or "unknown-date"
+
+
+def _unique_zip_filename(src_report: Path, run: dict[str, Any], used_names: set[str]) -> str:
+    base_name = safe_name(src_report.stem, f"run_{run.get('id') or 'unknown'}")
+    suffix = src_report.suffix or ".docx"
+    candidate = f"{base_name}{suffix}"
+    if candidate not in used_names:
+        used_names.add(candidate)
+        return candidate
+
+    run_date = _run_local_date(run)
+    candidate = f"{base_name}_{run_date}{suffix}"
+    if candidate not in used_names:
+        used_names.add(candidate)
+        return candidate
+
+    candidate = f"{base_name}_{run_date}_run-{run.get('id') or 'unknown'}{suffix}"
+    counter = 2
+    while candidate in used_names:
+        candidate = f"{base_name}_{run_date}_run-{run.get('id') or 'unknown'}_{counter}{suffix}"
+        counter += 1
+    used_names.add(candidate)
+    return candidate
+
+
 def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfinished_reasons: list[str] | None = None) -> None:
     """正式执行周期报告汇总打包及发信逻辑"""
     run = get_periodic_report_run(run_id)
@@ -302,29 +341,42 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
 
     logger.info(f"正在为周期报告 '{setting['name']}' 运行打包发信流程 (ID: {run_id})")
 
-    # 1. 查询此时间段内的所有巡检记录，拿到各个任务的最新成功生成的 word 文档
+    # 1. 查询此时间段内所有已经生成 Word 的巡检记录。
+    #    同一个任务一天可能跑多次，09:05 和 17:05 会写入同一个日报模板；
+    #    周报/月报只取“任务 + 日期”维度最后一次 Word，避免同一天重复放多份。
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT id, job_id, job_name, report_path, started_at
+            SELECT id, job_id, job_name, status, report_path, started_at, finished_at, success_count, failed_count
             FROM run_records
-            WHERE started_at >= ? AND started_at <= ? AND report_path IS NOT NULL AND report_path != ''
-            ORDER BY id ASC
+            WHERE substr(replace(started_at, 'T', ' '), 1, 19) >= ?
+              AND substr(replace(started_at, 'T', ' '), 1, 19) <= ?
+              AND report_path IS NOT NULL
+              AND report_path != ''
+            ORDER BY substr(replace(started_at, 'T', ' '), 1, 19) ASC, id ASC
             """,
             (period_start, period_end),
         ).fetchall()
-        
-    runs_in_period = [dict(r) for r in rows]
 
-    # 按 job_id 分组，并只保留最新的一笔
-    latest_run_by_job: dict[int, dict[str, Any]] = {}
-    for r in runs_in_period:
-        job_id = r["job_id"]
-        if job_id:
-            latest_run_by_job[job_id] = r
+    latest_run_by_job_date: dict[tuple[Any, str], dict[str, Any]] = {}
+    for row in rows:
+        run_item = dict(row)
+        src_report = resolve_artifact_path(run_item.get("report_path") or "")
+        if not src_report.exists():
+            logger.warning(
+                "周期报告跳过运行 ID %s：数据库记录的 Word 文档不存在: %s",
+                run_item.get("id"),
+                run_item.get("report_path"),
+            )
+            continue
+        run_item["_resolved_report_path"] = str(src_report)
+        group_key = (run_item.get("job_id") or run_item.get("job_name") or run_item.get("id"), _run_local_date(run_item))
+        latest_run_by_job_date[group_key] = run_item
+
+    runs_in_period = list(latest_run_by_job_date.values())
 
     # 2. 如果没有任何报告，且配置为不发送空报告
-    if not latest_run_by_job and not setting["send_empty_report"]:
+    if not runs_in_period and not setting["send_empty_report"]:
         run["status"] = "success"
         run["mail_status"] = "skipped: 没有可汇总的巡检报告"
         run["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -336,10 +388,10 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
     if report_type == "weekly":
         start_date = period_start[:10]
         end_date = period_end[:10]
-        zip_filename = f"周报_{start_date}_至_{end_date}.zip"
+        zip_filename = f"周报_{start_date}_至_{end_date}_run-{run_id}.zip"
     else:
         year_month = period_start[:7]
-        zip_filename = f"月报_{year_month}.zip"
+        zip_filename = f"月报_{year_month}_run-{run_id}.zip"
 
     zip_dir = settings.data_dir / "periodic-reports"
     zip_dir.mkdir(parents=True, exist_ok=True)
@@ -353,25 +405,28 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
             "period_start": period_start,
             "period_end": period_end,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "report_count": len(runs_in_period),
             "jobs": []
         }
 
-        # 拷贝文档和截图
+        # 拷贝周期内每日最终 Word 文档，平铺放入 ZIP 根目录
         include_screenshots = int(setting.get("include_screenshots") or 0)
+        used_report_names: set[str] = set()
         
-        for job_id, r in latest_run_by_job.items():
-            job_folder_name = safe_name(r["job_name"], "job_" + str(job_id))
-            job_temp_dir = temp_dir / job_folder_name
-            job_temp_dir.mkdir(parents=True, exist_ok=True)
-            
-            report_copied_path = ""
-            src_report = resolve_artifact_path(r["report_path"])
-            if src_report.exists():
-                shutil.copy2(src_report, job_temp_dir / src_report.name)
-                report_copied_path = f"{job_folder_name}/{src_report.name}"
-                logger.info(f"拷贝文档 {src_report.name} 到打包临时文件夹 '{job_folder_name}'")
+        for r in runs_in_period:
+            src_report = Path(r["_resolved_report_path"])
+            report_name = _unique_zip_filename(src_report, r, used_report_names)
+            report_target = temp_dir / report_name
+            shutil.copy2(src_report, report_target)
+            report_copied_path = report_name
+            logger.info(
+                "拷贝运行 ID %s 的每日最终文档 %s 到周期压缩包根目录: %s",
+                r.get("id"),
+                src_report.name,
+                report_name,
+            )
                 
-            # 打包成功的截图
+            # 统计截图数量；如配置要求包含截图，放在 screenshots/run-{id} 下，避免影响 Word 平铺结构。
             screenshot_count = 0
             with connect() as conn:
                 results_rows = conn.execute(
@@ -380,7 +435,7 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
                 ).fetchall()
                 
             if include_screenshots:
-                screenshots_temp_dir = job_temp_dir / "screenshots"
+                screenshots_temp_dir = temp_dir / "screenshots" / f"run-{r['id']}"
                 screenshots_temp_dir.mkdir(parents=True, exist_ok=True)
                 for res in results_rows:
                     if res["file_path"]:
@@ -397,8 +452,11 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
                 "job_name": r["job_name"],
                 "run_id": r["id"],
                 "run_time": r["started_at"],
+                "finished_at": r.get("finished_at") or "",
                 "status": r.get("status") or "success",
                 "report_file": report_copied_path,
+                "success_count": int(r.get("success_count") or 0),
+                "failed_count": int(r.get("failed_count") or 0),
                 "screenshot_count": screenshot_count
             })
 

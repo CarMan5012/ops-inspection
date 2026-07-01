@@ -155,7 +155,7 @@
 
   <div class="form-actions span-2">
     <button class="primary" type="submit" style="font-weight: 600;">保存任务配置</button>
-    <a class="button" href="{{ '/jobs/' ~ job.id if job.id else '/' }}">取消并返回</a>
+    <a class="button" href="{{ url_for_frontend('/jobs/' ~ job.id if job.id else '/') }}">取消并返回</a>
   </div>
 </form>
 

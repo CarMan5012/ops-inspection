@@ -6,27 +6,40 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="运维管理后台">
   <title>运维管理后台</title>
-  <link rel="stylesheet" href="/static/vendor/modern-normalize.css">
-  <link rel="stylesheet" href="/static/app.css?v=20260626-validation1">
-  <link rel="stylesheet" href="/static/frontend/styles.css?v=20260626-validation1">
-  <script src="/static/vendor/lucide.min.js?v=20260626-validation1" defer></script>
-  <script src="/static/frontend/app.js?v=20260626-validation1" defer></script>
+  <link rel="stylesheet" href="{{ url_for_frontend('static/vendor/modern-normalize.css') }}">
+  <link rel="stylesheet" href="{{ url_for_frontend('static/app.css?v=20260626-system1') }}">
+  <link rel="stylesheet" href="{{ url_for_frontend('static/frontend/styles.css?v=20260626-system1') }}">
+  <script src="{{ url_for_frontend('static/vendor/lucide.min.js?v=20260626-system1') }}" defer></script>
+  <script src="{{ url_for_frontend('static/frontend/app.js?v=20260626-system1') }}" defer></script>
+  <script>
+    window.APP_CONFIG = {
+      apiBase: "{{ api_prefix }}",
+      frontendBase: "{{ frontend_base_path }}",
+      artifactBase: "/artifact"
+    };
+  </script>
 </head>
 
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="运维管理后台">
-      <span class="brand-mark"><img src="/static/images/logo.svg" alt=""></span>
+    <a class="brand" href="{{ url_for_frontend('/') }}" aria-label="运维管理后台">
+      <span class="brand-mark"><img src="{{ url_for_frontend('static/images/logo.svg') }}" alt=""></span>
       <span>运维管理后台</span>
     </a>
     <nav class="nav" aria-label="主导航">
-      <a class="nav-link active" href="/#/jobs" data-view="dashboard"><span data-lucide="clipboard-list"></span>巡检任务</a>
-      <a class="nav-link" href="/#/runs" data-view="runs"><span data-lucide="history"></span>运检记录</a>
-      <a class="nav-link" href="/#/periodic" data-view="periodic"><span data-lucide="file-archive"></span>周期报告</a>
-      <a class="nav-link" href="/#/auth" data-view="auth"><span data-lucide="key-round"></span>认证配置</a>
-      <a class="nav-link" href="/#/mail" data-view="mail"><span data-lucide="mail"></span>邮件配置</a>
-      <a class="nav-link" href="/#/storage" data-view="storage"><span data-lucide="settings"></span>系统配置</a>
-      <a class="nav-link nav-logout" href="/logout"><span data-lucide="log-out"></span>退出</a>
+      <a class="nav-link active" href="{{ url_for_frontend('/') }}#/jobs" data-view="dashboard"><span
+          data-lucide="clipboard-list"></span>巡检任务</a>
+      <a class="nav-link" href="{{ url_for_frontend('/') }}#/runs" data-view="runs"><span
+          data-lucide="history"></span>巡检记录</a>
+      <a class="nav-link" href="{{ url_for_frontend('/') }}#/periodic" data-view="periodic"><span
+          data-lucide="file-archive"></span>周期报告</a>
+      <a class="nav-link" href="{{ url_for_frontend('/') }}#/auth" data-view="auth"><span
+          data-lucide="key-round"></span>认证配置</a>
+      <a class="nav-link" href="{{ url_for_frontend('/') }}#/mail" data-view="mail"><span
+          data-lucide="mail"></span>邮件配置</a>
+      <a class="nav-link" href="{{ url_for_frontend('/') }}#/storage" data-view="storage"><span
+          data-lucide="settings"></span>系统配置</a>
+      <a class="nav-link nav-logout" href="{{ url_for_frontend('logout') }}"><span data-lucide="log-out"></span>退出</a>
     </nav>
   </header>
 

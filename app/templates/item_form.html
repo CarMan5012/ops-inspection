@@ -177,7 +177,7 @@ dwangchengyi7(王诚毅){% endif %}</textarea>
 
   <div class="form-actions span-2">
     <button class="primary" type="submit" style="font-weight: 600;">保存截图项配置</button>
-    <a class="button" href="/jobs/{{ job_id }}">取消并返回</a>
+    <a class="button" href="{{ url_for_frontend('/jobs/' ~ job_id) }}">取消并返回</a>
   </div>
 </form>
 

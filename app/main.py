@@ -45,15 +45,46 @@ from app.login_crypto import LoginPayloadError, decrypt_login_payload, get_login
 import os
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 
+
+# 获取并规范化 LOG_LEVEL
+log_level_str = os.getenv("LOG_LEVEL", "INFO").upper().strip()
+log_level = getattr(logging, log_level_str, logging.INFO)
 
 app_logger = logging.getLogger("app")
-app_logger.setLevel(logging.INFO)
+app_logger.setLevel(log_level)
+
 if not app_logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-    app_logger.addHandler(handler)
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    
+    # 控制台标准输出
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    app_logger.addHandler(stream_handler)
+    
+    # 文件持久化滚动日志
+    try:
+        settings.ensure_dirs()
+        log_file = settings.log_dir / "app.log"
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=10 * 1024 * 1024,  # 10MB
+            backupCount=3,
+            encoding="utf-8"
+        )
+        file_handler.setFormatter(formatter)
+        app_logger.addHandler(file_handler)
+        app_logger.info(f"日志滚动文件处理器初始化成功. 文件路径: {log_file}")
+    except Exception as e:
+        # 避免写文件失败导致应用无法启动，做降级处理
+        stream_handler.stream.write(f"警告: 初始化文件日志失败: {e}\n")
+        
     app_logger.propagate = False
+    app_logger.info(f"应用日志系统初始化完成. 日志级别: {log_level_str}")
 
 app = FastAPI(
     title=settings.app_name,
@@ -66,8 +97,34 @@ configure_openapi(app, settings.api_prefix, settings.app_name)
 
 api_router = APIRouter(prefix=settings.api_prefix)
 
-templates = Jinja2Templates(directory="app/templates")
+templates = Jinja2Templates(directory=["app/templates", "app/static/frontend"])
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+if settings.frontend_base_path != "/":
+    app.mount(f"{settings.frontend_base_path}/static", StaticFiles(directory="app/static"), name="static_prefix")
+
+
+def url_for_frontend(path: str) -> str:
+    base = settings.frontend_base_path
+    if base == "/":
+        if not path.startswith("/"):
+            return "/" + path
+        return path
+    
+    cleaned_path = path.lstrip("/")
+    if not cleaned_path:
+        return base + "/"
+    if cleaned_path.startswith("#") or cleaned_path.startswith("?"):
+        return base + "/" + cleaned_path
+    return base + "/" + cleaned_path
+
+
+def frontend_redirect(path: str, status_code: int = 303) -> RedirectResponse:
+    return RedirectResponse(url_for_frontend(path), status_code=status_code)
+
+
+templates.env.globals["url_for_frontend"] = url_for_frontend
+
+frontend_router = APIRouter(prefix=settings.frontend_base_path if settings.frontend_base_path != "/" else "")
 
 
 def status_label(value: Any) -> str:
@@ -346,7 +403,7 @@ def on_shutdown() -> None:
     shutdown_scheduler()
 
 
-@app.get("/login", response_class=HTMLResponse)
+@frontend_router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request) -> HTMLResponse:
     security = security_settings()
     return templates.TemplateResponse(
@@ -360,28 +417,28 @@ def login_page(request: Request) -> HTMLResponse:
     )
 
 
-@app.post("/login")
+@frontend_router.post("/login")
 def login(
     login_payload: str = Form(""),
 ) -> RedirectResponse:
     if not login_payload:
-        return RedirectResponse("/login?error=1", status_code=303)
+        return frontend_redirect("/login?error=1")
     try:
         payload = decrypt_login_payload(login_payload)
     except LoginPayloadError:
-        return RedirectResponse("/login?error=1", status_code=303)
+        return frontend_redirect("/login?error=1")
     username = payload["username"]
     password = payload["password"]
     mfa_code = payload["mfa_code"]
 
     if not check_password(username, password):
-        return RedirectResponse("/login?error=1", status_code=303)
+        return frontend_redirect("/login?error=1")
     security = security_settings()
     if security["mfa_enabled"]:
         secret = current_mfa_secret()
         if not secret or not verify_totp_code(secret, mfa_code):
-            return RedirectResponse("/login?error=mfa", status_code=303)
-    response = RedirectResponse("/", status_code=303)
+            return frontend_redirect("/login?error=mfa")
+    response = frontend_redirect("/")
     response.set_cookie(
         COOKIE_NAME,
         create_token(username),
@@ -392,14 +449,14 @@ def login(
     return response
 
 
-@app.get("/logout")
+@frontend_router.get("/logout")
 def logout() -> RedirectResponse:
-    response = RedirectResponse("/login", status_code=303)
+    response = frontend_redirect("/login")
     response.delete_cookie(COOKIE_NAME)
     return response
 
 
-@app.get("/app-config.json")
+@frontend_router.get("/app-config.json")
 def get_app_config() -> dict[str, str]:
     return {
         "apiBase": settings.api_prefix,
@@ -436,30 +493,30 @@ def require_swagger_access(request: Request) -> None:
         raise HTTPException(status_code=404, detail="接口文档未开启")
 
 
-@app.get("/openapi.json", include_in_schema=False)
+@frontend_router.get("/openapi.json", include_in_schema=False)
 def openapi_json(_: None = Depends(require_swagger_access)) -> dict[str, Any]:
     return app.openapi()
 
 
-@app.get("/docs", include_in_schema=False)
+@frontend_router.get("/docs", include_in_schema=False)
 def swagger_docs(_: None = Depends(require_swagger_access)) -> HTMLResponse:
     return get_swagger_ui_html(
-        openapi_url="/openapi.json",
+        openapi_url=url_for_frontend("/openapi.json"),
         title=f"{settings.app_name} API 文档",
     )
 
 
-@app.get("/redoc", include_in_schema=False)
+@frontend_router.get("/redoc", include_in_schema=False)
 def redoc_docs(_: None = Depends(require_swagger_access)) -> HTMLResponse:
     return get_redoc_html(
-        openapi_url="/openapi.json",
+        openapi_url=url_for_frontend("/openapi.json"),
         title=f"{settings.app_name} API 文档",
     )
 
 
-@app.get("/swagger", include_in_schema=False)
+@frontend_router.get("/swagger", include_in_schema=False)
 def swagger_page(_: None = Depends(require_swagger_access)) -> RedirectResponse:
-    return RedirectResponse("/docs", status_code=303)
+    return frontend_redirect("/docs")
 
 
 def require_api_login(request: Request) -> None:
@@ -758,7 +815,7 @@ def artifact_filename(file_path: str) -> str:
 
 
 def get_artifact_url(kind: str, run_id: int | str, filename: str) -> str:
-    return f"/artifact/{kind}/{run_id}/{filename}"
+    return url_for_frontend(f"/artifact/{kind}/{run_id}/{filename}")
 
 
 def enrich_run(run: dict[str, Any]) -> dict[str, Any]:
@@ -802,10 +859,16 @@ def api_list_jobs() -> dict[str, Any]:
 @api_router.post("/jobs", dependencies=[Depends(require_api_login)])
 def api_create_job(payload: dict[str, Any]) -> dict[str, Any]:
     from app.utils import validate_cron_expression
+    import sqlite3
 
     data = api_job_payload(payload)
     validate_cron_expression(data["cron_expression"])
-    job_id = save_job(data)
+    try:
+        job_id = save_job(data)
+    except sqlite3.IntegrityError as e:
+        if "UNIQUE constraint failed" in str(e) and "report_jobs.name" in str(e):
+            raise HTTPException(status_code=400, detail="任务名称已存在")
+        raise HTTPException(status_code=400, detail=f"数据库约束校验失败: {e}")
     reload_jobs()
     return {"ok": True, "job": public_job(require_value(get_job(job_id), "任务不存在"))}
 
@@ -834,6 +897,7 @@ def api_get_job(job_id: int) -> dict[str, Any]:
 @api_router.put("/jobs/{job_id}", dependencies=[Depends(require_api_login)])
 def api_update_job(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     from app.utils import validate_cron_expression
+    import sqlite3
 
     old = require_value(get_job(job_id), "任务不存在")
     data = api_job_payload(payload)
@@ -842,7 +906,12 @@ def api_update_job(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     if not data.get("dingtalk_secret"):
         data["dingtalk_secret"] = old.get("dingtalk_secret") or ""
     validate_cron_expression(data["cron_expression"])
-    save_job(data, job_id)
+    try:
+        save_job(data, job_id)
+    except sqlite3.IntegrityError as e:
+        if "UNIQUE constraint failed" in str(e) and "report_jobs.name" in str(e):
+            raise HTTPException(status_code=400, detail="任务名称已存在")
+        raise HTTPException(status_code=400, detail=f"数据库约束校验失败: {e}")
     reload_jobs()
     return {"ok": True, "job": public_job(require_value(get_job(job_id), "任务不存在"))}
 
@@ -1001,7 +1070,7 @@ def api_periodic_reports() -> dict[str, Any]:
             size_bytes = os.path.getsize(zip_path)
             run["size_str"] = f"{size_bytes / 1024:.2f} KB" if size_bytes < 1024 * 1024 else f"{size_bytes / (1024 * 1024):.2f} MB"
             run["filename"] = Path(zip_path).name
-            run["download_url"] = f"/periodic-reports/download/{run['id']}"
+            run["download_url"] = url_for_frontend(f"/periodic-reports/download/{run['id']}")
         else:
             run["size_str"] = "-"
             run["filename"] = ""
@@ -1017,12 +1086,20 @@ def api_run_periodic_report(report_type: str, background_tasks: BackgroundTasks)
     return {"ok": True}
 
 
-@app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_login)])
-def index() -> FileResponse:
-    return FileResponse("app/static/frontend/index.html", media_type="text/html")
+@frontend_router.get("/", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+def index(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "url_for_frontend": url_for_frontend,
+            "api_prefix": settings.api_prefix,
+            "frontend_base_path": settings.frontend_base_path,
+        },
+    )
 
 
-@app.get("/jobs/new", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/jobs/new", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def new_job(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         "job_form.html",
@@ -1030,27 +1107,33 @@ def new_job(request: Request) -> HTMLResponse:
             "request": request,
             "job": {},
             "mail_profiles": list_mail_profiles(),
-            "action": "/jobs/new",
+            "action": url_for_frontend("/jobs/new"),
             "error": request.query_params.get("error", "")
         },
     )
 
 
-@app.post("/jobs/new", dependencies=[Depends(require_login)])
+@frontend_router.post("/jobs/new", dependencies=[Depends(require_login)])
 def create_job(form: dict[str, Any] = Depends(job_form)) -> RedirectResponse:
     from app.utils import validate_cron_expression
     from urllib.parse import quote
+    import sqlite3
     try:
         validate_cron_expression(form["cron_expression"])
     except ValueError as e:
-        return RedirectResponse(f"/jobs/new?error={quote(str(e))}", status_code=303)
+        return frontend_redirect(f"/jobs/new?error={quote(str(e))}")
 
-    job_id = save_job(form)
+    try:
+        job_id = save_job(form)
+    except sqlite3.IntegrityError as e:
+        if "UNIQUE constraint failed" in str(e) and "report_jobs.name" in str(e):
+            return frontend_redirect(f"/jobs/new?error={quote('任务名称已存在')}")
+        return frontend_redirect(f"/jobs/new?error={quote(f'数据库错误: {e}')}")
     reload_jobs()
-    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+    return frontend_redirect(f"/jobs/{job_id}")
 
 
-@app.get("/jobs/{job_id}", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/jobs/{job_id}", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def job_detail(request: Request, job_id: int) -> HTMLResponse:
     from app.scheduler import scheduler
     db_job = get_job(job_id)
@@ -1087,7 +1170,7 @@ def job_detail(request: Request, job_id: int) -> HTMLResponse:
     )
 
 
-@app.get("/jobs/{job_id}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/jobs/{job_id}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def edit_job(request: Request, job_id: int) -> HTMLResponse:
     job = require_value(get_job(job_id), "任务不存在")
     return templates.TemplateResponse(
@@ -1096,47 +1179,53 @@ def edit_job(request: Request, job_id: int) -> HTMLResponse:
             "request": request,
             "job": job,
             "mail_profiles": list_mail_profiles(),
-            "action": f"/jobs/{job_id}/edit",
+            "action": url_for_frontend(f"/jobs/{job_id}/edit"),
             "error": request.query_params.get("error", "")
         },
     )
 
 
-@app.post("/jobs/{job_id}/edit", dependencies=[Depends(require_login)])
+@frontend_router.post("/jobs/{job_id}/edit", dependencies=[Depends(require_login)])
 def update_job(job_id: int, form: dict[str, Any] = Depends(job_form)) -> RedirectResponse:
     from app.utils import validate_cron_expression
     from urllib.parse import quote
+    import sqlite3
     old = require_value(get_job(job_id), "任务不存在")
     try:
         validate_cron_expression(form["cron_expression"])
     except ValueError as e:
-        return RedirectResponse(f"/jobs/{job_id}/edit?error={quote(str(e))}", status_code=303)
+        return frontend_redirect(f"/jobs/{job_id}/edit?error={quote(str(e))}")
 
     if not form.get("dingtalk_webhook"):
         form["dingtalk_webhook"] = old.get("dingtalk_webhook") or ""
     if not form.get("dingtalk_secret"):
         form["dingtalk_secret"] = old.get("dingtalk_secret") or ""
-    save_job(form, job_id)
+    try:
+        save_job(form, job_id)
+    except sqlite3.IntegrityError as e:
+        if "UNIQUE constraint failed" in str(e) and "report_jobs.name" in str(e):
+            return frontend_redirect(f"/jobs/{job_id}/edit?error={quote('任务名称已存在')}")
+        return frontend_redirect(f"/jobs/{job_id}/edit?error={quote(f'数据库错误: {e}')}")
     reload_jobs()
-    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+    return frontend_redirect(f"/jobs/{job_id}")
 
 
-@app.post("/jobs/{job_id}/delete", dependencies=[Depends(require_login)])
+@frontend_router.post("/jobs/{job_id}/delete", dependencies=[Depends(require_login)])
 def remove_job(job_id: int) -> RedirectResponse:
     delete_job(job_id)
     reload_jobs()
-    return RedirectResponse("/", status_code=303)
+    return frontend_redirect("/")
 
 
-@app.post("/jobs/{job_id}/run", dependencies=[Depends(require_login)])
+@frontend_router.post("/jobs/{job_id}/run", dependencies=[Depends(require_login)])
 def run_job_now(job_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
     job = require_value(get_job(job_id), "任务不存在")
     run_id = create_run(job_id, str(job["name"]))
     background_tasks.add_task(run_job, job_id, run_id)
-    return RedirectResponse(f"/runs/{run_id}?watch=1", status_code=303)
+    return frontend_redirect(f"/runs/{run_id}?watch=1")
 
 
-@app.get("/jobs/{job_id}/items/new", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/jobs/{job_id}/items/new", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def new_item(request: Request, job_id: int) -> HTMLResponse:
     require_value(get_job(job_id), "任务不存在")
     return templates.TemplateResponse(
@@ -1159,19 +1248,19 @@ def new_item(request: Request, job_id: int) -> HTMLResponse:
             "job_id": job_id,
             "auth_profiles": list_auth_profiles(),
             "template_sections": list_template_sections(),
-            "action": f"/jobs/{job_id}/items/new",
+            "action": url_for_frontend(f"/jobs/{job_id}/items/new"),
         },
     )
 
 
-@app.post("/jobs/{job_id}/items/new", dependencies=[Depends(require_login)])
+@frontend_router.post("/jobs/{job_id}/items/new", dependencies=[Depends(require_login)])
 def create_item(job_id: int, form: dict[str, Any] = Depends(item_form)) -> RedirectResponse:
     form["job_id"] = job_id
     item_id = save_screenshot_item(form)
-    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+    return frontend_redirect(f"/jobs/{job_id}")
 
 
-@app.get("/items/{item_id}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/items/{item_id}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def edit_item(request: Request, item_id: int) -> HTMLResponse:
     item = require_value(get_screenshot_item(item_id), "截图项不存在")
     return templates.TemplateResponse(
@@ -1182,64 +1271,64 @@ def edit_item(request: Request, item_id: int) -> HTMLResponse:
             "job_id": item["job_id"],
             "auth_profiles": list_auth_profiles(),
             "template_sections": list_template_sections(),
-            "action": f"/items/{item_id}/edit",
+            "action": url_for_frontend(f"/items/{item_id}/edit"),
         },
     )
 
 
-@app.post("/items/{item_id}/edit", dependencies=[Depends(require_login)])
+@frontend_router.post("/items/{item_id}/edit", dependencies=[Depends(require_login)])
 def update_item(item_id: int, form: dict[str, Any] = Depends(item_form)) -> RedirectResponse:
     current = require_value(get_screenshot_item(item_id), "截图项不存在")
     form["job_id"] = current["job_id"]
     save_screenshot_item(form, item_id)
-    return RedirectResponse(f"/jobs/{current['job_id']}", status_code=303)
+    return frontend_redirect(f"/jobs/{current['job_id']}")
 
 
-@app.post("/items/{item_id}/delete", dependencies=[Depends(require_login)])
+@frontend_router.post("/items/{item_id}/delete", dependencies=[Depends(require_login)])
 def remove_item(item_id: int) -> RedirectResponse:
     item = require_value(get_screenshot_item(item_id), "截图项不存在")
     delete_screenshot_item(item_id)
-    return RedirectResponse(f"/jobs/{item['job_id']}", status_code=303)
+    return frontend_redirect(f"/jobs/{item['job_id']}")
 
 
-@app.post("/items/{item_id}/test", dependencies=[Depends(require_login)])
+@frontend_router.post("/items/{item_id}/test", dependencies=[Depends(require_login)])
 def test_item(item_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
     require_value(get_screenshot_item(item_id), "截图项不存在")
     background_tasks.add_task(test_capture_item, item_id)
-    return RedirectResponse("/runs?watch=1", status_code=303)
+    return frontend_redirect("/runs?watch=1")
 
 
-@app.get("/auth-profiles", dependencies=[Depends(require_login)])
+@frontend_router.get("/auth-profiles", dependencies=[Depends(require_login)])
 def auth_profiles(request: Request) -> RedirectResponse:
     params = request.query_params
     query_str = f"?{params}" if params else ""
-    return RedirectResponse(f"/#/auth{query_str}", status_code=303)
+    return frontend_redirect(f"/#/auth{query_str}")
 
 
-@app.get("/auth-profiles/new", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/auth-profiles/new", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def new_auth_profile(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         "auth_form.html",
-        {"request": request, "profile": {}, "action": "/auth-profiles/new"},
+        {"request": request, "profile": {}, "action": url_for_frontend("/auth-profiles/new")},
     )
 
 
-@app.post("/auth-profiles/new", dependencies=[Depends(require_login)])
+@frontend_router.post("/auth-profiles/new", dependencies=[Depends(require_login)])
 def create_auth_profile(form: dict[str, Any] = Depends(auth_form)) -> RedirectResponse:
     auth_id = save_auth_profile(form)
-    return RedirectResponse("/auth-profiles", status_code=303)
+    return frontend_redirect("/auth-profiles")
 
 
-@app.get("/auth-profiles/{auth_id}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/auth-profiles/{auth_id}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def edit_auth_profile(request: Request, auth_id: int) -> HTMLResponse:
     profile = require_value(get_auth_profile(auth_id), "认证配置不存在")
     return templates.TemplateResponse(
         "auth_form.html",
-        {"request": request, "profile": profile, "action": f"/auth-profiles/{auth_id}/edit"},
+        {"request": request, "profile": profile, "action": url_for_frontend(f"/auth-profiles/{auth_id}/edit")},
     )
 
 
-@app.post("/auth-profiles/{auth_id}/edit", dependencies=[Depends(require_login)])
+@frontend_router.post("/auth-profiles/{auth_id}/edit", dependencies=[Depends(require_login)])
 def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form)) -> RedirectResponse:
     old = get_auth_profile(auth_id)
     if old:
@@ -1272,81 +1361,81 @@ def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form))
             clear_auth_state_cache(dict(old))
             
     save_auth_profile(form, auth_id)
-    return RedirectResponse("/auth-profiles", status_code=303)
+    return frontend_redirect("/auth-profiles")
 
 
-@app.post("/auth-profiles/{auth_id}/delete", dependencies=[Depends(require_login)])
+@frontend_router.post("/auth-profiles/{auth_id}/delete", dependencies=[Depends(require_login)])
 def remove_auth_profile(auth_id: int) -> RedirectResponse:
     old = get_auth_profile(auth_id)
     if old:
         clear_auth_state_cache(dict(old))
     delete_auth_profile(auth_id)
-    return RedirectResponse("/auth-profiles", status_code=303)
+    return frontend_redirect("/auth-profiles")
 
 
-@app.post("/auth-profiles/{auth_id}/test", dependencies=[Depends(require_login)])
+@frontend_router.post("/auth-profiles/{auth_id}/test", dependencies=[Depends(require_login)])
 def test_auth_profile_route(auth_id: int) -> RedirectResponse:
     from app.screenshot import test_auth_profile_login
     from urllib.parse import quote
     res = test_auth_profile_login(auth_id)
     if res["success"]:
-        return RedirectResponse(f"/auth-profiles?success={quote(res['message'])}", status_code=303)
-    return RedirectResponse(f"/auth-profiles?error={quote(res['message'])}", status_code=303)
+        return frontend_redirect(f"/auth-profiles?success={quote(res['message'])}")
+    return frontend_redirect(f"/auth-profiles?error={quote(res['message'])}")
 
 
-@app.post("/auth-profiles/{auth_id}/test-async", dependencies=[Depends(require_login)])
+@frontend_router.post("/auth-profiles/{auth_id}/test-async", dependencies=[Depends(require_login)])
 def test_auth_profile_route_async(auth_id: int) -> dict[str, Any]:
     from app.screenshot import test_auth_profile_login
     return test_auth_profile_login(auth_id)
 
 
-@app.get("/mail-profiles", dependencies=[Depends(require_login)])
+@frontend_router.get("/mail-profiles", dependencies=[Depends(require_login)])
 def mail_profiles(request: Request) -> RedirectResponse:
     params = request.query_params
     query_str = f"?{params}" if params else ""
-    return RedirectResponse(f"/#/mail{query_str}", status_code=303)
+    return frontend_redirect(f"/#/mail{query_str}")
 
 
-@app.get("/mail-profiles/new", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/mail-profiles/new", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def new_mail_profile(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         "mail_form.html",
-        {"request": request, "profile": {}, "action": "/mail-profiles/new"},
+        {"request": request, "profile": {}, "action": url_for_frontend("/mail-profiles/new")},
     )
 
 
-@app.post("/mail-profiles/new", dependencies=[Depends(require_login)])
+@frontend_router.post("/mail-profiles/new", dependencies=[Depends(require_login)])
 def create_mail_profile(form: dict[str, Any] = Depends(mail_form)) -> RedirectResponse:
     mail_id = save_mail_profile(form)
-    return RedirectResponse("/mail-profiles", status_code=303)
+    return frontend_redirect("/mail-profiles")
 
 
-@app.get("/mail-profiles/{mail_id}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/mail-profiles/{mail_id}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def edit_mail_profile(request: Request, mail_id: int) -> HTMLResponse:
     profile = require_value(get_mail_profile(mail_id), "邮件配置不存在")
     return templates.TemplateResponse(
         "mail_form.html",
-        {"request": request, "profile": profile, "action": f"/mail-profiles/{mail_id}/edit"},
+        {"request": request, "profile": profile, "action": url_for_frontend(f"/mail-profiles/{mail_id}/edit")},
     )
 
 
-@app.post("/mail-profiles/{mail_id}/edit", dependencies=[Depends(require_login)])
+@frontend_router.post("/mail-profiles/{mail_id}/edit", dependencies=[Depends(require_login)])
 def update_mail_profile(mail_id: int, form: dict[str, Any] = Depends(mail_form)) -> RedirectResponse:
     old = get_mail_profile(mail_id)
     if old:
         if not form.get("password"):
             form["password_secret"] = old.get("password_secret")
     save_mail_profile(form, mail_id)
-    return RedirectResponse("/mail-profiles", status_code=303)
+    return frontend_redirect("/mail-profiles")
 
 
-@app.post("/mail-profiles/{mail_id}/delete", dependencies=[Depends(require_login)])
+@frontend_router.post("/mail-profiles/{mail_id}/delete", dependencies=[Depends(require_login)])
 def remove_mail_profile(mail_id: int) -> RedirectResponse:
     delete_mail_profile(mail_id)
-    return RedirectResponse("/mail-profiles", status_code=303)
+    return frontend_redirect("/mail-profiles")
 
 
-@app.post("/mail-profiles/{mail_id}/test", dependencies=[Depends(require_login)])
+@frontend_router.post("/mail-profiles/{mail_id}/test", dependencies=[Depends(require_login)])
 def test_mail_profile(mail_id: int, test_recipient: str = Form("")) -> RedirectResponse:
     profile = require_value(get_mail_profile(mail_id), "邮件配置不存在")
     recipient = test_recipient.strip()
@@ -1356,7 +1445,7 @@ def test_mail_profile(mail_id: int, test_recipient: str = Form("")) -> RedirectR
         recipient = str(profile.get("sender") or profile.get("username") or "").strip()
     if not recipient:
         from urllib.parse import quote
-        return RedirectResponse(f"/mail-profiles?error={quote('收件人为空且无法提取默认收件人，请指定测试收件邮箱')}", status_code=303)
+        return frontend_redirect(f"/mail-profiles?error={quote('收件人为空且无法提取默认收件人，请指定测试收件邮箱')}")
         
     import tempfile
     from docx import Document
@@ -1385,7 +1474,7 @@ def test_mail_profile(mail_id: int, test_recipient: str = Form("")) -> RedirectR
     except Exception as exc:
         err_msg = f"{type(exc).__name__}: {exc}"
         app_logger.error(f"测试发送邮件失败: {err_msg}", exc_info=True)
-        return RedirectResponse(f"/mail-profiles?error={quote(err_msg)}", status_code=303)
+        return frontend_redirect(f"/mail-profiles?error={quote(err_msg)}")
     finally:
         if os.path.exists(test_doc_path):
             try:
@@ -1394,10 +1483,10 @@ def test_mail_profile(mail_id: int, test_recipient: str = Form("")) -> RedirectR
                 pass
                 
     from urllib.parse import quote
-    return RedirectResponse(f"/mail-profiles?success={quote('测试邮件已成功发出！请检查您的邮箱收件箱。')}", status_code=303)
+    return frontend_redirect(f"/mail-profiles?success={quote('测试邮件已成功发出！请检查您的邮箱收件箱。')}")
 
 
-@app.post("/mail-profiles/{mail_id}/test-async", dependencies=[Depends(require_login)])
+@frontend_router.post("/mail-profiles/{mail_id}/test-async", dependencies=[Depends(require_login)])
 def test_mail_profile_async(mail_id: int, test_recipient: str = Form("")) -> dict[str, Any]:
     profile = get_mail_profile(mail_id)
     if not profile:
@@ -1447,14 +1536,14 @@ def test_mail_profile_async(mail_id: int, test_recipient: str = Form("")) -> dic
                 pass
 
 
-@app.get("/runs", dependencies=[Depends(require_login)])
+@frontend_router.get("/runs", dependencies=[Depends(require_login)])
 def runs(request: Request) -> RedirectResponse:
     params = request.query_params
     query_str = f"?{params}" if params else ""
-    return RedirectResponse(f"/#/runs{query_str}", status_code=303)
+    return frontend_redirect(f"/#/runs{query_str}")
 
 
-@app.get("/help", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/help", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def help_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         "help.html",
@@ -1463,7 +1552,7 @@ def help_page(request: Request) -> HTMLResponse:
 
 
 
-@app.get("/runs/{run_id}", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/runs/{run_id}", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def run_detail(request: Request, run_id: int) -> HTMLResponse:
     run = require_value(get_run(run_id), "运行记录不存在")
     results = [with_file_url(item) for item in list_screenshot_results(run_id)]
@@ -1483,7 +1572,7 @@ def run_detail(request: Request, run_id: int) -> HTMLResponse:
     )
 
 
-@app.get("/artifact/{kind}/{run_id}/{filename}", dependencies=[Depends(require_login)])
+@frontend_router.get("/artifact/{kind}/{run_id}/{filename}", dependencies=[Depends(require_login)])
 def artifact(kind: str, run_id: int, filename: str) -> FileResponse:
     base = {"screenshots": settings.screenshot_dir, "reports": settings.report_dir}.get(kind)
     if base is None:
@@ -1539,7 +1628,7 @@ def parse_optional_int(value: str | None) -> int | None:
 # 周期报告与数据库重置路由
 # ==============================================================================
 
-@app.post("/settings/reset", dependencies=[Depends(require_login)])
+@frontend_router.post("/settings/reset", dependencies=[Depends(require_login)])
 def reset_database() -> RedirectResponse:
     from app.db import reset_database_data
     from app.scheduler import reload_jobs
@@ -1552,17 +1641,17 @@ def reset_database() -> RedirectResponse:
         app_logger.error(f"重置数据库失败: {exc}", exc_info=True)
         
     from urllib.parse import quote
-    return RedirectResponse(f"/?success={quote('系统所有配置及历史数据已成功清空并重置！')}", status_code=303)
+    return frontend_redirect(f"/?success={quote('系统所有配置及历史数据已成功清空并重置！')}")
 
 
-@app.get("/periodic-reports", dependencies=[Depends(require_login)])
+@frontend_router.get("/periodic-reports", dependencies=[Depends(require_login)])
 def periodic_reports_list(request: Request) -> RedirectResponse:
     params = request.query_params
     query_str = f"?{params}" if params else ""
-    return RedirectResponse(f"/#/periodic{query_str}", status_code=303)
+    return frontend_redirect(f"/#/periodic{query_str}")
 
 
-@app.get("/periodic-reports/{report_type}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+@frontend_router.get("/periodic-reports/{report_type}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def edit_periodic_report(request: Request, report_type: str) -> HTMLResponse:
     from app.repository import get_periodic_report_setting, list_mail_profiles
     setting = get_periodic_report_setting(report_type)
@@ -1575,12 +1664,12 @@ def edit_periodic_report(request: Request, report_type: str) -> HTMLResponse:
             "request": request,
             "setting": setting,
             "mail_profiles": list_mail_profiles(),
-            "action": f"/periodic-reports/{report_type}/edit"
+            "action": url_for_frontend(f"/periodic-reports/{report_type}/edit")
         }
     )
 
 
-@app.post("/periodic-reports/{report_type}/edit", dependencies=[Depends(require_login)])
+@frontend_router.post("/periodic-reports/{report_type}/edit", dependencies=[Depends(require_login)])
 def update_periodic_report(
     report_type: str,
     enabled: str | None = Form(None),
@@ -1658,7 +1747,7 @@ def update_periodic_report(
     try:
         validate_cron_expression(cron_expr)
     except ValueError as e:
-        return RedirectResponse(f"/periodic-reports/{report_type}/edit?error={quote(str(e))}", status_code=303)
+        return frontend_redirect(f"/periodic-reports/{report_type}/edit?error={quote(str(e))}")
 
     update_data = {
         "enabled": 1 if enabled else 0,
@@ -1680,18 +1769,18 @@ def update_periodic_report(
     
     save_periodic_report_setting(report_type, update_data)
     reload_jobs()
-    return RedirectResponse(f"/periodic-reports?success={quote('周期汇总配置保存成功！')}", status_code=303)
+    return frontend_redirect(f"/periodic-reports?success={quote('周期汇总配置保存成功！')}")
 
 
-@app.post("/periodic-reports/{report_type}/run", dependencies=[Depends(require_login)])
+@frontend_router.post("/periodic-reports/{report_type}/run", dependencies=[Depends(require_login)])
 def run_periodic_report_now(report_type: str, background_tasks: BackgroundTasks) -> RedirectResponse:
     from app.periodic_reporter import trigger_periodic_report
     from urllib.parse import quote
     background_tasks.add_task(trigger_periodic_report, report_type, True)
-    return RedirectResponse(f"/periodic-reports?success={quote('周期汇总报告生成任务已在后台启动，打包发信中，请稍候刷新页面查看。')}", status_code=303)
+    return frontend_redirect(f"/periodic-reports?success={quote('周期汇总报告生成任务已在后台启动，打包发信中，请稍候刷新页面查看。')}")
 
 
-@app.get("/periodic-reports/download/{run_id}", dependencies=[Depends(require_login)])
+@frontend_router.get("/periodic-reports/download/{run_id}", dependencies=[Depends(require_login)])
 def download_periodic_report_zip(run_id: int) -> FileResponse:
     from app.repository import get_periodic_report_run
     run = get_periodic_report_run(run_id)
@@ -1703,7 +1792,7 @@ def download_periodic_report_zip(run_id: int) -> FileResponse:
     return FileResponse(path, media_type="application/zip", filename=path.name)
 
 
-@app.post("/periodic-reports/delete/{run_id}", dependencies=[Depends(require_login)])
+@frontend_router.post("/periodic-reports/delete/{run_id}", dependencies=[Depends(require_login)])
 def delete_periodic_report_run_route(run_id: int) -> RedirectResponse:
     from app.repository import get_periodic_report_run, delete_periodic_report_run
     run = get_periodic_report_run(run_id)
@@ -1715,7 +1804,7 @@ def delete_periodic_report_run_route(run_id: int) -> RedirectResponse:
             except Exception:
                 pass
         delete_periodic_report_run(run_id)
-    return RedirectResponse("/periodic-reports", status_code=303)
+    return frontend_redirect("/periodic-reports")
 
 
 # ==============================================================================
@@ -1883,4 +1972,5 @@ def api_get_cleanup_runs() -> dict[str, Any]:
     return {"runs": runs}
 
 
+app.include_router(frontend_router)
 app.include_router(api_router)

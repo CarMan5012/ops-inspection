@@ -17,11 +17,11 @@
     </p>
   </div>
   <div class="button-row" style="gap: 8px;">
-    <form method="post" action="/jobs/{{ job.id }}/run" style="margin: 0; display: inline-block;">
+    <form method="post" action="{{ url_for_frontend('/jobs/' ~ job.id ~ '/run') }}" style="margin: 0; display: inline-block;">
       <button class="primary" type="submit">立即运行巡检</button>
     </form>
-    <a class="button" href="/jobs/{{ job.id }}/edit">修改配置</a>
-    <a class="button" href="/jobs/{{ job.id }}/items/new">+ 添加截图项</a>
+    <a class="button" href="{{ url_for_frontend('/jobs/' ~ job.id ~ '/edit') }}">修改配置</a>
+    <a class="button" href="{{ url_for_frontend('/jobs/' ~ job.id ~ '/items/new') }}">+ 添加截图项</a>
   </div>
 </div>
 
@@ -85,7 +85,7 @@
       <tr>
         <td><code>{{ item.sort_order }}</code></td>
         <td>
-          <strong><a href="/items/{{ item.id }}/edit">{{ item.name }}</a></strong>
+          <strong><a href="{{ url_for_frontend('/items/' ~ item.id ~ '/edit') }}">{{ item.name }}</a></strong>
           <div class="url-text">{{ item.url }}</div>
         </td>
         <td>
@@ -113,7 +113,7 @@
         </td>
         <td>
           {% if item.auth_profile_name %}
-          <a href="/auth-profiles" style="font-weight: 500;">{{ item.auth_profile_name }}</a>
+          <a href="{{ url_for_frontend('/auth-profiles') }}" style="font-weight: 500;">{{ item.auth_profile_name }}</a>
           {% else %}
           <span style="color: var(--text-muted); font-size: 12px;">无需登录</span>
           {% endif %}
@@ -126,11 +126,11 @@
           {% endif %}
         </td>
         <td class="actions" style="justify-content: flex-end; gap: 6px;">
-          <form method="post" action="/items/{{ item.id }}/test" style="display: inline-block; margin: 0;">
+          <form method="post" action="{{ url_for_frontend('/items/' ~ item.id ~ '/test') }}" style="display: inline-block; margin: 0;">
             <button type="submit" style="padding: 4px 10px; font-size: 12px; min-height: 28px;">测试截图</button>
           </form>
-          <a class="button" href="/items/{{ item.id }}/edit" style="padding: 4px 10px; font-size: 12px; min-height: 28px;">编辑</a>
-          <form method="post" action="/items/{{ item.id }}/delete" onsubmit="return confirm('确认要彻底删除截图项 [{{ item.name }}] 吗？')" style="display: inline-block; margin: 0;">
+          <a class="button" href="{{ url_for_frontend('/items/' ~ item.id ~ '/edit') }}" style="padding: 4px 10px; font-size: 12px; min-height: 28px;">编辑</a>
+          <form method="post" action="{{ url_for_frontend('/items/' ~ item.id ~ '/delete') }}" onsubmit="return confirm('确认要彻底删除截图项 [{{ item.name }}] 吗？')" style="display: inline-block; margin: 0;">
             <button class="danger" type="submit" style="padding: 4px 10px; font-size: 12px; min-height: 28px;">删除</button>
           </form>
         </td>
@@ -139,7 +139,7 @@
       <tr>
         <td colspan="8" class="empty" style="padding: 48px; text-align: center;">
           <p class="muted" style="margin-bottom: 16px; font-size: 14px;">此任务下暂无截图项，请手动添加需要巡检的页面。</p>
-          <a class="button primary" href="/jobs/{{ job.id }}/items/new" style="font-size: 13px;">新增截图项</a>
+          <a class="button primary" href="{{ url_for_frontend('/jobs/' ~ job.id ~ '/items/new') }}" style="font-size: 13px;">新增截图项</a>
         </td>
       </tr>
       {% endfor %}
@@ -153,7 +153,7 @@
       <strong style="color: var(--danger); font-size: 14px; display: block; margin-bottom: 4px;">危险操作区域</strong>
       <span style="color: var(--text-muted); font-size: 12px;">删除任务将会同步清除该任务下的所有截图项配置，且该操作不可逆，请谨慎操作。</span>
     </div>
-    <form method="post" action="/jobs/{{ job.id }}/delete" onsubmit="return confirm('警告：确认要删除任务 [{{ job.name }}] 及其关联的所有截图项吗？该操作不可撤销！')">
+    <form method="post" action="{{ url_for_frontend('/jobs/' ~ job.id ~ '/delete') }}" onsubmit="return confirm('警告：确认要删除任务 [{{ job.name }}] 及其关联的所有截图项吗？该操作不可撤销！')">
       <button class="danger" type="submit" style="font-weight: 600;">删除此巡检任务</button>
     </form>
   </div>

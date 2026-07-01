@@ -24,6 +24,16 @@ class Settings:
         self.default_timezone = os.getenv("APP_TIMEZONE", "Asia/Shanghai")
         self.max_recent_runs = int(os.getenv("APP_MAX_RECENT_RUNS", "50"))
 
+        # 对 frontend_base_path 做规范化
+        raw_frontend = os.getenv("FRONTEND_BASE_PATH", "/ops").strip()
+        if not raw_frontend:
+            raw_frontend = "/"
+        if not raw_frontend.startswith("/"):
+            raw_frontend = "/" + raw_frontend
+        if len(raw_frontend) > 1 and raw_frontend.endswith("/"):
+            raw_frontend = raw_frontend.rstrip("/")
+        self.frontend_base_path = raw_frontend
+
         # 对 api_prefix 做规范化：以 / 开头，不能以 / 结尾（除非就是 /），默认 /api
         raw_prefix = os.getenv("API_PREFIX", "/api").strip()
         if not raw_prefix:
@@ -32,17 +42,12 @@ class Settings:
             raw_prefix = "/" + raw_prefix
         if len(raw_prefix) > 1 and raw_prefix.endswith("/"):
             raw_prefix = raw_prefix.rstrip("/")
-        self.api_prefix = raw_prefix
-
-        # 对 frontend_base_path 做规范化
-        raw_frontend = os.getenv("FRONTEND_BASE_PATH", "/").strip()
-        if not raw_frontend:
-            raw_frontend = "/"
-        if not raw_frontend.startswith("/"):
-            raw_frontend = "/" + raw_frontend
-        if len(raw_frontend) > 1 and raw_frontend.endswith("/"):
-            raw_frontend = raw_frontend.rstrip("/")
-        self.frontend_base_path = raw_frontend
+        
+        # 将 api_prefix 统一挂载在 frontend_base_path 下（如果 frontend_base_path 不是 / 并且 api_prefix 不以 frontend_base_path 开头）
+        if self.frontend_base_path != "/" and not raw_prefix.startswith(self.frontend_base_path + "/"):
+            self.api_prefix = self.frontend_base_path + raw_prefix
+        else:
+            self.api_prefix = raw_prefix
 
     def _load_secret_from_file(self) -> str:
         explicit_path = os.getenv("APP_SECRET_KEY_FILE", "").strip()

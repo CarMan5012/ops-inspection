@@ -9,7 +9,8 @@
 
 <form method="post" action="{{ action }}" class="panel">
   <!-- 第一部分：基本配置 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 报告基本信息</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 报告基本信息
+  </h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label class="span-2">
       报告配置名称 <span style="color: var(--danger);">* (必填)</span>
@@ -19,24 +20,28 @@
   </div>
 
   <!-- 第二部分：执行计划 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 周期执行计划</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 周期执行计划
+  </h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label class="span-2">
       计划执行模式 <span style="color: var(--danger);">*</span>
       <select name="schedule_mode" onchange="toggleScheduleMode(this.value)">
-        <option value="simple" {% if setting.schedule_mode == 'simple' or not setting.schedule_mode %}selected{% endif %}>常规中文计划配置 (推荐)</option>
-        <option value="cron" {% if setting.schedule_mode == 'cron' %}selected{% endif %}>高级 Cron 表达式</option>
+        <option value="simple" {% if setting.schedule_mode=='simple' or not setting.schedule_mode %}selected{% endif %}>
+          常规中文计划配置 (推荐)</option>
+        <option value="cron" {% if setting.schedule_mode=='cron' %}selected{% endif %}>高级 Cron 表达式</option>
       </select>
     </label>
 
     <!-- 简单时间计划配置 -->
-    <div id="simple_schedule_container" class="span-2" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 16px; border-radius: 6px;">
+    <div id="simple_schedule_container" class="span-2"
+      style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 16px; border-radius: 6px;">
       <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;">
         <!-- 如果是周报，允许选择星期 -->
         {% if setting.report_type == 'weekly' %}
         <input type="hidden" name="frequency" value="weekly">
         <span style="font-size: 13px; color: var(--text-color);">重复频率：<strong>每周</strong></span>
-        <label style="margin: 0; display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 13px; color: var(--text-color);">
+        <label
+          style="margin: 0; display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 13px; color: var(--text-color);">
           执行星期：
           <select name="day_of_week" style="width: auto; min-width: 120px;">
             <option value="1">星期一</option>
@@ -48,7 +53,7 @@
             <option value="7">星期日</option>
           </select>
         </label>
-        
+
         <!-- 如果是月报，强制绑定为每月最后一天 -->
         {% else %}
         <input type="hidden" name="frequency" value="monthly_last">
@@ -60,7 +65,8 @@
         <!-- 动态时间行 -->
       </div>
 
-      <button type="button" class="button" style="margin-top: 10px; font-size: 13px; font-weight: 600;" onclick="addTimeRow()">+ 增加执行时间点</button>
+      <button type="button" class="button" style="margin-top: 10px; font-size: 13px; font-weight: 600;"
+        onclick="addTimeRow()">+ 增加执行时间点</button>
     </div>
 
     <!-- 高级 Cron 表达式配置 -->
@@ -72,13 +78,15 @@
   </div>
 
   <!-- 第三部分：推送与推送设置 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、 邮件推送与归档设置</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、
+    邮件推送与归档设置</h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label class="span-2">
       发信邮件服务配置 <span style="color: var(--danger);">*</span>
       <select name="mail_profile_id">
         {% for profile in mail_profiles %}
-        <option value="{{ profile.id }}" {% if setting.mail_profile_id == profile.id %}selected{% endif %}>{{ profile.name }}</option>
+        <option value="{{ profile.id }}" {% if setting.mail_profile_id==profile.id %}selected{% endif %}>{{ profile.name
+          }}</option>
         {% endfor %}
       </select>
       <span class="form-tip">选择用于发送周期归档 ZIP 压缩包的主发信邮箱配置。</span>
@@ -86,15 +94,18 @@
 
     <label class="span-2">
       收件人邮箱覆盖 (选填)
-      <input name="recipients_override" value="{{ setting.recipients_override or '' }}" placeholder="ops@example.com, manager@example.com">
+      <input name="recipients_override" value="{{ setting.recipients_override or '' }}"
+        placeholder="ops@example.com, manager@example.com">
       <span class="form-tip">留空则直接发送给上述发信邮箱配置的默认收件人；若填写则覆盖默认收件人。多个邮箱以英文逗号分隔。</span>
     </label>
   </div>
 
   <!-- 第四部分：月报专属等待与重试参数 -->
   {% if setting.report_type == 'monthly' %}
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">四、 月报延迟重试策略</h3>
-  <div class="panel" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 20px; border-radius: 6px; margin-bottom: 30px;">
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">四、
+    月报延迟重试策略</h3>
+  <div class="panel"
+    style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 20px; border-radius: 6px; margin-bottom: 30px;">
     <label class="check" style="margin-bottom: 16px; font-weight: 600;">
       <input name="wait_for_daily_jobs" type="checkbox" {% if setting.wait_for_daily_jobs %}checked{% endif %}>
       必须等待当天所有巡检任务执行完毕，才开始打包发信
@@ -109,15 +120,17 @@
 
       <label>
         检测重试间隔 (分钟) <span style="color: var(--danger);">*</span>
-        <input name="retry_interval_minutes" type="number" value="{{ setting.retry_interval_minutes or 10 }}" min="1" required>
+        <input name="retry_interval_minutes" type="number" value="{{ setting.retry_interval_minutes or 10 }}" min="1"
+          required>
         <span class="form-tip">如果有巡检任务未跑完，每隔多少分钟重新检查一次是否全部完成。</span>
       </label>
 
       <label class="span-2">
         截止超时处理策略 <span style="color: var(--danger);">*</span>
         <select name="send_on_timeout">
-          <option value="1" {% if setting.send_on_timeout == 1 or setting.send_on_timeout is none %}selected{% endif %}>强行发送已完成部分</option>
-          <option value="0" {% if setting.send_on_timeout == 0 %}selected{% endif %}>直接标记失败且不发送</option>
+          <option value="1" {% if setting.send_on_timeout==1 or setting.send_on_timeout is none %}selected{% endif %}>
+            强行发送已完成部分</option>
+          <option value="0" {% if setting.send_on_timeout==0 %}selected{% endif %}>直接标记失败且不发送</option>
         </select>
         <span class="form-tip">当达到最晚等待截止时间，但仍有巡检任务未完成时，系统执行的处理方式。</span>
       </label>
@@ -126,7 +139,8 @@
   {% endif %}
 
   <!-- 第五部分：基本配置开关 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">{{ "四、 基本配置开关" if setting.report_type == 'weekly' else "五、 基本配置开关" }}</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">{{ "四、
+    基本配置开关" if setting.report_type == 'weekly' else "五、 基本配置开关" }}</h3>
   <div class="span-2" style="display: flex; gap: 24px; margin: 8px 0; flex-wrap: wrap;">
     <label class="check">
       <input name="enabled" type="checkbox" {% if setting.enabled %}checked{% endif %}>
@@ -138,7 +152,8 @@
     </label>
   </div>
 
-  <details class="advanced-settings span-2" style="margin-top: 16px; border: 1px solid var(--panel-border); border-radius: 6px; padding: 12px; background: #fafafa;">
+  <details class="advanced-settings span-2"
+    style="margin-top: 16px; border: 1px solid var(--panel-border); border-radius: 6px; padding: 12px; background: #fafafa;">
     <summary style="cursor: pointer; font-weight: bold; color: var(--primary); font-size: 13px;">高级汇总参数设置</summary>
     <div style="display: flex; gap: 24px; margin-top: 12px; flex-wrap: wrap;">
       <label class="check">
@@ -154,7 +169,7 @@
 
   <div class="form-actions span-2" style="margin-top: 24px;">
     <button class="primary" type="submit" style="font-weight: 600;">保存配置</button>
-    <a class="button" href="/periodic-reports">取消</a>
+    <a class="button" href="{{ url_for_frontend('/periodic-reports') }}">取消</a>
   </div>
 </form>
 

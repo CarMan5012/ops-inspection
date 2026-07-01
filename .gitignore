@@ -13,3 +13,5 @@ secrets/*
 dist/
 build/
 *.tar
+run.sh
+
