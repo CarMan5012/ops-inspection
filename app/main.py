@@ -735,7 +735,7 @@ def api_reset_all_jobs(payload: dict[str, Any]) -> dict[str, Any]:
     if not verify_totp_code(current_secret, verify_code):
         raise HTTPException(status_code=400, detail="MFA 验证码不正确，无法执行此高危操作。")
 
-    logger.warning("用户通过了 MFA 安全校验，开始执行【一键清空重置所有任务】操作...")
+    app_logger.warning("用户通过了 MFA 安全校验，开始执行【一键清空重置所有任务】操作...")
 
     # 3. 清理数据库表及重置自增 ID 序列
     with connect() as conn:
@@ -755,12 +755,12 @@ def api_reset_all_jobs(payload: dict[str, Any]) -> dict[str, Any]:
                     else:
                         os.remove(item)
                 except Exception as e:
-                    logger.error(f"物理删除 {item} 失败: {e}", exc_info=True)
+                    app_logger.error(f"物理删除 {item} 失败: {e}", exc_info=True)
 
     # 5. 刷新后台任务调度，注销原本的所有定时任务
     reload_jobs()
 
-    logger.info("一键清空重置所有任务及自增序列号成功！")
+    app_logger.info("一键清空重置所有任务及自增序列号成功！")
     return {"ok": True, "message": "所有任务已彻底删除并重置为自增 ID #1 开始。"}
 
 
