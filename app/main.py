@@ -675,6 +675,62 @@ def api_generate_mfa_secret() -> dict[str, Any]:
     }
 
 
+@api_router.post("/security-settings/reset-all-jobs", dependencies=[Depends(require_api_login)])
+def api_reset_all_jobs(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.repository import get_system_setting, connect
+    from app.scheduler import reload_jobs
+    import shutil
+    import os
+
+    # 1. 强校验全局 MFA 是否启用
+    mfa_enabled = get_system_setting(MFA_ENABLED_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    if not mfa_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="此操作属于高危操作，必须开启 MFA 二步验证后才能使用。请前往【安全设置】开启 MFA 认证后重试。"
+        )
+
+    # 2. 强校验 MFA TOTP 验证码
+    verify_code = text_value(payload, "mfa_code", "")
+    current_secret = current_mfa_secret()
+    if not verify_totp_code(current_secret, verify_code):
+        raise HTTPException(status_code=400, detail="MFA 验证码不正确，无法执行此高危操作。")
+
+    logger.warning("用户通过了 MFA 安全校验，开始执行【一键清空重置所有任务】操作...")
+
+    # 3. 清理数据库表及重置自增 ID 序列
+    with connect() as conn:
+        conn.execute("DELETE FROM report_jobs")
+        conn.execute("DELETE FROM report_runs")
+        conn.execute("DELETE FROM screenshot_results")
+        conn.execute("DELETE FROM periodic_report_runs")
+        # 清除 SQLite 序列计数器以重新从 1 开始
+        conn.execute(
+            """
+            DELETE FROM sqlite_sequence 
+            WHERE name IN ('report_jobs', 'report_runs', 'screenshot_results', 'periodic_report_runs')
+            """
+        )
+
+    # 4. 物理清理截图、任务报告、周期报告压缩包
+    for directory in (settings.screenshot_dir, settings.report_dir):
+        if directory.exists():
+            for item in directory.iterdir():
+                try:
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        os.remove(item)
+                except Exception as e:
+                    logger.error(f"物理删除 {item} 失败: {e}", exc_info=True)
+
+    # 5. 刷新后台任务调度，注销原本的所有定时任务
+    reload_jobs()
+
+    logger.info("一键清空重置所有任务及自增序列号成功！")
+    return {"ok": True, "message": "所有任务已彻底删除并重置为自增 ID #1 开始。"}
+
+
 def api_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
     from app.schedule_utils import parse_simple_inspection_schedule
 

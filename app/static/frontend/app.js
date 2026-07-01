@@ -535,6 +535,8 @@ function handleAction(action, id, triggerButton = null) {
     updateSwaggerSettings(false, triggerButton);
   } else if (action === "generate-mfa-secret") {
     generateMfaSecret(triggerButton);
+  } else if (action === "reset-all-jobs") {
+    resetAllJobs(triggerButton);
   } else if (action === "close-modal") {
     closeModal();
   }
@@ -1758,6 +1760,72 @@ function showConfirm({ title, message, confirmText = "确认", cancelText = "取
   });
 }
 
+function showMfaInputDialog({ title, message, confirmText = "确认重置", cancelText = "取消" }) {
+  return new Promise((resolve) => {
+    const confirmRoot = document.querySelector('[data-region="confirm"]');
+    if (!confirmRoot) {
+      resolve(null);
+      return;
+    }
+    confirmRoot.hidden = false;
+
+    confirmRoot.innerHTML = `
+      <section class="confirm-panel confirm-danger" role="dialog" aria-modal="true" style="max-width: 450px;">
+        <div class="confirm-head">
+          <div class="confirm-icon">${icon("triangle-alert")}</div>
+          <div class="confirm-copy">
+            <div class="confirm-title">${escapeHtml(title)}</div>
+            <div class="confirm-message" style="margin-bottom: 15px;">${escapeHtml(message)}</div>
+            <div style="background: #fef2f2; border: 1px solid #fee2e2; padding: 12px; border-radius: 6px; margin-bottom: 15px;">
+              <label style="font-weight: bold; display: block; margin-bottom: 6px; color: var(--danger);">请输入您的 6 位 MFA 动态码以确认授权：</label>
+              <input type="text" id="confirm_mfa_code" maxlength="6" placeholder="000000" style="width: 100%; padding: 10px; border: 1px solid #fca5a5; border-radius: 4px; font-size: 20px; text-align: center; letter-spacing: 6px; font-weight: bold; color: var(--danger); outline: none; background: #fff;" required autocomplete="off">
+            </div>
+          </div>
+        </div>
+        <div class="confirm-actions">
+          <button type="button" class="button cancel-btn">${escapeHtml(cancelText)}</button>
+          <button type="button" class="button danger confirm-btn" style="background: var(--danger); color: #fff; border-color: var(--danger);">${escapeHtml(confirmText)}</button>
+        </div>
+      </section>
+    `;
+    renderIcons(confirmRoot);
+
+    const cancelBtn = confirmRoot.querySelector(".cancel-btn");
+    const confirmBtn = confirmRoot.querySelector(".confirm-btn");
+    const codeInput = confirmRoot.querySelector("#confirm_mfa_code");
+
+    codeInput.focus();
+
+    function close(result) {
+      confirmRoot.hidden = true;
+      confirmRoot.innerHTML = "";
+      window.removeEventListener("keydown", onKeyDown);
+      resolve(result);
+    }
+
+    function onKeyDown(event) {
+      if (event.key === "Escape") {
+        close(null);
+      } else if (event.key === "Enter") {
+        submit();
+      }
+    }
+
+    function submit() {
+      const val = codeInput.value.trim();
+      if (val.length !== 6 || isNaN(val)) {
+        showError("请输入有效的 6 位数字验证码");
+        return;
+      }
+      close(val);
+    }
+
+    cancelBtn.addEventListener("click", () => close(null));
+    confirmBtn.addEventListener("click", submit);
+    window.addEventListener("keydown", onKeyDown);
+  });
+}
+
 function asBool(value) {
   if (typeof value === "boolean") {
     return value;
@@ -1861,6 +1929,26 @@ function renderStorage() {
 
   const swaggerControlHTML = renderSwaggerControl(swaggerEnabled);
   const securityControlHTML = renderSecurityControl(security);
+  const dangerZoneControlHTML = `
+    <div class="panel-header section-gap">
+      <h3 style="color: var(--danger); display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px;">
+        ${icon("triangle-alert")} 危险操作区
+      </h3>
+    </div>
+    <div class="surface-soft storage-action-box" style="border: 1px solid #fecaca; background: #fff5f5;">
+      <div>
+        <div class="strong-title" style="color: var(--danger);">一键删除重置所有任务</div>
+        <p class="muted" style="margin-bottom: 12px; font-size: 13px; line-height: 1.4;">
+          永久清空系统内所有巡检任务配置及其关联的历史运行记录、截图与报告文件，并将自增任务 ID 归零重置（新任务重新从 #1 开始计数）。此操作必须开启 MFA 认证方可使用。
+        </p>
+      </div>
+      <div class="action-row">
+        <button class="button danger" type="button" data-action="reset-all-jobs" style="background: var(--danger); color: #fff; border-color: var(--danger); font-weight: bold; width: 100%; justify-content: center;">
+          ${icon("trash-2")} 一键重置所有任务
+        </button>
+      </div>
+    </div>
+  `;
 
   const detailsHTML = `
     <div class="card-grid storage-grid">
@@ -1888,6 +1976,7 @@ function renderStorage() {
         </div>
         ${swaggerControlHTML}
         ${securityControlHTML}
+        ${dangerZoneControlHTML}
       </div>
 
       <div class="panel">
@@ -2163,6 +2252,43 @@ async function runStorageCleanup(btn) {
     }
   } catch (error) {
     showError(error.message || "清理失败，请检查后端日志");
+  } finally {
+    setButtonLoading(btn, false);
+  }
+}
+
+async function resetAllJobs(btn) {
+  // 1. 检查全局 MFA 开关是否开启
+  const mfaEnabled = Boolean(state.storage.security?.mfa_enabled);
+  if (!mfaEnabled) {
+    showError("此操作属于高危操作，必须开启 MFA 二步验证后才能使用。请前往下方【安全设置】开启并验证 MFA 认证后重试。");
+    return;
+  }
+
+  // 2. 弹出高级 MFA 二次验证确认弹窗
+  const mfaCode = await showMfaInputDialog({
+    title: "确认清空重置所有巡检任务？",
+    message: "警告：此操作将永久清空数据库中所有的巡检任务配置、运行记录以及相应的物理文件，并重置自增 ID 序号从 #1 开始。此操作一旦执行，数据将不可恢复！",
+    confirmText: "确认清空重置"
+  });
+  
+  if (!mfaCode) return; // 用户取消
+
+  setButtonLoading(btn, true);
+  try {
+    const result = await apiJson("/security-settings/reset-all-jobs", {
+      method: "POST",
+      body: { mfa_code: mfaCode }
+    });
+    showSuccess(result.message || "所有巡检任务已彻底删除并重置为自增 ID #1 开始！");
+    
+    // 清空内存中的任务列表
+    state.jobs = [];
+    
+    // 重新加载统计数据刷新 UI
+    await loadStorage(true);
+  } catch (error) {
+    showError(error.message || "一键清空重置任务失败");
   } finally {
     setButtonLoading(btn, false);
   }
