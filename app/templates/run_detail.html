@@ -122,7 +122,14 @@
     async function refreshDetailSilently() {
       try {
         const res = await fetch(`/api/runs/${runId}`);
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (res.status === 404) {
+            clearInterval(watchTimer);
+            watchTimer = null;
+            isRunning = false;
+          }
+          return;
+        }
         const data = await res.json();
         const run = data.run || {};
         const results = data.results || [];

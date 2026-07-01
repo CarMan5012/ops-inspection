@@ -739,17 +739,11 @@ def api_reset_all_jobs(payload: dict[str, Any]) -> dict[str, Any]:
 
     # 3. 清理数据库表及重置自增 ID 序列
     with connect() as conn:
-        conn.execute("DELETE FROM report_jobs")
-        conn.execute("DELETE FROM report_runs")
-        conn.execute("DELETE FROM screenshot_results")
-        conn.execute("DELETE FROM periodic_report_runs")
-        # 清除 SQLite 序列计数器以重新从 1 开始
-        conn.execute(
-            """
-            DELETE FROM sqlite_sequence 
-            WHERE name IN ('report_jobs', 'report_runs', 'screenshot_results', 'periodic_report_runs')
-            """
-        )
+        conn.execute("PRAGMA foreign_keys = OFF")
+        for table in ("report_jobs", "screenshot_items", "run_records", "screenshot_results", "periodic_report_runs"):
+            conn.execute(f"DELETE FROM {table}")
+            conn.execute("DELETE FROM sqlite_sequence WHERE name = ?", (table,))
+        conn.execute("PRAGMA foreign_keys = ON")
 
     # 4. 物理清理截图、任务报告、周期报告压缩包
     for directory in (settings.screenshot_dir, settings.report_dir):
