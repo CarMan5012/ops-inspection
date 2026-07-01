@@ -340,18 +340,19 @@ def _send_dingtalk_notification(
         docx_status_html = f'{red_emoji}<font color="#f44336">未生成</font>'
 
     md_lines = [
-        f"### {title_emoji}巡检任务执行报告",
+        f"### <font color='#38adff'>{title_emoji}巡检任务执行报告</font>",
         "---",
         f"- **任务名称**: `{job.get('name')}`",
         f"- **运行环境**: `{job.get('environment')}`",
         f"- **执行状态**: {status_html}",
         f"- **Word 报告**: {docx_status_html}",
-        f"- **截图数量**: {green_emoji}成功 `{success_count}` 张 / {red_emoji}失败 `{failed_text}` 张",
+        f"- **截图数量**: 成功 <font color='#4caf50'>`{success_count}`</font> 张 / 失败 <font color='#f44336'>`{failed_text}`</font> 张",
     ]
     if mail_status_html:
         md_lines.append(f"- **邮件状态**: {mail_status_html}")
-    md_lines.append(f"- **通知时间**: `{current_time_str}`")
+    md_lines.append(f"- **通知时间**: <font color='#38adff'>`{current_time_str}`</font>")
     md_lines.append("---")
+    md_lines.append("💡 *提示：由于处于内网隔离环境，请及时登录系统 Web 后台下载/查看 Word 报告。*")
 
     if error_summary:
         clean_err = error_summary.strip()

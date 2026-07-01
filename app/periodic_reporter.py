@@ -622,7 +622,7 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
             docx_enabled_str = f"{green_emoji}已打入归档包" if setting.get("include_docx", 1) == 1 else f"{gray_emoji}仅打包截图"
 
             md_lines = [
-                f"### {title_emoji}周期汇总报告通知 ({report_type_cn})",
+                f"### <font color='#38adff'>{title_emoji}周期汇总报告通知 ({report_type_cn})</font>",
                 "---",
                 f"- **配置名称**: `{setting['name']}`",
                 f"- **统计周期**: `{period_start[:10]}` 至 `{period_end[:10]}`",
@@ -633,13 +633,13 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
                 md_lines.append(f"- **邮件状态**: {mail_status_html}")
             md_lines.append(f"- **包含报告**: `{len(runs_in_period)}` 个 Word 报告")
             md_lines.append(f"- **归档大小**: `{size_str}`")
-            md_lines.append(f"- **通知时间**: `{current_time_str}`")
+            md_lines.append(f"- **通知时间**: <font color='#38adff'>`{current_time_str}`</font>")
             md_lines.append("---")
 
             if run["status"] == "failed":
                 md_lines.append(f"{cross_emoji}**失败原因**: {run.get('error_summary') or '未知异常'}")
             else:
-                md_lines.append(f"{finger_emoji}**下载指引**: 周期汇总包已成功打包归档。请登录系统 Web 后台**【周期报告】**页面直接下载归档文件。")
+                md_lines.append(f"{finger_emoji}**下载指引**: 周期汇总包已成功打包归档。由于处于内网隔离环境，**请及时登录系统 Web 后台【周期报告】页面点击右侧直接下载保存到本地**！")
 
             if force_warning and unfinished_reasons:
                 md_lines.append(f"\n{warn_emoji}**超时未完成的任务**:\n- " + "\n- ".join(unfinished_reasons))
