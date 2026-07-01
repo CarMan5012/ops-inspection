@@ -30,9 +30,9 @@ def reload_jobs() -> None:
     logger = logging.getLogger("app.scheduler")
     from app.db import connect
     
-    # 1. 移除原有的截图定时任务和周期报告定时任务
+    # 1. 移除原有的截图定时任务、周期报告定时任务和自动清理定时任务
     for job in scheduler.get_jobs():
-        if job.id.startswith("report-job-") or job.id.startswith("periodic-report-"):
+        if job.id.startswith("report-job-") or job.id.startswith("periodic-report-") or job.id == "storage-cleanup-task":
             scheduler.remove_job(job.id)
 
     # 2. 重新加载巡检截图任务
