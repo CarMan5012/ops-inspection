@@ -267,7 +267,6 @@ def _send_dingtalk_notification(
         return
 
     from app.utils import decrypt_secret
-
     from app.repository import get_system_setting
 
     db_webhook = get_system_setting("dingtalk_webhook", "")
@@ -277,9 +276,9 @@ def _send_dingtalk_notification(
         except Exception:
             pass
     webhook = db_webhook or settings.dingtalk_webhook
-    
+
     if not webhook:
-        logger.warning(f"任务 {job.get('id')} 启用了钉钉推送，但未配置网页端全局 Webhook 或本地环境变量 DINGTALK_WEBHOOK，跳过推送。")
+        logger.warning(f"任务 {job.get('id')} 启用了钉钉推送，但未配置 Webhook，跳过推送。")
         return
 
     db_secret = get_system_setting("dingtalk_secret", "")
@@ -288,79 +287,42 @@ def _send_dingtalk_notification(
             db_secret = decrypt_secret(db_secret)
         except Exception:
             pass
-    secret = db_secret or settings.dingtalk_secret
-
+    secret  = db_secret or settings.dingtalk_secret
     keyword = get_system_setting("dingtalk_keyword", "") or settings.dingtalk_keyword
 
-    title = f"巡检任务执行结果 - {job.get('name')}"
-
-    from app.main import status_label, mail_status_label
-    status_cn = status_label(status)
-    if status == "success":
-        status_html = '<font color="#4caf50"><b>执行成功</b></font>'
-    elif status == "failed":
-        status_html = '<font color="#f44336"><b>执行失败</b></font>'
-    else:
-        status_html = f'<font color="#38adff"><b>{status_cn}</b></font>'
-
-    mail_status_html = ""
-    # 当且仅当配置了发信服务且发信状态非跳过时才在钉钉通知中展现邮件状态
-    if job.get("mail_profile_id") and mail_status and "skipped" not in mail_status.lower() and "failed: 系统没有任何邮件配置" not in mail_status:
-        mail_status_cn = mail_status_label(mail_status)
-        if "sent" in mail_status.lower() or "success" in mail_status.lower():
-            mail_status_html = '<font color="#4caf50">发送成功</font>'
-        elif "failed" in mail_status.lower() or "error" in mail_status.lower():
-            mail_status_html = f'<font color="#f44336">发送失败 ({mail_status_cn})</font>'
-        else:
-            mail_status_html = f'<font color="#9e9e9e">{mail_status_cn}</font>'
-
-    failed_text = f"{failed_count}" if failed_count > 0 else "0"
-    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # 查阅全局钉钉消息表情开关，决定是否加入 Emoji 表情
-    from app.repository import get_system_setting
-    emoji_enabled = get_system_setting("dingtalk_emoji_enabled", "0") == "1"
-    
-    green_emoji = "🟢 " if emoji_enabled else ""
-    red_emoji = "🔴 " if emoji_enabled else ""
-    title_emoji = "📋 " if emoji_enabled else ""
-    warn_emoji = "⚠️ " if emoji_enabled else ""
-
-    # 检查 Word 报告生成状态
-    docx_status_html = ""
+    # 是否生成了 Word 报告
+    has_word_report = False
     if status == "success":
         from app.repository import get_run
         import os
         run_record = get_run(run_id)
-        if run_record and run_record.get("report_path") and os.path.exists(str(run_record.get("report_path") or "")):
-            docx_status_html = f'{green_emoji}<font color="#4caf50">生成成功</font>'
-        else:
-            docx_status_html = f'{red_emoji}<font color="#f44336">生成失败</font>'
-    else:
-        docx_status_html = f'{red_emoji}<font color="#f44336">未生成</font>'
+        has_word_report = bool(
+            run_record and run_record.get("report_path")
+            and os.path.exists(str(run_record.get("report_path") or ""))
+        )
 
-    md_lines = [
-        f"### <font color='#38adff'>{title_emoji}巡检任务执行报告</font>",
-        "---",
-        f"- **任务名称**: `{job.get('name')}`",
-        f"- **运行环境**: `{job.get('environment')}`",
-        f"- **执行状态**: {status_html}",
-        f"- **Word 报告**: {docx_status_html}",
-        f"- **截图数量**: 成功 <font color='#4caf50'>`{success_count}`</font> 张 / 失败 <font color='#f44336'>`{failed_text}`</font> 张",
-    ]
-    if mail_status_html:
-        md_lines.append(f"- **邮件状态**: {mail_status_html}")
-    md_lines.append(f"- **通知时间**: <font color='#38adff'>`{current_time_str}`</font>")
-    md_lines.append("---")
-    md_lines.append("💡 *提示：由于处于内网隔离环境，请及时登录系统 Web 后台下载/查看 Word 报告。*")
+    # 邮件状态 HTML
+    from app.dingtalk_builder import build_inspection_report_message, build_mail_status_html
+    mail_status_html = ""
+    if job.get("mail_profile_id") and mail_status and "skipped" not in mail_status.lower() \
+            and "failed: 系统没有任何邮件配置" not in mail_status:
+        mail_status_html = build_mail_status_html(mail_status)
 
-    if error_summary:
-        clean_err = error_summary.strip()
-        if len(clean_err) > 300:
-            clean_err = clean_err[:300] + "..."
-        md_lines.append(f"{warn_emoji}**异常摘要**:\n```\n{clean_err}\n```")
+    # Emoji 开关（从全局配置读取）
+    emoji_enabled = get_system_setting("dingtalk_emoji_enabled", "0") == "1"
 
-    text = "\n".join(md_lines)
+    # 构建消息
+    title, text = build_inspection_report_message(
+        job_name=str(job.get("name", "")),
+        environment=str(job.get("environment", "")),
+        status=status,
+        success_count=success_count,
+        failed_count=failed_count,
+        has_word_report=has_word_report,
+        error_summary=error_summary,
+        mail_status_html=mail_status_html,
+        enable_emoji=emoji_enabled,
+    )
 
     from app.dingtalk import send_dingtalk_msg
     logger.info("正在发送钉钉 Webhook 推送...")

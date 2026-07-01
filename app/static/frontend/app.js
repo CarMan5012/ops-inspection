@@ -1473,13 +1473,17 @@ function securityFormPayload(form) {
   const webhookInput = form.querySelector('[name="dingtalk_webhook"]');
   const secretInput = form.querySelector('[name="dingtalk_secret"]');
   const keywordInput = form.querySelector('[name="dingtalk_keyword"]');
+  const webhookClearInput = form.querySelector('[name="dingtalk_webhook_clear"]');
+  const secretClearInput = form.querySelector('[name="dingtalk_secret_clear"]');
   return {
     session_ttl_minutes: ttlInput ? ttlInput.value : "30",
     mfa_enabled: asBool(state.storage.security?.mfa_enabled),
     mfa_code: "",
     dingtalk_emoji_enabled: emojiInput ? emojiInput.checked : false,
     dingtalk_webhook: webhookInput ? webhookInput.value.trim() : "",
+    dingtalk_webhook_clear: !!(webhookClearInput && webhookClearInput.checked),
     dingtalk_secret: secretInput ? secretInput.value.trim() : "",
+    dingtalk_secret_clear: !!(secretClearInput && secretClearInput.checked),
     dingtalk_keyword: keywordInput ? keywordInput.value.trim() : ""
   };
 }
@@ -1931,14 +1935,14 @@ function renderStorage() {
     </div>
     <div class="surface-soft storage-action-box" style="border: 1px solid #fecaca; background: #fff5f5;">
       <div>
-        <div class="strong-title" style="color: var(--danger);">一键删除重置所有任务</div>
+        <div class="strong-title" style="color: var(--danger);">一键清空运行历史</div>
         <p class="muted" style="margin-bottom: 12px; font-size: 13px; line-height: 1.4;">
-          永久清空系统内所有巡检任务配置及其关联的历史运行记录、截图与报告文件，并将自增任务 ID 归零重置（新任务重新从 #1 开始计数）。此操作必须开启 MFA 认证方可使用。
+          清空所有历史运行记录、截图和报告文件，并将运行流水号归零重置（从 #1 重新计数）。<strong>✨ 巡检任务配置将完整保留，无需重新配置。</strong>此操作必须开启 MFA 认证方可使用。
         </p>
       </div>
       <div class="action-row">
         <button class="button danger" type="button" data-action="reset-all-jobs" style="background: var(--danger); color: #fff; border-color: var(--danger); font-weight: bold; width: 100%; justify-content: center;">
-          ${icon("trash-2")} 一键重置所有任务
+          ${icon("trash-2")} 一键清空运行历史
         </button>
       </div>
     </div>
@@ -2314,9 +2318,9 @@ async function resetAllJobs(btn) {
 
   // 2. 弹出高级 MFA 二次验证确认弹窗
   const mfaCode = await showMfaInputDialog({
-    title: "确认清空重置所有巡检任务？",
-    message: "警告：此操作将永久清空数据库中所有的巡检任务配置、运行记录以及相应的物理文件，并重置自增 ID 序号从 #1 开始。此操作一旦执行，数据将不可恢复！",
-    confirmText: "确认清空重置"
+    title: "确认清空所有运行历史记录？",
+    message: "警告：此操作将永久清空所有历史运行记录、截图及报告文件，并重置流水号从 #1 开始。\n\n✅ 巡检任务配置将完整保留，无需重新配置。\n\n历史数据一旦删除将不可恢复！",
+    confirmText: "确认清空历史"
   });
   
   if (!mfaCode) return; // 用户取消
@@ -2327,15 +2331,12 @@ async function resetAllJobs(btn) {
       method: "POST",
       body: { mfa_code: mfaCode }
     });
-    showSuccess(result.message || "所有巡检任务已彻底删除并重置为自增 ID #1 开始！");
-    
-    // 清空内存中的任务列表
-    state.jobs = [];
+    showSuccess(result.message || "历史运行记录已清空，任务配置已保留！");
     
     // 重新加载统计数据刷新 UI
     await loadStorage(true);
   } catch (error) {
-    showError(error.message || "一键清空重置任务失败");
+    showError(error.message || "一键清空运行历史失败");
   } finally {
     setButtonLoading(btn, false);
   }
@@ -2388,15 +2389,27 @@ function renderSecurityControl(security) {
 
       <div style="border-top: 1px dashed #e2e8f0; padding-top: 12px; margin-top: 5px;">
         <strong style="font-size: 13px; display: block; margin-bottom: 8px; color: var(--primary);">全局钉钉机器人配置：</strong>
-        <label style="display: block; margin-bottom: 10px;">
+        <label style="display: block; margin-bottom: 6px;">
           全局 Webhook 地址
+          ${security.dingtalk_webhook ? `<span class="badge success" style="font-size:11px;margin-left:6px;vertical-align:middle;">✓ 已配置</span>` : ''}
           <input name="dingtalk_webhook" value="${escapeAttr(security.dingtalk_webhook || '')}" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
-          <span class="form-tip">全局绑定的机器人 Webhook 地址。任务/周期报告开启通知并留空时默认使用此地址。</span>
+          <span class="form-tip">全局绑定的机器人 Webhook 地址。任务/周期报告开启通知并留空时默认使用此地址。ℹ️ 留空保存将<strong>保留</strong>原有已保存的值；如需删除请勾选下方"清空"。</span>
         </label>
+        ${security.dingtalk_webhook ? `
+        <label class="check" style="margin-bottom: 12px; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--danger);">
+          <input type="checkbox" name="dingtalk_webhook_clear">
+          清空已保存的 Webhook 地址
+        </label>` : ''}
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
           <label style="display: block;">
             全局加签密钥 (Secret)
+            ${security.dingtalk_secret ? `<span class="badge success" style="font-size:11px;margin-left:4px;vertical-align:middle;">✓ 已配置</span>` : ''}
             <input type="password" name="dingtalk_secret" value="${escapeAttr(security.dingtalk_secret || '')}" placeholder="SEC...">
+            ${security.dingtalk_secret ? `
+            <label class="check" style="margin-top:4px; font-size:12px; color: var(--danger);">
+              <input type="checkbox" name="dingtalk_secret_clear">
+              清空加签密钥
+            </label>` : ''}
           </label>
           <label style="display: block;">
             全局自定义关键词

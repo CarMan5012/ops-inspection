@@ -675,18 +675,23 @@ def api_update_security_settings(payload: dict[str, Any]) -> dict[str, Any]:
     set_system_setting(DINGTALK_EMOJI_ENABLED_KEY, "1" if dingtalk_emoji_enabled else "0")
 
     # 更新全局钉钉机器人配置（并进行加密保护）
+    # 注意：若提交时字段为空，则保留数据库已有的值（防止误清空已保存的 Webhook）
     from app.utils import encrypt_secret
-    
+
     global_webhook = text_value(payload, "dingtalk_webhook", "").strip()
     if global_webhook:
         set_system_setting("dingtalk_webhook", encrypt_secret(global_webhook))
-    else:
-        set_system_setting("dingtalk_webhook", "")
+    elif "dingtalk_webhook" in payload and not global_webhook:
+        # 用户明确填写了空字符串（intent to clear），才清空；否则保留原有值
+        # 前端需要传 dingtalk_webhook_clear=true 来主动清除
+        if payload.get("dingtalk_webhook_clear"):
+            set_system_setting("dingtalk_webhook", "")
+        # 字段存在但为空且没有明确清除标记 → 保留原有值，什么都不做
 
     global_secret = text_value(payload, "dingtalk_secret", "").strip()
     if global_secret:
         set_system_setting("dingtalk_secret", encrypt_secret(global_secret))
-    else:
+    elif payload.get("dingtalk_secret_clear"):
         set_system_setting("dingtalk_secret", "")
 
     global_keyword = text_value(payload, "dingtalk_keyword", "").strip()
@@ -735,17 +740,17 @@ def api_reset_all_jobs(payload: dict[str, Any]) -> dict[str, Any]:
     if not verify_totp_code(current_secret, verify_code):
         raise HTTPException(status_code=400, detail="MFA 验证码不正确，无法执行此高危操作。")
 
-    app_logger.warning("用户通过了 MFA 安全校验，开始执行【一键清空重置所有任务】操作...")
+    app_logger.warning("用户通过了 MFA 安全校验，开始执行【一键清空运行历史数据】操作（保留任务配置）...")
 
-    # 3. 清理数据库表及重置自增 ID 序列
+    # 3. 只清理运行历史相关表，保留 report_jobs / screenshot_items 任务配置
     with connect() as conn:
         conn.execute("PRAGMA foreign_keys = OFF")
-        for table in ("report_jobs", "screenshot_items", "run_records", "screenshot_results", "periodic_report_runs"):
+        for table in ("run_records", "screenshot_results", "periodic_report_runs"):
             conn.execute(f"DELETE FROM {table}")
             conn.execute("DELETE FROM sqlite_sequence WHERE name = ?", (table,))
         conn.execute("PRAGMA foreign_keys = ON")
 
-    # 4. 物理清理截图、任务报告、周期报告压缩包
+    # 4. 物理清理截图、Word 报告、周期归档包目录下的历史文件
     for directory in (settings.screenshot_dir, settings.report_dir):
         if directory.exists():
             for item in directory.iterdir():
@@ -757,11 +762,11 @@ def api_reset_all_jobs(payload: dict[str, Any]) -> dict[str, Any]:
                 except Exception as e:
                     app_logger.error(f"物理删除 {item} 失败: {e}", exc_info=True)
 
-    # 5. 刷新后台任务调度，注销原本的所有定时任务
+    # 5. 刷新后台任务调度
     reload_jobs()
 
-    app_logger.info("一键清空重置所有任务及自增序列号成功！")
-    return {"ok": True, "message": "所有任务已彻底删除并重置为自增 ID #1 开始。"}
+    app_logger.info("一键清空运行历史完成！任务配置保留，历史记录和物理文件已清除。")
+    return {"ok": True, "message": "所有运行历史记录和截图文件已彻底清空。巡检任务配置保留，自增 ID 从 #1 重新开始。"}
 
 
 def api_job_payload(payload: dict[str, Any]) -> dict[str, Any]:

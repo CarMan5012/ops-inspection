@@ -552,8 +552,8 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
     if setting.get("dingtalk_enabled") == 1:
         from app.utils import decrypt_secret
         from app.dingtalk import send_dingtalk_msg
-
         from app.repository import get_system_setting
+
         db_webhook = get_system_setting("dingtalk_webhook", "")
         if db_webhook:
             try:
@@ -561,7 +561,7 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
             except Exception:
                 pass
         webhook = db_webhook or settings.dingtalk_webhook
-        
+
         if webhook:
             db_secret = get_system_setting("dingtalk_secret", "")
             if db_secret:
@@ -569,82 +569,47 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
                     db_secret = decrypt_secret(db_secret)
                 except Exception:
                     pass
-            secret = db_secret or settings.dingtalk_secret
-
+            secret  = db_secret or settings.dingtalk_secret
             keyword = get_system_setting("dingtalk_keyword", "") or settings.dingtalk_keyword
 
-            report_type_cn = "周报" if report_type == "weekly" else "月报"
-            title = f"周期汇总报告生成通知 - {setting['name']}"
-
-            # 状态高亮样式
-            status_state = run["status"]
-            if status_state == "success":
-                status_html = '<font color="#4caf50"><b>生成并归档成功</b></font>'
-            elif status_state == "partial_success":
-                status_html = '<font color="#ff9800"><b>部分成功 (超时强发)</b></font>'
-            elif status_state == "failed":
-                status_html = '<font color="#f44336"><b>生成失败</b></font>'
-            else:
-                status_html = f'<font color="#38adff"><b>{status_state}</b></font>'
-
-            # 计算压缩包大小
+            # 归档包大小
             size_str = "-"
             try:
                 if zip_filepath.exists():
                     size_bytes = zip_filepath.stat().st_size
-                    size_str = f"{size_bytes / 1024:.2f} KB" if size_bytes < 1024 * 1024 else f"{size_bytes / (1024 * 1024):.2f} MB"
+                    size_str = (
+                        f"{size_bytes / 1024:.2f} KB"
+                        if size_bytes < 1024 * 1024
+                        else f"{size_bytes / (1024 * 1024):.2f} MB"
+                    )
             except Exception:
                 pass
 
-            current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+            # 邮件状态 HTML
+            from app.dingtalk_builder import build_periodic_report_message, build_mail_status_html
             mail_status_html = ""
-            # 仅在开启了邮件时展现邮件状态
             if setting.get("enable_email") == 1:
-                mail_status = run.get("mail_status") or ""
-                if "sent" in mail_status.lower() or "success" in mail_status.lower():
-                    mail_status_html = '<font color="#4caf50">发送成功</font>'
-                elif "failed" in mail_status.lower() or "error" in mail_status.lower():
-                    mail_status_html = f'<font color="#f44336">发送失败 ({mail_status})</font>'
-                else:
-                    mail_status_html = f'<font color="#9e9e9e">{mail_status}</font>'
+                mail_status_html = build_mail_status_html(run.get("mail_status") or "")
 
-            from app.repository import get_system_setting
+            # Emoji 开关
             emoji_enabled = get_system_setting("dingtalk_emoji_enabled", "0") == "1"
 
-            green_emoji = "🟢 " if emoji_enabled else ""
-            gray_emoji = "⚪ " if emoji_enabled else ""
-            title_emoji = "📊 " if emoji_enabled else ""
-            cross_emoji = "❌ " if emoji_enabled else ""
-            finger_emoji = "👉 " if emoji_enabled else ""
-            warn_emoji = "⚠️ " if emoji_enabled else ""
+            # 构建消息
+            title, text = build_periodic_report_message(
+                setting_name=setting["name"],
+                report_type=report_type,
+                period_start=period_start,
+                period_end=period_end,
+                status=run["status"],
+                run_count=len(runs_in_period),
+                include_docx=bool(setting.get("include_docx", 1) == 1),
+                zip_size_str=size_str,
+                error_summary=run.get("error_summary") or "",
+                unfinished_reasons=unfinished_reasons if force_warning else [],
+                mail_status_html=mail_status_html,
+                enable_emoji=emoji_enabled,
+            )
 
-            docx_enabled_str = f"{green_emoji}已打入归档包" if setting.get("include_docx", 1) == 1 else f"{gray_emoji}仅打包截图"
-
-            md_lines = [
-                f"### <font color='#38adff'>{title_emoji}周期汇总报告通知 ({report_type_cn})</font>",
-                "---",
-                f"- **配置名称**: `{setting['name']}`",
-                f"- **统计周期**: `{period_start[:10]}` 至 `{period_end[:10]}`",
-                f"- **执行状态**: {status_html}",
-                f"- **Word 报告**: {docx_enabled_str} ({len(runs_in_period)} 个任务报告)",
-            ]
-            if mail_status_html:
-                md_lines.append(f"- **邮件状态**: {mail_status_html}")
-            md_lines.append(f"- **包含报告**: `{len(runs_in_period)}` 个 Word 报告")
-            md_lines.append(f"- **归档大小**: `{size_str}`")
-            md_lines.append(f"- **通知时间**: <font color='#38adff'>`{current_time_str}`</font>")
-            md_lines.append("---")
-
-            if run["status"] == "failed":
-                md_lines.append(f"{cross_emoji}**失败原因**: {run.get('error_summary') or '未知异常'}")
-            else:
-                md_lines.append(f"{finger_emoji}**下载指引**: 周期汇总包已成功打包归档。由于处于内网隔离环境，**请及时登录系统 Web 后台【周期报告】页面点击右侧直接下载保存到本地**！")
-
-            if force_warning and unfinished_reasons:
-                md_lines.append(f"\n{warn_emoji}**超时未完成的任务**:\n- " + "\n- ".join(unfinished_reasons))
-
-            text = "\n".join(md_lines)
             logger.info("正在发送周期报告钉钉 Webhook 推送...")
             dt_status = send_dingtalk_msg(webhook, secret, keyword, title, text)
             run["dingtalk_status"] = dt_status

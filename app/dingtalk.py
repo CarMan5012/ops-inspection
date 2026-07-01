@@ -37,12 +37,15 @@ def send_dingtalk_msg(
     keyword = (keyword or "").strip()
 
     # 1. 确保安全关键词包含在内容中以防安全拦截
+    # 注意：钉钉只需关键词出现在消息任意位置，无需放在开头
+    # 若插在 text 最前面会破坏 Markdown 三级标题（### ）的渲染
     if keyword:
         prefix = f"[{keyword}] "
-        if not title.startswith(prefix) and not title.startswith(keyword):
+        if keyword not in title:
             title = prefix + title
-        if not text.startswith(prefix) and not text.startswith(keyword):
-            text = prefix + text
+        if keyword not in text:
+            # 关键词不在正文中时，追加到末尾（不破坏标题格式）
+            text = text + f"\n\n> {keyword}"
 
     # 2. 如果配置了加签，计算 timestamp 和 sign
     url = webhook
