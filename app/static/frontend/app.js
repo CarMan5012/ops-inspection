@@ -1482,11 +1482,17 @@ function validateForm(form) {
 function securityFormPayload(form) {
   const ttlInput = form.querySelector('[name="session_ttl_minutes"]');
   const emojiInput = form.querySelector('[name="dingtalk_emoji_enabled"]');
+  const webhookInput = form.querySelector('[name="dingtalk_webhook"]');
+  const secretInput = form.querySelector('[name="dingtalk_secret"]');
+  const keywordInput = form.querySelector('[name="dingtalk_keyword"]');
   return {
     session_ttl_minutes: ttlInput ? ttlInput.value : "30",
     mfa_enabled: asBool(state.storage.security?.mfa_enabled),
     mfa_code: "",
-    dingtalk_emoji_enabled: emojiInput ? emojiInput.checked : false
+    dingtalk_emoji_enabled: emojiInput ? emojiInput.checked : false,
+    dingtalk_webhook: webhookInput ? webhookInput.value.trim() : "",
+    dingtalk_secret: secretInput ? secretInput.value.trim() : "",
+    dingtalk_keyword: keywordInput ? keywordInput.value.trim() : ""
   };
 }
 
@@ -2327,8 +2333,8 @@ function renderSecurityControl(security) {
     <div class="panel-header section-gap">
       <h3>安全设置</h3>
     </div>
-    <form class="surface-soft storage-action-box security-settings-box security-session-box" data-form="security-settings">
-      <label style="margin-bottom: 12px; display: block;">
+    <form class="surface-soft storage-action-box security-settings-box security-session-box" data-form="security-settings" style="display: flex; flex-direction: column; gap: 12px;">
+      <label style="display: block;">
         登录有效期
         <select name="session_ttl_minutes">
           <option value="30" ${ttl === 30 ? "selected" : ""}>30 分钟</option>
@@ -2338,11 +2344,31 @@ function renderSecurityControl(security) {
           <option value="10080" ${ttl === 10080 ? "selected" : ""}>7 天</option>
         </select>
       </label>
-      <label class="check" style="margin-bottom: 16px; display: block;">
+
+      <div style="border-top: 1px dashed #e2e8f0; padding-top: 12px; margin-top: 5px;">
+        <strong style="font-size: 13px; display: block; margin-bottom: 8px; color: var(--primary);">全局钉钉机器人配置：</strong>
+        <label style="display: block; margin-bottom: 10px;">
+          全局 Webhook 地址
+          <input name="dingtalk_webhook" value="${escapeAttr(security.dingtalk_webhook || '')}" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
+          <span class="form-tip">全局绑定的机器人 Webhook 地址。任务/周期报告开启通知并留空时默认使用此地址。</span>
+        </label>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+          <label style="display: block;">
+            全局加签密钥 (Secret)
+            <input type="password" name="dingtalk_secret" value="${escapeAttr(security.dingtalk_secret || '')}" placeholder="SEC...">
+          </label>
+          <label style="display: block;">
+            全局自定义关键词
+            <input name="dingtalk_keyword" value="${escapeAttr(security.dingtalk_keyword || '')}" placeholder="例如：巡检">
+          </label>
+        </div>
+      </div>
+
+      <label class="check" style="margin-top: 5px; display: block;">
         <input type="checkbox" name="dingtalk_emoji_enabled" ${state.storage.security?.dingtalk_emoji_enabled ? "checked" : ""}>
         开启钉钉消息表情符号 (默认关闭)
       </label>
-      <div class="action-row">
+      <div class="action-row" style="margin-top: 8px;">
         <button class="button primary" type="submit">${icon("save")}保存安全设置</button>
       </div>
     </form>

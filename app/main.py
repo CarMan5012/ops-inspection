@@ -473,11 +473,32 @@ DINGTALK_EMOJI_ENABLED_KEY = "dingtalk_emoji_enabled"
 
 
 def security_settings() -> dict[str, Any]:
+    from app.utils import decrypt_secret
+    
+    db_webhook = get_system_setting("dingtalk_webhook", "")
+    if db_webhook:
+        try:
+            db_webhook = decrypt_secret(db_webhook)
+        except Exception:
+            pass
+            
+    db_secret = get_system_setting("dingtalk_secret", "")
+    if db_secret:
+        try:
+            db_secret = decrypt_secret(db_secret)
+        except Exception:
+            pass
+            
+    db_keyword = get_system_setting("dingtalk_keyword", "")
+
     return {
         "mfa_enabled": get_system_setting(MFA_ENABLED_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"},
         "session_ttl_minutes": max(5, min(int(get_system_setting(SESSION_TTL_MINUTES_KEY, "30") or "30"), 7 * 24 * 60)),
         "mfa_configured": bool(get_system_setting(MFA_SECRET_KEY, "")),
         "dingtalk_emoji_enabled": get_system_setting(DINGTALK_EMOJI_ENABLED_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"},
+        "dingtalk_webhook": db_webhook,
+        "dingtalk_secret": db_secret,
+        "dingtalk_keyword": db_keyword,
     }
 
 
@@ -652,6 +673,24 @@ def api_update_security_settings(payload: dict[str, Any]) -> dict[str, Any]:
     # 更新全局钉钉消息表情开关
     dingtalk_emoji_enabled = bool_value(payload.get("dingtalk_emoji_enabled"), False)
     set_system_setting(DINGTALK_EMOJI_ENABLED_KEY, "1" if dingtalk_emoji_enabled else "0")
+
+    # 更新全局钉钉机器人配置（并进行加密保护）
+    from app.utils import encrypt_secret
+    
+    global_webhook = text_value(payload, "dingtalk_webhook", "").strip()
+    if global_webhook:
+        set_system_setting("dingtalk_webhook", encrypt_secret(global_webhook))
+    else:
+        set_system_setting("dingtalk_webhook", "")
+
+    global_secret = text_value(payload, "dingtalk_secret", "").strip()
+    if global_secret:
+        set_system_setting("dingtalk_secret", encrypt_secret(global_secret))
+    else:
+        set_system_setting("dingtalk_secret", "")
+
+    global_keyword = text_value(payload, "dingtalk_keyword", "").strip()
+    set_system_setting("dingtalk_keyword", global_keyword)
 
     return {"ok": True, **security_settings()}
 
