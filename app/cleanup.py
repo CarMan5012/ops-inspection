@@ -139,12 +139,12 @@ def parse_db_time(time_str: str) -> datetime:
             return datetime.min
 
 
-def estimate_cleanup() -> dict[str, Any]:
+def estimate_cleanup(target_month: str | None = None) -> dict[str, Any]:
     """预估可清理空间，不真实发生物理删除，不落库运行历史"""
-    return run_cleanup(mode="dry_run", dry_run=True)
+    return run_cleanup(mode="dry_run", dry_run=True, target_month=target_month)
 
 
-def run_cleanup(mode: str = "manual", dry_run: bool = False) -> dict[str, Any]:
+def run_cleanup(mode: str = "manual", dry_run: bool = False, target_month: str | None = None) -> dict[str, Any]:
     """
     一键清理/预估主入口
     """
@@ -157,13 +157,13 @@ def run_cleanup(mode: str = "manual", dry_run: bool = False) -> dict[str, Any]:
         cfg = dict(row) if row else {
             "enabled": 1,
             "allow_manual_cleanup": 1,
-            "periodic_sent_retention_days": 3,
-            "periodic_failed_retention_days": 30,
-            "screenshot_retention_days": 7,
-            "report_retention_days": 30,
+            "periodic_sent_retention_days": 90,
+            "periodic_failed_retention_days": 90,
+            "screenshot_retention_days": 90,
+            "report_retention_days": 90,
             "run_record_retention_days": 90,
-            "log_retention_days": 14,
-            "browser_state_retention_days": 30,
+            "log_retention_days": 90,
+            "browser_state_retention_days": 90,
             "browser_state_cleanup_enabled": 0,
             "protect_recent_days": 3,
         }
@@ -194,33 +194,43 @@ def run_cleanup(mode: str = "manual", dry_run: bool = False) -> dict[str, Any]:
 
     try:
         # A. 清理周期报告压缩包
-        sent_days = int(cfg.get("periodic_sent_retention_days") or 3)
-        failed_days = int(cfg.get("periodic_failed_retention_days") or 30)
-        _cleanup_periodic_archives(sent_days, failed_days, protect_date, dry_run, results)
+        sent_days = int(cfg.get("periodic_sent_retention_days") or 90)
+        failed_days = int(cfg.get("periodic_failed_retention_days") or 90)
+        _cleanup_periodic_archives(sent_days, failed_days, protect_date, dry_run, results, target_month=target_month)
 
         # B. 清理巡检截图
-        sc_days = int(cfg.get("screenshot_retention_days") or 7)
-        _cleanup_screenshot_artifacts(sc_days, protect_date, dry_run, results)
+        sc_days = int(cfg.get("screenshot_retention_days") or 90)
+        _cleanup_screenshot_artifacts(sc_days, protect_date, dry_run, results, target_month=target_month)
 
         # C. 清理普通 Word 报告
-        rep_days = int(cfg.get("report_retention_days") or 30)
-        _cleanup_report_artifacts(rep_days, protect_date, dry_run, results)
+        rep_days = int(cfg.get("report_retention_days") or 90)
+        _cleanup_report_artifacts(rep_days, protect_date, dry_run, results, target_month=target_month)
 
         # D. 清理日志文件
-        log_days = int(cfg.get("log_retention_days") or 14)
-        _cleanup_logs(log_days, protect_date, dry_run, results)
+        log_days = int(cfg.get("log_retention_days") or 90)
+        _cleanup_logs(log_days, protect_date, dry_run, results, target_month=target_month)
 
         # E. 清理浏览器登录状态
-        bs_days = int(cfg.get("browser_state_retention_days") or 30)
+        bs_days = int(cfg.get("browser_state_retention_days") or 90)
         bs_enabled = int(cfg.get("browser_state_cleanup_enabled") or 0)
-        _cleanup_browser_state(bs_days, protect_date, bs_enabled, dry_run, results)
+        _cleanup_browser_state(bs_days, protect_date, bs_enabled, dry_run, results, target_month=target_month)
 
-        # F. 清理孤儿文件/目录
-        _cleanup_orphan_files(protect_date, dry_run, results)
+        # F. 清理孤儿文件/目录 (仅在全局自动/常规手动清理时进行，指定月份清理时不执行)
+        if not target_month:
+            _cleanup_orphan_files(protect_date, dry_run, results)
 
         # G. 清理旧运行记录（数据库清理，在最后执行以防前述目录遍历找不到 ID）
         rec_days = int(cfg.get("run_record_retention_days") or 90)
-        _cleanup_old_run_records(rec_days, protect_date, dry_run, results)
+        _cleanup_old_run_records(rec_days, protect_date, dry_run, results, target_month=target_month)
+
+        # H. 指定月份物理清理时，同时清空该月份的周期报告运行记录本身
+        if target_month and not dry_run:
+            try:
+                with connect() as conn:
+                    conn.execute("DELETE FROM periodic_report_runs WHERE started_at LIKE ?", (f"{target_month}%",))
+                    logger.info(f"清理数据库中属于 {target_month} 的周期汇总历史记录完成")
+            except Exception as pe_exc:
+                results["errors"].append(f"删除周期历史记录失败: {pe_exc}")
 
     except Exception as e:
         results["errors"].append(f"清理核心发生未捕获异常: {e}")
@@ -245,7 +255,7 @@ def run_cleanup(mode: str = "manual", dry_run: bool = False) -> dict[str, Any]:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        mode, status, started_at, finished_at,
+                        f"manual_{target_month}" if target_month else mode, status, started_at, finished_at,
                         results["deleted_files_count"], results["deleted_bytes"],
                         results["deleted_screenshots_count"], results["deleted_reports_count"],
                         results["deleted_periodic_archives_count"], results["deleted_logs_count"],
@@ -272,7 +282,7 @@ def run_cleanup(mode: str = "manual", dry_run: bool = False) -> dict[str, Any]:
     }
 
 
-def _cleanup_periodic_archives(sent_days: int, failed_days: int, protect_date: datetime, dry_run: bool, results: dict[str, Any]) -> None:
+def _cleanup_periodic_archives(sent_days: int, failed_days: int, protect_date: datetime, dry_run: bool, results: dict[str, Any], target_month: str | None = None) -> None:
     """清理周期报告打包的 Zip 文件"""
     now = datetime.now()
     with connect() as conn:
@@ -286,24 +296,30 @@ def _cleanup_periodic_archives(sent_days: int, failed_days: int, protect_date: d
         if not z_path.exists():
             continue
 
-        ref_time = parse_db_time(run["finished_at"] or run["started_at"])
-        if ref_time >= protect_date:
-            continue
+        if target_month:
+            if not (run["started_at"] and run["started_at"].startswith(target_month)):
+                continue
+        else:
+            ref_time = parse_db_time(run["finished_at"] or run["started_at"])
+            if ref_time >= protect_date:
+                continue
 
-        mail_status = str(run["mail_status"] or "").strip().lower()
-        is_success = mail_status in ("success", "sent") or mail_status.startswith("skipped")
-        
-        limit_days = sent_days if is_success else failed_days
-        limit_date = now - timedelta(days=limit_days)
+            mail_status = str(run["mail_status"] or "").strip().lower()
+            is_success = mail_status in ("success", "sent") or mail_status.startswith("skipped")
+            
+            limit_days = sent_days if is_success else failed_days
+            limit_date = now - timedelta(days=limit_days)
 
-        if ref_time < limit_date:
-            f_count, f_bytes = safe_delete_file(z_path, dry_run)
-            results["deleted_files_count"] += f_count
-            results["deleted_bytes"] += f_bytes
-            results["deleted_periodic_archives_count"] += f_count
+            if ref_time >= limit_date:
+                continue
+
+        f_count, f_bytes = safe_delete_file(z_path, dry_run)
+        results["deleted_files_count"] += f_count
+        results["deleted_bytes"] += f_bytes
+        results["deleted_periodic_archives_count"] += f_count
 
 
-def _cleanup_screenshot_artifacts(retention_days: int, protect_date: datetime, dry_run: bool, results: dict[str, Any]) -> None:
+def _cleanup_screenshot_artifacts(retention_days: int, protect_date: datetime, dry_run: bool, results: dict[str, Any], target_month: str | None = None) -> None:
     """物理清理过期的巡检截图子目录"""
     now = datetime.now()
     limit_date = now - timedelta(days=retention_days)
@@ -313,20 +329,27 @@ def _cleanup_screenshot_artifacts(retention_days: int, protect_date: datetime, d
 
     for row in rows:
         run = dict(row)
-        ref_time = parse_db_time(run["finished_at"] or run["started_at"])
-        if ref_time >= protect_date or ref_time >= limit_date:
-            continue
+        if target_month:
+            if not (run["started_at"] and run["started_at"].startswith(target_month)):
+                continue
+        else:
+            ref_time = parse_db_time(run["finished_at"] or run["started_at"])
+            if ref_time >= protect_date or ref_time >= limit_date:
+                continue
 
         run_id = run["id"]
         # A. 清理新日期目录格式: YYYY/MM/DD/run-{id}
         from app.storage_paths import get_run_date
-        yyyy, mm, dd = get_run_date(run_id)
-        new_dir = settings.screenshot_dir / yyyy / mm / dd / f"run-{run_id}"
-        if new_dir.exists():
-            f_count, f_bytes = safe_delete_dir(new_dir, dry_run)
-            results["deleted_files_count"] += f_count
-            results["deleted_bytes"] += f_bytes
-            results["deleted_screenshots_count"] += f_count
+        try:
+            yyyy, mm, dd = get_run_date(run_id)
+            new_dir = settings.screenshot_dir / yyyy / mm / dd / f"run-{run_id}"
+            if new_dir.exists():
+                f_count, f_bytes = safe_delete_dir(new_dir, dry_run)
+                results["deleted_files_count"] += f_count
+                results["deleted_bytes"] += f_bytes
+                results["deleted_screenshots_count"] += f_count
+        except Exception:
+            pass
 
         # B. 清理旧格式目录: screenshots/{id}
         legacy_dir = settings.screenshot_dir / str(run_id)
@@ -337,7 +360,7 @@ def _cleanup_screenshot_artifacts(retention_days: int, protect_date: datetime, d
             results["deleted_screenshots_count"] += f_count
 
 
-def _cleanup_report_artifacts(retention_days: int, protect_date: datetime, dry_run: bool, results: dict[str, Any]) -> None:
+def _cleanup_report_artifacts(retention_days: int, protect_date: datetime, dry_run: bool, results: dict[str, Any], target_month: str | None = None) -> None:
     """物理清理过期的巡检 Word 报告子目录"""
     now = datetime.now()
     limit_date = now - timedelta(days=retention_days)
@@ -347,20 +370,27 @@ def _cleanup_report_artifacts(retention_days: int, protect_date: datetime, dry_r
 
     for row in rows:
         run = dict(row)
-        ref_time = parse_db_time(run["finished_at"] or run["started_at"])
-        if ref_time >= protect_date or ref_time >= limit_date:
-            continue
+        if target_month:
+            if not (run["started_at"] and run["started_at"].startswith(target_month)):
+                continue
+        else:
+            ref_time = parse_db_time(run["finished_at"] or run["started_at"])
+            if ref_time >= protect_date or ref_time >= limit_date:
+                continue
 
         run_id = run["id"]
         # A. 清理新日期目录格式: YYYY/MM/DD/run-{id}
         from app.storage_paths import get_run_date
-        yyyy, mm, dd = get_run_date(run_id)
-        new_dir = settings.report_dir / yyyy / mm / dd / f"run-{run_id}"
-        if new_dir.exists():
-            f_count, f_bytes = safe_delete_dir(new_dir, dry_run)
-            results["deleted_files_count"] += f_count
-            results["deleted_bytes"] += f_bytes
-            results["deleted_reports_count"] += f_count
+        try:
+            yyyy, mm, dd = get_run_date(run_id)
+            new_dir = settings.report_dir / yyyy / mm / dd / f"run-{run_id}"
+            if new_dir.exists():
+                f_count, f_bytes = safe_delete_dir(new_dir, dry_run)
+                results["deleted_files_count"] += f_count
+                results["deleted_bytes"] += f_bytes
+                results["deleted_reports_count"] += f_count
+        except Exception:
+            pass
 
         # B. 清理旧格式目录: reports/{id}
         legacy_dir = settings.report_dir / str(run_id)
@@ -371,7 +401,7 @@ def _cleanup_report_artifacts(retention_days: int, protect_date: datetime, dry_r
             results["deleted_reports_count"] += f_count
 
 
-def _cleanup_logs(retention_days: int, protect_date: datetime, dry_run: bool, results: dict[str, Any]) -> None:
+def _cleanup_logs(retention_days: int, protect_date: datetime, dry_run: bool, results: dict[str, Any], target_month: str | None = None) -> None:
     """清理 logs 目录下超时的历史日志文件"""
     if not settings.log_dir.exists():
         return
@@ -384,8 +414,12 @@ def _cleanup_logs(retention_days: int, protect_date: datetime, dry_run: bool, re
         f_path = Path(entry.path)
         mtime = datetime.fromtimestamp(entry.stat().st_mtime)
 
-        if mtime >= protect_date or mtime >= limit_date:
-            continue
+        if target_month:
+            if mtime.strftime("%Y-%m") != target_month:
+                continue
+        else:
+            if mtime >= protect_date or mtime >= limit_date:
+                continue
 
         try:
             f_count, f_bytes = safe_delete_file(f_path, dry_run)
@@ -396,7 +430,7 @@ def _cleanup_logs(retention_days: int, protect_date: datetime, dry_run: bool, re
             results["errors"].append(f"日志文件 {f_path.name} 清理异常: {e}")
 
 
-def _cleanup_browser_state(retention_days: int, protect_date: datetime, enabled: int, dry_run: bool, results: dict[str, Any]) -> None:
+def _cleanup_browser_state(retention_days: int, protect_date: datetime, enabled: int, dry_run: bool, results: dict[str, Any], target_month: str | None = None) -> None:
     """清理过期的浏览器会话缓存状态文件 (JSON)"""
     if not enabled or not settings.browser_state_dir.exists():
         return
@@ -409,8 +443,12 @@ def _cleanup_browser_state(retention_days: int, protect_date: datetime, enabled:
         f_path = Path(entry.path)
         mtime = datetime.fromtimestamp(entry.stat().st_mtime)
 
-        if mtime >= protect_date or mtime >= limit_date:
-            continue
+        if target_month:
+            if mtime.strftime("%Y-%m") != target_month:
+                continue
+        else:
+            if mtime >= protect_date or mtime >= limit_date:
+                continue
 
         f_count, f_bytes = safe_delete_file(f_path, dry_run)
         results["deleted_files_count"] += f_count
@@ -566,7 +604,7 @@ def _cleanup_orphan_files(protect_date: datetime, dry_run: bool, results: dict[s
                 results["deleted_periodic_archives_count"] += f_count
 
 
-def _cleanup_old_run_records(retention_days: int, protect_date: datetime, dry_run: bool, results: dict[str, Any]) -> None:
+def _cleanup_old_run_records(retention_days: int, protect_date: datetime, dry_run: bool, results: dict[str, Any], target_month: str | None = None) -> None:
     """清理数据库中过期的 run_records 运行历史数据 (级联清空截图结果明细)"""
     now = datetime.now()
     limit_date = now - timedelta(days=retention_days)
@@ -577,9 +615,13 @@ def _cleanup_old_run_records(retention_days: int, protect_date: datetime, dry_ru
     expired_ids = []
     for row in rows:
         run = dict(row)
-        ref_time = parse_db_time(run["finished_at"] or run["started_at"])
-        if ref_time < protect_date and ref_time < limit_date:
-            expired_ids.append(run["id"])
+        if target_month:
+            if run["started_at"] and run["started_at"].startswith(target_month):
+                expired_ids.append(run["id"])
+        else:
+            ref_time = parse_db_time(run["finished_at"] or run["started_at"])
+            if ref_time < protect_date and ref_time < limit_date:
+                expired_ids.append(run["id"])
 
     if not expired_ids:
         return

@@ -2069,10 +2069,13 @@ def api_estimate_storage() -> dict[str, Any]:
 
 
 @api_router.post("/storage/cleanup", dependencies=[Depends(require_api_login)])
-def api_run_storage_cleanup() -> dict[str, Any]:
+def api_run_storage_cleanup(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     from app.cleanup import run_cleanup
+    target_month = None
+    if payload:
+        target_month = payload.get("month")  # 例如 "2026-05"
     try:
-        res = run_cleanup(mode="manual", dry_run=False)
+        res = run_cleanup(mode="manual", dry_run=False, target_month=target_month)
         if res.get("status") == "failed" and "系统策略限制" in res.get("error_summary", ""):
             raise HTTPException(status_code=400, detail=res["error_summary"])
         return {"ok": True, "result": res}

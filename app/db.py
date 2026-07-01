@@ -392,8 +392,28 @@ def seed_system_defaults(conn: sqlite3.Connection) -> None:
             (
                 1, 1, "daily", "每天 02:30",
                 '{"frequency": "daily", "time": "02:30"}',
-                3, 30, 7, 30, 90, 14, 30, 0, 3
+                90, 90, 90, 90, 90, 90, 90, 0, 3
             )
+        )
+    else:
+        # 对老数据库执行一次自愈升级，将原来默认的 3/7/14/30 天升级为 90 天默认保留周期
+        conn.execute(
+            """
+            UPDATE storage_cleanup_settings
+            SET periodic_sent_retention_days = 90
+            WHERE periodic_sent_retention_days = 3
+            """
+        )
+        conn.execute(
+            """
+            UPDATE storage_cleanup_settings
+            SET periodic_failed_retention_days = 90,
+                screenshot_retention_days = 90,
+                report_retention_days = 90,
+                log_retention_days = 90,
+                browser_state_retention_days = 90
+            WHERE report_retention_days = 30
+            """
         )
 
     default_settings = {

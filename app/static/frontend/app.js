@@ -529,6 +529,8 @@ function handleAction(action, id, triggerButton = null) {
     estimateStorage(triggerButton);
   } else if (action === "run-storage-cleanup") {
     runStorageCleanup(triggerButton);
+  } else if (action === "run-month-cleanup") {
+    runMonthCleanup(triggerButton);
   } else if (action === "enable-swagger") {
     updateSwaggerSettings(true, triggerButton);
   } else if (action === "disable-swagger") {
@@ -1966,6 +1968,21 @@ function renderStorage() {
             <button class="button danger" type="button" data-action="run-storage-cleanup">${icon("trash-2")}立即清理</button>
           </div>
         </div>
+
+        <div class="panel-header section-gap">
+          <h3 style="display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px;">指定月份物理清理</h3>
+        </div>
+        <div class="surface-soft storage-action-box" style="background: #fafafa; border: 1px dashed #d1d5db; padding: 14px; border-radius: 6px;">
+          <p class="muted" style="margin-bottom: 10px; font-size: 13px; line-height: 1.4;">
+            选择一个特定的历史月份，物理清除该月份内所有的巡检截图、Word 报告、运行历史和周期压缩包。此操作不可撤销！
+          </p>
+          <div style="display: flex; gap: 10px; align-items: center; width: 100%;">
+            <input type="month" id="cleanup-target-month" class="form-input" style="flex: 1; max-width: 200px; padding: 6px 10px; border-radius: 4px; border: 1px solid var(--panel-border); font-size: 13px; outline: none; background: #fff;">
+            <button class="button danger" type="button" data-action="run-month-cleanup" style="padding: 6px 12px; font-weight: 600; height: 32px; font-size: 13px; background: var(--danger); color: #fff; border-color: var(--danger);">
+              物理清理该月
+            </button>
+          </div>
+        </div>
         ${swaggerControlHTML}
         ${securityControlHTML}
         ${dangerZoneControlHTML}
@@ -2238,6 +2255,44 @@ async function runStorageCleanup(btn) {
     if (result.ok && result.result) {
       const res = result.result;
       showSuccess(`清理完成，删除 ${res.deleted_files_count} 个文件，释放 ${formatBytes(res.deleted_bytes)}`);
+      await loadStorage(false);
+    } else {
+      showError("清理失败，请稍后重试");
+    }
+  } catch (error) {
+    showError(error.message || "清理失败，请检查后端日志");
+  } finally {
+    setButtonLoading(btn, false);
+  }
+}
+
+async function runMonthCleanup(btn) {
+  const monthInput = document.getElementById("cleanup-target-month");
+  const monthVal = monthInput ? monthInput.value : "";
+  if (!monthVal) {
+    showError("请先选择要清理的历史月份");
+    return;
+  }
+
+  const confirmed = await showConfirm({
+    title: "确认按月清理数据？",
+    message: `此操作将物理删除 ${monthVal} 月份内的所有巡检截图、Word 报告、运行历史和周期压缩包。此操作不可逆！`,
+    confirmText: "确认清理",
+    cancelText: "取消",
+    danger: true
+  });
+  if (!confirmed) return;
+
+  setButtonLoading(btn, true);
+  try {
+    showToast(`正在清理 ${monthVal} 月的数据...`, "info");
+    const result = await apiJson("/storage/cleanup", {
+      method: "POST",
+      body: JSON.stringify({ month: monthVal })
+    });
+    if (result.ok && result.result) {
+      const res = result.result;
+      showSuccess(`清理完成，删除了 ${monthVal} 月 ${res.deleted_files_count} 个文件，释放 ${formatBytes(res.deleted_bytes)} 空间`);
       await loadStorage(false);
     } else {
       showError("清理失败，请稍后重试");
