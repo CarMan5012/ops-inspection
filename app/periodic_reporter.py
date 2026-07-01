@@ -490,60 +490,119 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
 
-    # 4. 获取邮件配置发信
-    mail_profile = get_mail_profile(setting["mail_profile_id"])
-    if not mail_profile:
-        with connect() as conn:
-            first_mail = conn.execute("SELECT * FROM mail_profiles ORDER BY id LIMIT 1").fetchone()
-            mail_profile = dict(first_mail) if first_mail else None
+    # 4. 邮件发信 (当且仅当配置了 enable_email == 1 时才进行发信)
+    if setting.get("enable_email") == 1:
+        mail_profile = get_mail_profile(setting["mail_profile_id"])
+        if not mail_profile:
+            with connect() as conn:
+                first_mail = conn.execute("SELECT * FROM mail_profiles ORDER BY id LIMIT 1").fetchone()
+                mail_profile = dict(first_mail) if first_mail else None
 
-    if not mail_profile:
-        run["status"] = "success"
-        run["mail_status"] = "skipped: 系统中没有可用的发信配置"
-        run["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        save_periodic_report_run(run, run_id)
-        logger.warning("发信失败：系统没有任何邮件配置。")
-        return
+        if not mail_profile:
+            run["status"] = "success"
+            run["mail_status"] = "failed: 系统中没有可用的发信配置"
+            run["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_periodic_report_run(run, run_id)
+            logger.warning("发信失败：系统没有任何邮件配置。")
+            return
 
-    # 5. 构建邮件主题和正文
-    report_type_cn = "周报" if report_type == "weekly" else "月报"
-    subject = f"【{report_type_cn}】{setting['name']}汇总报告 ({period_start[:10]} 至 {period_end[:10]})"
-    
-    if force_warning:
-        subject = f"⚠️【{report_type_cn}告警】{setting['name']}汇总报告 (数据不完整) - {period_start[:10]}"
-        body = (
-            f"您好，这是一封自动发送的{report_type_cn}汇总邮件。\n\n"
-            f"注意：由于已达到重试的最晚时间上限({setting.get('retry_until_time', '23:50')})，部分定时巡检任务仍未完成，本期汇总报告已强行生成打包。以下任务在截止前未完成:\n"
-            f"{'; '.join(unfinished_reasons or [])}\n\n"
-            f"汇总时间范围: {period_start} 至 {period_end}\n"
-            f"本期汇总 Word 报告文件已作为附件随信发送，请查收。\n"
-        )
+        # 5. 构建邮件主题和正文
+        report_type_cn = "周报" if report_type == "weekly" else "月报"
+        subject = f"【{report_type_cn}】{setting['name']}汇总报告 ({period_start[:10]} 至 {period_end[:10]})"
+        
+        if force_warning:
+            subject = f"⚠️【{report_type_cn}告警】{setting['name']}汇总报告 (数据不完整) - {period_start[:10]}"
+            body = (
+                f"您好，这是一封自动发送的{report_type_cn}汇总邮件。\n\n"
+                f"注意：由于已达到重试的最晚时间上限({setting.get('retry_until_time', '23:50')})，部分定时巡检任务仍未完成，本期汇总报告已强行生成打包。以下任务在截止前未完成:\n"
+                f"{'; '.join(unfinished_reasons or [])}\n\n"
+                f"汇总时间范围: {period_start} 至 {period_end}\n"
+                f"本期汇总 Word 报告文件已作为附件随信发送，请查收。\n"
+            )
+        else:
+            body = (
+                f"您好，这是一封系统自动发送的{report_type_cn}汇总邮件。\n\n"
+                f"本期周期: {period_start} 至 {period_end}\n"
+                f"本期汇总的巡检 Word 报告文档及截图已压缩打包并作为附件随信发送，请查收。\n"
+            )
+
+        # 6. 发信并更新状态
+        try:
+            recipients_override = setting["recipients_override"].strip() if setting.get("recipients_override") else None
+            mail_status = send_periodic_report_mail(
+                mail_profile=mail_profile,
+                subject=subject,
+                body=body,
+                attachment_path=str(zip_filepath),
+                recipients_override=recipients_override
+            )
+            run["mail_status"] = mail_status
+            run["status"] = "success" if not force_warning else "partial_success"
+        except Exception as exc:
+            err_msg = f"发送周期报告邮件出错: {exc}"
+            logger.error(err_msg, exc_info=True)
+            run["mail_status"] = f"failed: {exc}"
+            run["status"] = "partial_success"
+            run["error_summary"] = err_msg
     else:
-        body = (
-            f"您好，这是一封系统自动发送的{report_type_cn}汇总邮件。\n\n"
-            f"本期周期: {period_start} 至 {period_end}\n"
-            f"本期汇总的巡检 Word 报告文档及截图已压缩打包并作为附件随信发送，请查收。\n"
-        )
-
-    # 6. 发信并更新状态
-    try:
-        recipients_override = setting["recipients_override"].strip() if setting.get("recipients_override") else None
-        mail_status = send_periodic_report_mail(
-            mail_profile=mail_profile,
-            subject=subject,
-            body=body,
-            attachment_path=str(zip_filepath),
-            recipients_override=recipients_override
-        )
-        run["mail_status"] = mail_status
+        run["mail_status"] = "skipped: 未启用邮件推送"
         run["status"] = "success" if not force_warning else "partial_success"
-    except Exception as exc:
-        err_msg = f"发送周期报告邮件出错: {exc}"
-        logger.error(err_msg, exc_info=True)
-        run["mail_status"] = f"failed: {exc}"
-        run["status"] = "partial_success"
-        run["error_summary"] = err_msg
+
+    # 7. 钉钉通知推送 (当配置了 dingtalk_enabled == 1 时进行推送)
+    if setting.get("dingtalk_enabled") == 1:
+        from app.utils import decrypt_secret
+        from app.dingtalk import send_dingtalk_msg
+
+        webhook = decrypt_secret(str(setting.get("dingtalk_webhook") or ""))
+        if webhook:
+            secret = decrypt_secret(str(setting.get("dingtalk_secret") or ""))
+            keyword = setting.get("dingtalk_keyword")
+
+            report_type_cn = "周报" if report_type == "weekly" else "月报"
+            title = f"周期汇总报告生成通知 - {setting['name']}"
+
+            status_text = "成功"
+            if run["status"] == "failed":
+                status_text = "失败"
+            elif run["status"] == "partial_success":
+                status_text = "部分成功"
+
+            # 计算压缩包大小
+            size_str = "-"
+            try:
+                if zip_filepath.exists():
+                    size_bytes = zip_filepath.stat().st_size
+                    size_str = f"{size_bytes / 1024:.2f} KB" if size_bytes < 1024 * 1024 else f"{size_bytes / (1024 * 1024):.2f} MB"
+            except Exception:
+                pass
+
+            md_lines = [
+                f"### 周期汇总报告 ({report_type_cn})",
+                f"- **配置名称**: {setting['name']}",
+                f"- **统计周期**: {period_start[:10]} 至 {period_end[:10]}",
+                f"- **执行状态**: **{status_text}**",
+            ]
+
+            if run["status"] == "failed":
+                md_lines.append(f"- **失败原因**: {run.get('error_summary') or '未知异常'}")
+            else:
+                md_lines.append(f"- **包含报告**: {len(runs_in_period)} 个 Word 报告")
+                md_lines.append(f"- **归档大小**: {size_str}")
+                md_lines.append("- **操作建议**: 周期汇总包已生成完毕，请前往系统 Web 后台**【周期报告】**页面直接下载归档。")
+
+            if force_warning and unfinished_reasons:
+                md_lines.append(f"\n⚠️ **超时未完成的任务**:\n- " + "\n- ".join(unfinished_reasons))
+
+            text = "\n".join(md_lines)
+            logger.info("正在发送周期报告钉钉 Webhook 推送...")
+            dt_status = send_dingtalk_msg(webhook, secret, keyword, title, text)
+            run["dingtalk_status"] = dt_status
+        else:
+            logger.warning(f"周期报告配置 '{setting['name']}' 启用了钉钉推送但 Webhook 为空，跳过。")
+            run["dingtalk_status"] = "skipped: Webhook 为空"
+    else:
+        run["dingtalk_status"] = "skipped: 未启用钉钉通知"
 
     run["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     save_periodic_report_run(run, run_id)
-    logger.info(f"周期报告 ID {run_id} 流程执行完毕。状态: {run['status']}，邮件状态: {run['mail_status']}")
+    logger.info(f"周期报告 ID {run_id} 流程执行完毕。状态: {run['status']}，邮件状态: {run['mail_status']}，钉钉状态: {run['dingtalk_status']}")

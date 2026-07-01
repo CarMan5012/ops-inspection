@@ -1654,9 +1654,18 @@ def periodic_reports_list(request: Request) -> RedirectResponse:
 @frontend_router.get("/periodic-reports/{report_type}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def edit_periodic_report(request: Request, report_type: str) -> HTMLResponse:
     from app.repository import get_periodic_report_setting, list_mail_profiles
+    from app.utils import decrypt_secret
     setting = get_periodic_report_setting(report_type)
     if not setting:
         raise HTTPException(status_code=404, detail="周期报告配置不存在")
+        
+    # 解密敏感字段以在表单中回显
+    for f in ("dingtalk_webhook", "dingtalk_secret"):
+        if setting.get(f):
+            try:
+                setting[f] = decrypt_secret(setting[f])
+            except Exception:
+                pass
         
     return templates.TemplateResponse(
         "periodic_form.html",
@@ -1691,6 +1700,11 @@ def update_periodic_report(
     hour: list[int] = Form([]),
     minute: list[int] = Form([]),
     send_on_timeout: int = Form(1),
+    enable_email: str | None = Form(None),
+    dingtalk_enabled: str | None = Form(None),
+    dingtalk_webhook: str = Form(""),
+    dingtalk_secret: str = Form(""),
+    dingtalk_keyword: str = Form(""),
 ) -> RedirectResponse:
     import json
     from app.utils import times_to_cron, validate_cron_expression
@@ -1765,6 +1779,11 @@ def update_periodic_report(
         "recipients_override": recipients_override,
         "schedule_config": schedule_config,
         "send_on_timeout": send_on_timeout,
+        "enable_email": 1 if enable_email else 0,
+        "dingtalk_enabled": 1 if dingtalk_enabled else 0,
+        "dingtalk_webhook": dingtalk_webhook.strip(),
+        "dingtalk_secret": dingtalk_secret.strip(),
+        "dingtalk_keyword": dingtalk_keyword.strip(),
     }
     
     save_periodic_report_setting(report_type, update_data)

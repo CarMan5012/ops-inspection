@@ -77,27 +77,62 @@
     </label>
   </div>
 
-  <!-- 第三部分：推送与推送设置 -->
+  <!-- 第三部分：推送推送与归档设置 -->
   <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、
-    邮件推送与归档设置</h3>
-  <div class="form-grid" style="margin-bottom: 30px;">
-    <label class="span-2">
-      发信邮件服务配置 <span style="color: var(--danger);">*</span>
-      <select name="mail_profile_id">
-        {% for profile in mail_profiles %}
-        <option value="{{ profile.id }}" {% if setting.mail_profile_id==profile.id %}selected{% endif %}>{{ profile.name
-          }}</option>
-        {% endfor %}
-      </select>
-      <span class="form-tip">选择用于发送周期归档 ZIP 压缩包的主发信邮箱配置。</span>
+    推送推送与归档设置</h3>
+    
+  <div class="panel" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 20px; border-radius: 6px; margin-bottom: 30px;">
+    <!-- 邮件推送开关 -->
+    <label class="check" style="margin-bottom: 16px; font-weight: 600; display: block;">
+      <input name="enable_email" type="checkbox" {% if setting.enable_email %}checked{% endif %} onchange="toggleMailFields(this.checked)">
+      开启邮件推送归档 ZIP 附件 (默认关闭)
+    </label>
+    
+    <div id="mail_fields_container" class="form-grid" style="margin-bottom: 24px; padding-left: 20px; border-left: 2px dashed #cbd5e1; display: none;">
+      <label class="span-2">
+        发信邮件服务配置
+        <select name="mail_profile_id">
+          <option value="">-- 请选择发信邮箱 --</option>
+          {% for profile in mail_profiles %}
+          <option value="{{ profile.id }}" {% if setting.mail_profile_id==profile.id %}selected{% endif %}>{{ profile.name }}</option>
+          {% endfor %}
+        </select>
+        <span class="form-tip">选择用于发送周期归档 ZIP 压缩包的主发信邮箱配置。</span>
+      </label>
+
+      <label class="span-2">
+        收件人邮箱覆盖 (选填)
+        <input name="recipients_override" value="{{ setting.recipients_override or '' }}"
+          placeholder="ops@example.com, manager@example.com">
+        <span class="form-tip">留空则直接发送给上述发信邮箱配置的默认收件人；若填写则覆盖默认收件人。多个邮箱以英文逗号分隔。</span>
+      </label>
+    </div>
+
+    <!-- 钉钉推送开关 -->
+    <label class="check" style="margin-top: 16px; margin-bottom: 16px; font-weight: 600; display: block;">
+      <input name="dingtalk_enabled" type="checkbox" {% if setting.dingtalk_enabled %}checked{% endif %} onchange="toggleDingtalkFields(this.checked)">
+      开启钉钉群机器人 Webhook 通知 (推荐)
     </label>
 
-    <label class="span-2">
-      收件人邮箱覆盖 (选填)
-      <input name="recipients_override" value="{{ setting.recipients_override or '' }}"
-        placeholder="ops@example.com, manager@example.com">
-      <span class="form-tip">留空则直接发送给上述发信邮箱配置的默认收件人；若填写则覆盖默认收件人。多个邮箱以英文逗号分隔。</span>
-    </label>
+    <div id="dingtalk_fields_container" class="form-grid" style="padding-left: 20px; border-left: 2px dashed #cbd5e1; display: none;">
+      <label class="span-2">
+        钉钉 Webhook 地址
+        <input name="dingtalk_webhook" value="{{ setting.dingtalk_webhook or '' }}" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
+        <span class="form-tip">钉钉群机器人的 Webhook 发信接口完整 URL。</span>
+      </label>
+
+      <label>
+        加签密钥 (Secret) (选填)
+        <input name="dingtalk_secret" value="{{ setting.dingtalk_secret or '' }}" type="password" placeholder="SEC...">
+        <span class="form-tip">若机器人在安全设置中开启了“加签”，请填写以 SEC 开头的签名密钥。</span>
+      </label>
+
+      <label>
+        安全关键词 (选填)
+        <input name="dingtalk_keyword" value="{{ setting.dingtalk_keyword or '' }}" placeholder="例如：巡检">
+        <span class="form-tip">若开启了“自定义关键词”，消息中必须包含该词才能成功发送。</span>
+      </label>
+    </div>
   </div>
 
   <!-- 第四部分：月报专属等待与重试参数 -->
@@ -243,7 +278,23 @@
     }
   }
 
+  function toggleMailFields(checked) {
+    const container = document.getElementById('mail_fields_container');
+    container.style.display = checked ? 'grid' : 'none';
+  }
+
+  function toggleDingtalkFields(checked) {
+    const container = document.getElementById('dingtalk_fields_container');
+    container.style.display = checked ? 'grid' : 'none';
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
+    // 根据初始勾选状态显示/隐藏字段
+    const enableEmailCheckbox = document.getElementsByName('enable_email')[0];
+    const enableDingtalkCheckbox = document.getElementsByName('dingtalk_enabled')[0];
+    toggleMailFields(enableEmailCheckbox.checked);
+    toggleDingtalkFields(enableDingtalkCheckbox.checked);
+
     const configStr = '{{ setting.schedule_config | safe if setting.schedule_config else "" }}';
     let config = null;
     if (configStr) {

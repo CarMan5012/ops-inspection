@@ -428,6 +428,14 @@ def get_periodic_report_setting(report_type: str) -> dict[str, Any] | None:
 
 
 def save_periodic_report_setting(report_type: str, data: dict[str, Any]) -> None:
+    # 拷贝一份以避免直接改写外部传入的 dict 引用
+    data = dict(data)
+    
+    # 自动对钉钉加密存储敏感字段
+    for secret_field in ("dingtalk_webhook", "dingtalk_secret"):
+        if data.get(secret_field):
+            data[secret_field] = normalize_secret_for_storage(str(data.get(secret_field) or ""))
+
     fields = (
         "enabled",
         "name",
@@ -444,6 +452,11 @@ def save_periodic_report_setting(report_type: str, data: dict[str, Any]) -> None
         "recipients_override",
         "schedule_config",
         "send_on_timeout",
+        "enable_email",
+        "dingtalk_enabled",
+        "dingtalk_webhook",
+        "dingtalk_secret",
+        "dingtalk_keyword",
     )
     values = [data.get(field) for field in fields]
     with connect() as conn:
@@ -477,6 +490,7 @@ def save_periodic_report_run(data: dict[str, Any], run_id: int | None = None) ->
         "status",
         "zip_path",
         "mail_status",
+        "dingtalk_status",
         "error_summary",
         "finished_at",
     )
