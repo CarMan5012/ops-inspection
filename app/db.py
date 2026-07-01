@@ -392,7 +392,7 @@ def seed_system_defaults(conn: sqlite3.Connection) -> None:
             (
                 1, 1, "daily", "每天 02:30",
                 '{"frequency": "daily", "time": "02:30"}',
-                90, 90, 90, 90, 90, 90, 90, 0, 3
+                90, 90, 90, 90, 90, 90, 90, 0, 7
             )
         )
     else:
@@ -413,6 +413,14 @@ def seed_system_defaults(conn: sqlite3.Connection) -> None:
                 log_retention_days = 90,
                 browser_state_retention_days = 90
             WHERE report_retention_days = 30
+            """
+        )
+        # 将默认的 3 天保护升级为 7 天
+        conn.execute(
+            """
+            UPDATE storage_cleanup_settings
+            SET protect_recent_days = 7
+            WHERE protect_recent_days = 3
             """
         )
 
