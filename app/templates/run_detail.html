@@ -121,7 +121,7 @@
 
     async function refreshDetailSilently() {
       try {
-        const res = await fetch(`/api/runs/${runId}`);
+        const res = await fetch(`{{ url_for_frontend('api/runs') }}/${runId}`);
         if (!res.ok) {
           if (res.status === 404) {
             clearInterval(watchTimer);

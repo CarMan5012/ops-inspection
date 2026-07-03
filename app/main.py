@@ -108,10 +108,11 @@ def get_root_favicon():
     return FileResponse("app/static/favicon.ico")
 
 
-if settings.frontend_base_path != "/":
-    @app.get(f"{settings.frontend_base_path}/favicon.ico", include_in_schema=False)
-    def get_ops_favicon():
-        return FileResponse("app/static/favicon.ico")
+@app.get("/logo.svg", include_in_schema=False)
+def get_root_logo():
+    return FileResponse("app/static/images/logo.svg", media_type="image/svg+xml")
+
+
 
 
 
@@ -137,6 +138,18 @@ def frontend_redirect(path: str, status_code: int = 303) -> RedirectResponse:
 templates.env.globals["url_for_frontend"] = url_for_frontend
 
 frontend_router = APIRouter(prefix=settings.frontend_base_path if settings.frontend_base_path != "/" else "")
+
+
+@frontend_router.get("/favicon.ico", include_in_schema=False)
+def get_ops_favicon():
+    return FileResponse("app/static/favicon.ico")
+
+
+@frontend_router.get("/logo.svg", include_in_schema=False)
+def get_ops_logo():
+    return FileResponse("app/static/images/logo.svg", media_type="image/svg+xml")
+
+
 
 
 def status_label(value: Any) -> str:
@@ -1685,7 +1698,7 @@ def run_detail(request: Request, run_id: int) -> HTMLResponse:
 
 
 @frontend_router.get("/artifact/{kind}/{run_id}/{filename}", dependencies=[Depends(require_login)])
-def artifact(kind: str, run_id: int, filename: str) -> FileResponse:
+def artifact(request: Request, kind: str, run_id: int, filename: str):
     base = {"screenshots": settings.screenshot_dir, "reports": settings.report_dir}.get(kind)
     if base is None:
         raise HTTPException(status_code=404, detail="未知文件类型")
@@ -1694,6 +1707,90 @@ def artifact(kind: str, run_id: int, filename: str) -> FileResponse:
     new_path = (base / yyyy / mm / dd / f"run-{run_id}" / filename).resolve()
     legacy_path = (base / str(run_id) / filename).resolve()
     
+    accept = request.headers.get("accept", "")
+    raw = request.query_params.get("raw", "")
+    
+    if "text/html" in accept and not raw:
+        favicon_url = url_for_frontend("favicon.ico")
+        raw_url = request.url.path + "?raw=true"
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>查看图片 - {filename}</title>
+    <link rel="shortcut icon" href="{favicon_url}" type="image/x-icon">
+    <style>
+        body {{
+            margin: 0;
+            background: #090c15;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            color: #f1f5f9;
+            font-family: system-ui, -apple-system, sans-serif;
+            overflow: hidden;
+        }}
+        .container {{
+            max-width: 90vw;
+            max-height: 80vh;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: #020617;
+        }}
+        img {{
+            max-width: 100%;
+            max-height: 80vh;
+            display: block;
+            margin: 0 auto;
+            transition: transform 0.2s ease;
+        }}
+        .toolbar {{
+            margin-top: 20px;
+            display: flex;
+            gap: 12px;
+        }}
+        .btn {{
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: #f8fafc;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }}
+        .btn:hover {{
+            background: rgba(255, 255, 255, 0.15);
+            border-color: rgba(255, 255, 255, 0.3);
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <img id="preview" src="{raw_url}" alt="截图预览">
+    </div>
+    <div class="toolbar">
+        <button class="btn" onclick="rotateImage()">↻ 旋转</button>
+        <a class="btn" href="{raw_url}" download>⬇ 下载原图</a>
+        <button class="btn" onclick="window.close()">✕ 关闭</button>
+    </div>
+    <script>
+        let angle = 0;
+        function rotateImage() {{
+            angle = (angle + 90) % 360;
+            document.getElementById('preview').style.transform = `rotate(${{angle}}deg)`;
+        }}
+    </script>
+</body>
+</html>"""
+        return HTMLResponse(content=html_content)
+        
     if new_path.exists() and is_under(new_path, base.resolve()):
         return FileResponse(new_path)
     elif legacy_path.exists() and is_under(legacy_path, base.resolve()):

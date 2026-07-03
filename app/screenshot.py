@@ -612,54 +612,58 @@ def _apply_watermark(
 
     with Image.open(image_path) as orig_img:
         img_rgba = orig_img.convert("RGBA")
-        width, height = img_rgba.size
+        img_rgba.load()
 
-        temp_img = Image.new("RGBA", (1, 1))
-        temp_draw = ImageDraw.Draw(temp_img)
-        try:
-            bbox = temp_draw.multiline_textbbox((0, 0), text, font=font, spacing=DEFAULT_WATERMARK_TEXT_SPACING)
-            offset_x = bbox[0]
-            offset_y = bbox[1]
-            txt_w = bbox[2] - bbox[0]
-            txt_h = bbox[3] - bbox[1]
-        except AttributeError:
-            offset_x = 0
-            offset_y = 0
-            txt_w = max(len(line) for line in text.split("\n")) * font_size
-            txt_h = len(text.split("\n")) * (font_size + DEFAULT_WATERMARK_TEXT_SPACING)
+    width, height = img_rgba.size
 
-        txt_img_w = txt_w + DEFAULT_WATERMARK_TILE_PADDING * 2
-        txt_img_h = txt_h + DEFAULT_WATERMARK_TILE_PADDING * 2
-        txt_img = Image.new("RGBA", (txt_img_w, txt_img_h), (0, 0, 0, 0))
-        draw_txt = ImageDraw.Draw(txt_img)
-        draw_txt.multiline_text(
-            (DEFAULT_WATERMARK_TILE_PADDING - offset_x, DEFAULT_WATERMARK_TILE_PADDING - offset_y),
-            text,
-            font=font,
-            fill=(0, 0, 0, 0),
-            stroke_width=1,
-            stroke_fill=(160, 160, 160, opacity),
-            spacing=DEFAULT_WATERMARK_TEXT_SPACING,
-            align="center",
+    temp_img = Image.new("RGBA", (1, 1))
+    temp_draw = ImageDraw.Draw(temp_img)
+    try:
+        bbox = temp_draw.multiline_textbbox(
+            (0, 0), text, font=font, spacing=DEFAULT_WATERMARK_TEXT_SPACING, align="center"
         )
+        offset_x = bbox[0]
+        offset_y = bbox[1]
+        txt_w = bbox[2] - bbox[0]
+        txt_h = bbox[3] - bbox[1]
+    except AttributeError:
+        offset_x = 0
+        offset_y = 0
+        txt_w = max(len(line) for line in text.split("\n")) * font_size
+        txt_h = len(text.split("\n")) * (font_size + DEFAULT_WATERMARK_TEXT_SPACING)
 
-        resample_bilinear = getattr(getattr(Image, "Resampling", Image), "BILINEAR", Image.BILINEAR)
-        rotated_txt = txt_img.rotate(angle, expand=True, resample=resample_bilinear)
-        rot_w, rot_h = rotated_txt.size
+    txt_img_w = int(txt_w + 1) + DEFAULT_WATERMARK_TILE_PADDING * 2
+    txt_img_h = int(txt_h + 1) + DEFAULT_WATERMARK_TILE_PADDING * 2
+    txt_img = Image.new("RGBA", (txt_img_w, txt_img_h), (0, 0, 0, 0))
+    draw_txt = ImageDraw.Draw(txt_img)
+    draw_txt.multiline_text(
+        (int(DEFAULT_WATERMARK_TILE_PADDING - offset_x), int(DEFAULT_WATERMARK_TILE_PADDING - offset_y)),
+        text,
+        font=font,
+        fill=(0, 0, 0, 0),
+        stroke_width=1,
+        stroke_fill=(160, 160, 160, opacity),
+        spacing=DEFAULT_WATERMARK_TEXT_SPACING,
+        align="center",
+    )
 
-        watermark_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        step_x = rot_w + gap_x
-        step_y = rot_h + gap_y
+    resample_bilinear = getattr(getattr(Image, "Resampling", Image), "BILINEAR", Image.BILINEAR)
+    rotated_txt = txt_img.rotate(angle, expand=True, resample=resample_bilinear)
+    rot_w, rot_h = rotated_txt.size
 
-        for y in range(-rot_h, height + rot_h, step_y):
-            for x in range(-rot_w, width + rot_w, step_x):
-                watermark_layer.paste(rotated_txt, (x, y), rotated_txt)
+    watermark_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    step_x = rot_w + gap_x
+    step_y = rot_h + gap_y
 
-        combined = Image.alpha_composite(img_rgba, watermark_layer)
-        if image_path.suffix.lower() in {".jpg", ".jpeg"}:
-            combined.convert("RGB").save(image_path)
-        else:
-            combined.save(image_path)
+    for y in range(-rot_h, height + rot_h, step_y):
+        for x in range(-rot_w, width + rot_w, step_x):
+            watermark_layer.paste(rotated_txt, (x, y), rotated_txt)
+
+    combined = Image.alpha_composite(img_rgba, watermark_layer)
+    if image_path.suffix.lower() in {".jpg", ".jpeg"}:
+        combined.convert("RGB").save(image_path)
+    else:
+        combined.save(image_path)
 
     logger.info(f"已为截图添加水印: {image_path}")
 
