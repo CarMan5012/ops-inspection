@@ -598,23 +598,31 @@ def _apply_watermark(
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
 
-    font = None
-    for path_str in font_paths:
-        font_path = Path(path_str)
-        if font_path.exists():
-            try:
-                font = ImageFont.truetype(str(font_path), font_size)
-                break
-            except Exception:
-                continue
-    if font is None:
-        font = ImageFont.load_default()
-
     with Image.open(image_path) as orig_img:
         img_rgba = orig_img.convert("RGBA")
         img_rgba.load()
 
     width, height = img_rgba.size
+
+    # 根据图片的宽度对字号与横纵间距进行自适应比例缩放（以 1920px 宽的截图作为标准 1.0 倍基准）
+    scale = width / 1920.0
+    scale = max(0.4, min(scale, 2.5))  # 将缩放因子限制在 [0.4, 2.5] 合理区间内，保证各种分辨率下的最佳观感
+
+    dynamic_font_size = max(10, min(72, int(font_size * scale)))
+    dynamic_gap_x = max(20, min(800, int(gap_x * scale)))
+    dynamic_gap_y = max(20, min(800, int(gap_y * scale)))
+
+    font = None
+    for path_str in font_paths:
+        font_path = Path(path_str)
+        if font_path.exists():
+            try:
+                font = ImageFont.truetype(str(font_path), dynamic_font_size)
+                break
+            except Exception:
+                continue
+    if font is None:
+        font = ImageFont.load_default()
 
     temp_img = Image.new("RGBA", (1, 1))
     temp_draw = ImageDraw.Draw(temp_img)
@@ -629,8 +637,8 @@ def _apply_watermark(
     except AttributeError:
         offset_x = 0
         offset_y = 0
-        txt_w = max(len(line) for line in text.split("\n")) * font_size
-        txt_h = len(text.split("\n")) * (font_size + DEFAULT_WATERMARK_TEXT_SPACING)
+        txt_w = max(len(line) for line in text.split("\n")) * dynamic_font_size
+        txt_h = len(text.split("\n")) * (dynamic_font_size + DEFAULT_WATERMARK_TEXT_SPACING)
 
     txt_img_w = int(txt_w + 1) + DEFAULT_WATERMARK_TILE_PADDING * 2
     txt_img_h = int(txt_h + 1) + DEFAULT_WATERMARK_TILE_PADDING * 2
@@ -652,8 +660,8 @@ def _apply_watermark(
     rot_w, rot_h = rotated_txt.size
 
     watermark_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    step_x = rot_w + gap_x
-    step_y = rot_h + gap_y
+    step_x = rot_w + dynamic_gap_x
+    step_y = rot_h + dynamic_gap_y
 
     for y in range(-rot_h, height + rot_h, step_y):
         for x in range(-rot_w, width + rot_w, step_x):
