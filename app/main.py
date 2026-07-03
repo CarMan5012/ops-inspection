@@ -103,6 +103,18 @@ if settings.frontend_base_path != "/":
     app.mount(f"{settings.frontend_base_path}/static", StaticFiles(directory="app/static"), name="static_prefix")
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def get_root_favicon():
+    return FileResponse("app/static/favicon.ico")
+
+
+if settings.frontend_base_path != "/":
+    @app.get(f"{settings.frontend_base_path}/favicon.ico", include_in_schema=False)
+    def get_ops_favicon():
+        return FileResponse("app/static/favicon.ico")
+
+
+
 def url_for_frontend(path: str) -> str:
     base = settings.frontend_base_path
     if base == "/":
