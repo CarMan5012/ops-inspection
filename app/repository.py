@@ -50,6 +50,7 @@ def save_job(data: dict[str, Any], job_id: int | None = None) -> int:
         "send_mail",
         "browser_width",
         "browser_height",
+        "browser_scale_factor",
         "headless",
         "schedule_mode",
         "schedule_label",

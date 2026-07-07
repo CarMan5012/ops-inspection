@@ -68,6 +68,7 @@ def init_db() -> None:
                 send_mail INTEGER NOT NULL DEFAULT 0,
                 browser_width INTEGER NOT NULL DEFAULT 1920,
                 browser_height INTEGER NOT NULL DEFAULT 1080,
+                browser_scale_factor REAL NOT NULL DEFAULT 1.5,
                 headless INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -263,6 +264,7 @@ def init_db() -> None:
             ("screenshot_items", "watermark_gap_y", "INTEGER DEFAULT 140"),
             ("screenshot_items", "watermark_angle", "INTEGER DEFAULT -45"),
             ("screenshot_items", "taskbar_enabled", "INTEGER DEFAULT 1"),
+            ("report_jobs", "browser_scale_factor", "REAL DEFAULT 1.5"),
         ]
         for table, col, t in migrations:
             try:

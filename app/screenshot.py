@@ -219,6 +219,7 @@ def _capture_once(
     auth_profile = get_auth_profile(item.get("auth_profile_id"))
     width = int(item.get("browser_width") or job.get("browser_width") or 1920)
     height = int(item.get("browser_height") or job.get("browser_height") or 1080)
+    scale_factor = float(job.get("browser_scale_factor") if job.get("browser_scale_factor") is not None else 1.5)
     timeout_ms = int(item.get("timeout_seconds") or 60) * 1000
     screenshot_dir = get_screenshot_dir(run_id)
     file_name = f"{safe_name(item.get('name', 'screenshot'))}{suffix}_{timestamp_text()}.png"
@@ -241,7 +242,7 @@ def _capture_once(
                 "args": [
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
-                    "--force-device-scale-factor=1",
+                    f"--force-device-scale-factor={scale_factor}",
                     "--high-dpi-support=1"
                 ]
             }
@@ -294,10 +295,11 @@ def _capture_with_browser(
 ) -> CaptureResult:
     auth_id = auth_profile["id"] if auth_profile else None
     
+    scale_factor = float(job.get("browser_scale_factor") if job.get("browser_scale_factor") is not None else 1.5)
     if contexts is not None and auth_id in contexts:
         context = contexts[auth_id]
     else:
-        context = _new_context(browser, auth_profile, width, height)
+        context = _new_context(browser, auth_profile, width, height, scale_factor)
         if contexts is not None:
             contexts[auth_id] = context
             
@@ -353,14 +355,14 @@ def _capture_with_browser(
     return CaptureResult(status="success", file_path=str(output_path))
 
 
-def _new_context(browser: Any, auth_profile: dict[str, Any] | None, width: int, height: int) -> BrowserContext:
+def _new_context(browser: Any, auth_profile: dict[str, Any] | None, width: int, height: int, scale_factor: float = 1.5) -> BrowserContext:
     state_path = _storage_state_path(auth_profile)
     kwargs: dict[str, Any] = {
         "viewport": {"width": width, "height": height},
         "ignore_https_errors": True,
         "locale": "zh-CN",
         "timezone_id": settings.default_timezone,
-        "device_scale_factor": 1.0,
+        "device_scale_factor": scale_factor,
     }
     if state_path and state_path.exists():
         logger.info(f"载入缓存的浏览器状态文件: {state_path}")
@@ -813,9 +815,11 @@ def _apply_watermark(
     watermark_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     step_x = rot_w + gap_x
     step_y = rot_h + gap_y
+    start_x = round(width * 0.04)
+    start_y = round(height * 0.04)
 
-    for y in range(-rot_h, height + rot_h, step_y):
-        for x in range(-rot_w, width + rot_w, step_x):
+    for y in range(start_y, height + rot_h, step_y):
+        for x in range(start_x, width + rot_w, step_x):
             watermark_layer.paste(rotated_txt, (x, y), rotated_txt)
 
     combined = Image.alpha_composite(img_rgba, watermark_layer)

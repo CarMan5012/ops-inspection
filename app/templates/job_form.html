@@ -126,6 +126,11 @@
       <input name="browser_height" type="number" value="{{ job.browser_height or 1080 }}" required>
       <span class="form-tip">模拟浏览器窗口的高度（推荐 1080）。</span>
     </label>
+    <label>
+      浏览器显示缩放比例 (DPR) <span style="color: var(--danger);">*</span>
+      <input name="browser_scale_factor" type="number" step="0.1" min="0.5" max="3.0" value="{{ job.browser_scale_factor if job.browser_scale_factor is not None else 1.5 }}" required>
+      <span class="form-tip">页面渲染缩放比（1.5 代表 150%，默认为 1.5。配合分辨率可以得到合适大小字体的排版效果）。</span>
+    </label>
     
     <div class="span-2" style="display: flex; gap: 24px; margin: 8px 0; flex-wrap: wrap;">
       <label class="check">

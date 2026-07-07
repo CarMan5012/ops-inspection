@@ -76,12 +76,13 @@ def run_job(job_id: int, run_id: int | None = None) -> int:
 
         any_real_capture = any(bool(item.get("real_browser_capture") if "real_browser_capture" in item else 1) for item in items)
         headless_val = False if any_real_capture else True
+        scale_factor = float(job.get("browser_scale_factor") if job.get("browser_scale_factor") is not None else 1.5)
         launch_kwargs = {
             "headless": headless_val,
             "args": [
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
-                "--force-device-scale-factor=1",
+                f"--force-device-scale-factor={scale_factor}",
                 "--high-dpi-support=1"
             ]
         }
