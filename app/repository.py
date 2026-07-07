@@ -31,7 +31,12 @@ def get_job(job_id: int) -> dict[str, Any] | None:
             """,
             (job_id,),
         ).fetchone()
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    data = dict(row)
+    if "browser_scale_factor" not in data or data["browser_scale_factor"] is None:
+        data["browser_scale_factor"] = 1.5
+    return data
 
 def save_job(data: dict[str, Any], job_id: int | None = None) -> int:
     data = dict(data)
