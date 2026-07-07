@@ -118,13 +118,13 @@
   <div class="form-grid" style="margin-bottom: 24px;">
     <label>
       默认浏览器宽度 (px) <span style="color: var(--danger);">*</span>
-      <input name="browser_width" type="number" value="{{ job.browser_width or 1920 }}" required>
-      <span class="form-tip">模拟浏览器窗口的宽度，常用于自适应看板分辨率（推荐 1920）。</span>
+      <input name="browser_width" type="number" value="{{ job.browser_width or 3840 }}" required>
+      <span class="form-tip">模拟浏览器窗口的宽度，常用于自适应看板分辨率（推荐 3840）。</span>
     </label>
     <label>
       默认浏览器高度 (px) <span style="color: var(--danger);">*</span>
-      <input name="browser_height" type="number" value="{{ job.browser_height or 1080 }}" required>
-      <span class="form-tip">模拟浏览器窗口的高度（推荐 1080）。</span>
+      <input name="browser_height" type="number" value="{{ job.browser_height or 2160 }}" required>
+      <span class="form-tip">模拟浏览器窗口的高度（推荐 2160）。</span>
     </label>
     <label>
       浏览器显示缩放比例 (DPR) <span style="color: var(--danger);">*</span>

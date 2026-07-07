@@ -94,6 +94,19 @@ DEFAULT_SUBMIT_SELECTOR = (
 )
 
 
+
+def _browser_scale_factor(job: dict[str, Any]) -> float:
+    try:
+        raw_scale = job.get("browser_scale_factor") if job.get("browser_scale_factor") is not None else 1.5
+        scale_factor = float(raw_scale)
+    except (TypeError, ValueError):
+        scale_factor = 1.5
+    return max(scale_factor, 0.1)
+
+
+def _css_viewport_size(physical_width: int, physical_height: int, scale_factor: float) -> tuple[int, int]:
+    return max(1, round(physical_width / scale_factor)), max(1, round(physical_height / scale_factor))
+
 def _selector_with_fallback(configured_selector: Any, fallback_selector: str) -> str:
     configured = str(configured_selector or "").strip()
     if not configured:
@@ -217,9 +230,9 @@ def _capture_once(
     contexts: dict[Any, Any] = None,
 ) -> CaptureResult:
     auth_profile = get_auth_profile(item.get("auth_profile_id"))
-    width = int(item.get("browser_width") or job.get("browser_width") or 1920)
-    height = int(item.get("browser_height") or job.get("browser_height") or 1080)
-    scale_factor = float(job.get("browser_scale_factor") if job.get("browser_scale_factor") is not None else 1.5)
+    width = int(item.get("browser_width") or job.get("browser_width") or 3840)
+    height = int(item.get("browser_height") or job.get("browser_height") or 2160)
+    scale_factor = _browser_scale_factor(job)
     timeout_ms = int(item.get("timeout_seconds") or 60) * 1000
     screenshot_dir = get_screenshot_dir(run_id)
     file_name = f"{safe_name(item.get('name', 'screenshot'))}{suffix}_{timestamp_text()}.png"
@@ -230,7 +243,7 @@ def _capture_once(
     logger.info(f"原始 URL: {raw_url} | 解析后 URL: {resolved_url}")
 
     is_real_capture = bool(item.get("real_browser_capture") if "real_browser_capture" in item else 1)
-    capture_mode = str(item.get("capture_mode") or "full_page")
+    capture_mode = str(item.get("capture_mode") or "viewport")
     if is_real_capture and capture_mode == "full_page":
         logger.warning("启用真实浏览器截图时不支持整页长截图 (full_page)，已自动降级为视口截图 (viewport) 模式。")
 
@@ -294,19 +307,24 @@ def _capture_with_browser(
     contexts: dict[Any, Any] | None,
 ) -> CaptureResult:
     auth_id = auth_profile["id"] if auth_profile else None
-    
-    scale_factor = float(job.get("browser_scale_factor") if job.get("browser_scale_factor") is not None else 1.5)
-    if contexts is not None and auth_id in contexts:
-        context = contexts[auth_id]
+    scale_factor = _browser_scale_factor(job)
+    viewport_width, viewport_height = _css_viewport_size(width, height, scale_factor)
+    context_key = (auth_id, viewport_width, viewport_height, round(scale_factor, 3))
+    logger.info(
+        f"截图尺寸: physical={width}x{height}, css_viewport={viewport_width}x{viewport_height}, dpr={scale_factor}"
+    )
+
+    if contexts is not None and context_key in contexts:
+        context = contexts[context_key]
     else:
-        context = _new_context(browser, auth_profile, width, height, scale_factor)
+        context = _new_context(browser, auth_profile, viewport_width, viewport_height, scale_factor)
         if contexts is not None:
-            contexts[auth_id] = context
+            contexts[context_key] = context
             
     page = context.new_page()
     try:
         page.set_default_timeout(timeout_ms)
-        page.set_viewport_size({"width": width, "height": height})
+        page.set_viewport_size({"width": viewport_width, "height": viewport_height})
         
         _ensure_logged_in(context, page, auth_profile, timeout_ms)
         
@@ -319,20 +337,20 @@ def _capture_with_browser(
             safe_delete_auth_state(auth_profile)
             
             page.close()
-            if contexts is not None and auth_id in contexts:
+            if contexts is not None and context_key in contexts:
                 try:
-                    contexts[auth_id].close()
+                    contexts[context_key].close()
                 except Exception:
                     pass
-                del contexts[auth_id]
+                del contexts[context_key]
                 
-            context = _new_context(browser, auth_profile, width, height)
+            context = _new_context(browser, auth_profile, viewport_width, viewport_height, scale_factor)
             if contexts is not None:
-                contexts[auth_id] = context
+                contexts[context_key] = context
                 
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
-            page.set_viewport_size({"width": width, "height": height})
+            page.set_viewport_size({"width": viewport_width, "height": viewport_height})
             
             _ensure_logged_in(context, page, auth_profile, timeout_ms)
             logger.info(f"登录自愈重试完毕，再次载入截图页面 URL: {resolved_url}")
@@ -341,7 +359,7 @@ def _capture_with_browser(
         _assert_not_login_page_before_screenshot(page, auth_profile)
         _wait_for_page(page, item, timeout_ms)
         _assert_not_login_page_before_screenshot(page, auth_profile)
-        _take_screenshot(page, item, output_path, is_real_capture)
+        _take_screenshot(page, item, output_path, is_real_capture, width, height)
         _apply_configured_watermark(output_path, item)
         _apply_simulated_taskbar(output_path, item)
         _persist_storage_state(context, auth_profile)
@@ -661,10 +679,10 @@ def _draw_taskbar_clock(taskbar: Any, now: datetime) -> None:
     text_color = (24, 28, 32, 255) if brightness > 150 else (245, 245, 245, 255)
 
     draw = ImageDraw.Draw(taskbar)
-    font = _taskbar_font(max(11, round(height * 0.22)))
-    right = width - max(8, round(height * 0.18))
-    time_y = max(2, round(height * 0.12))
-    date_y = max(time_y + round(height * 0.34), round(height * 0.54))
+    font = _taskbar_font(max(12, round(height * 0.24)))
+    right = width - max(22, round(height * 0.3))
+    time_y = max(2, round(height * 0.1))
+    date_y = time_y + round(height * 0.27)
 
     for text, y in ((time_str, time_y), (date_str, date_y)):
         bbox = draw.textbbox((0, 0), text, font=font)
@@ -864,7 +882,14 @@ def _trim_mss_desktop_margin(image_path: Path, max_trim: int = 40) -> None:
         logger.info(f"Trimmed mss desktop margin: left={left}, top={top}, file={image_path}")
 
 
-def _take_screenshot(page: Page, item: dict[str, Any], output_path: Path, is_real_capture: bool) -> None:
+def _take_screenshot(
+    page: Page,
+    item: dict[str, Any],
+    output_path: Path,
+    is_real_capture: bool,
+    expected_width: int | None = None,
+    expected_height: int | None = None,
+) -> None:
     if is_real_capture:
         logger.info("真实浏览器窗口截图模式已启用，正在使用 mss 进行系统级屏幕截图...")
         
@@ -893,7 +918,19 @@ def _take_screenshot(page: Page, item: dict[str, Any], output_path: Path, is_rea
                     raise RuntimeError("系统截图失败：无法获取任何有效的虚拟显示器设备（sct.monitors 为空或不足）")
                 # monitors[0] 是所有监视器的合集，monitors[1] 是第一个显示屏
                 monitor = sct.monitors[1]
-                sct_img = sct.grab(monitor)
+                monitor_width = int(monitor["width"])
+                monitor_height = int(monitor["height"])
+                target_width = int(expected_width or monitor_width)
+                target_height = int(expected_height or monitor_height)
+                if monitor_width < target_width or monitor_height < target_height:
+                    raise RuntimeError(
+                        f"虚拟屏幕尺寸 {monitor_width}x{monitor_height} 小于截图配置 {target_width}x{target_height}。"
+                        "请设置 XVFB_WIDTH/XVFB_HEIGHT 与截图分辨率一致，并重建或重启容器。"
+                    )
+                capture_area = dict(monitor)
+                capture_area["width"] = target_width
+                capture_area["height"] = target_height
+                sct_img = sct.grab(capture_area)
                 mss.tools.to_png(sct_img.rgb, sct_img.size, output=str(output_path))
                 _trim_mss_desktop_margin(output_path)
                 logger.info(f"系统级真实窗口截图获取成功并保存至: {output_path}")
@@ -904,7 +941,7 @@ def _take_screenshot(page: Page, item: dict[str, Any], output_path: Path, is_rea
             ) from exc
     else:
         # 普通 Playwright 截图
-        capture_mode = str(item.get("capture_mode") or "full_page")
+        capture_mode = str(item.get("capture_mode") or "viewport")
         selector = str(item.get("css_selector") or "").strip()
         logger.info(f"开始普通截图操作. 模式: {capture_mode}, 局部选择器: '{selector}'")
         if capture_mode == "selector" and selector:

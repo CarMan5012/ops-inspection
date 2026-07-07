@@ -1081,7 +1081,7 @@ function openJobModal(job = null) {
       </div>
       
       ${selectField("邮件配置", "mail_profile_id", job?.mail_profile_id || "", state.mailProfiles.map((profile) => [profile.id, profile.name]))}
-      ${field("时间范围", "time_range_label", job?.time_range_label || "最近 24 小时")}
+      ${field("时间范围", "time_range_label", job?.time_range_label || "最近24小时")}
       
       <label class="check">
         <input type="checkbox" name="send_mail_on_complete" ${sendMailOnComplete ? "checked" : ""}>
@@ -1104,8 +1104,12 @@ function openJobModal(job = null) {
         <summary>高级浏览器设置</summary>
         <div class="form-grid wide advanced-grid">
           ${field("报告标题", "report_title", job?.report_title || "自动化巡检报告")}
-          ${field("浏览器宽度", "browser_width", job?.browser_width || 1920, "number")}
-          ${field("浏览器高度", "browser_height", job?.browser_height || 1080, "number")}
+          ${field("浏览器宽度", "browser_width", job?.browser_width || 3840, "number")}
+          ${field("浏览器高度", "browser_height", job?.browser_height || 2160, "number")}
+          <label>
+            DPR / Display Scale
+            <input name="browser_scale_factor" type="number" step="0.1" min="0.5" max="3.0" value="${escapeAttr(job?.browser_scale_factor ?? 1.5)}" required>
+          </label>
         </div>
       </details>
       

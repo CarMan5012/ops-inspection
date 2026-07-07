@@ -88,8 +88,8 @@ def run_job(job_id: int, run_id: int | None = None) -> int:
         }
         
         if any_real_capture:
-            first_w = int(items[0].get("browser_width") or job.get("browser_width") or 1920)
-            first_h = int(items[0].get("browser_height") or job.get("browser_height") or 1080)
+            first_w = int(items[0].get("browser_width") or job.get("browser_width") or 3840)
+            first_h = int(items[0].get("browser_height") or job.get("browser_height") or 2160)
             launch_kwargs["args"].extend([
                 f"--window-size={first_w},{first_h}",
                 "--start-maximized"

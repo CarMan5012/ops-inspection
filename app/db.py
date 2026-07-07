@@ -66,8 +66,8 @@ def init_db() -> None:
                 report_title TEXT NOT NULL DEFAULT '自动化巡检报告',
                 mail_profile_id INTEGER,
                 send_mail INTEGER NOT NULL DEFAULT 0,
-                browser_width INTEGER NOT NULL DEFAULT 1920,
-                browser_height INTEGER NOT NULL DEFAULT 1080,
+                browser_width INTEGER NOT NULL DEFAULT 3840,
+                browser_height INTEGER NOT NULL DEFAULT 2160,
                 browser_scale_factor REAL NOT NULL DEFAULT 1.5,
                 headless INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -83,7 +83,7 @@ def init_db() -> None:
                 item_type TEXT NOT NULL DEFAULT 'web',
                 url TEXT NOT NULL,
                 section TEXT NOT NULL DEFAULT '巡检截图',
-                capture_mode TEXT NOT NULL DEFAULT 'full_page',
+                capture_mode TEXT NOT NULL DEFAULT 'viewport',
                 css_selector TEXT DEFAULT '',
                 wait_selector TEXT DEFAULT '',
                 wait_seconds REAL NOT NULL DEFAULT 3,
@@ -278,8 +278,40 @@ def init_db() -> None:
         except sqlite3.OperationalError:
             pass
 
+        migrate_schema_defaults(conn)
+
         seed_system_defaults(conn)
+
         migrate_sensitive_values(conn)
+
+
+def migrate_schema_defaults(conn: sqlite3.Connection) -> None:
+    replacements = [
+        ("report_jobs", "browser_width INTEGER NOT NULL DEFAULT 1920", "browser_width INTEGER NOT NULL DEFAULT 3840"),
+        ("report_jobs", "browser_height INTEGER NOT NULL DEFAULT 1080", "browser_height INTEGER NOT NULL DEFAULT 2160"),
+        ("screenshot_items", "capture_mode TEXT NOT NULL DEFAULT 'full_page'", "capture_mode TEXT NOT NULL DEFAULT 'viewport'"),
+    ]
+    changed = False
+    conn.execute("PRAGMA writable_schema = ON")
+    try:
+        for table, old, new in replacements:
+            cur = conn.execute(
+                """
+                UPDATE sqlite_schema
+                SET sql = replace(sql, ?, ?)
+                WHERE type = 'table' AND name = ? AND sql LIKE ?
+                """,
+                (old, new, table, f"%{old}%"),
+            )
+            changed = changed or cur.rowcount > 0
+    finally:
+        conn.execute("PRAGMA writable_schema = OFF")
+    if changed:
+        version = conn.execute("PRAGMA schema_version").fetchone()[0]
+        conn.execute(f"PRAGMA schema_version = {int(version) + 1}")
+        result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        if result != "ok":
+            raise sqlite3.DatabaseError(f"sqlite schema default migration failed: {result}")
 
 
 def migrate_sensitive_values(conn: sqlite3.Connection) -> None:

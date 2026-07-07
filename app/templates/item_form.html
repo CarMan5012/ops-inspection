@@ -34,7 +34,7 @@
     </label>
     <label>
       Word 报告所属章节名称 <span style="color: var(--danger);">* (必填)</span>
-      <input name="section" value="{{ item.section or '1服务器资源' }}" required list="template-section-options" placeholder="如：1服务器资源">
+      <input name="section" value="{{ item.section or '巡检截图' }}" required list="template-section-options" placeholder="如：1服务器资源">
       <datalist id="template-section-options">
         {% for section in template_sections or [] %}
         <option value="{{ section }}"></option>
@@ -168,12 +168,12 @@ dwangchengyi7(王诚毅){% endif %}</textarea>
   <div class="form-grid" style="margin-bottom: 24px;">
     <label>
       单独浏览器宽度 (px)
-      <input name="browser_width" type="number" value="{{ item.browser_width or '' }}" placeholder="默认使用全局宽度 (例如: 1920)">
+      <input name="browser_width" type="number" value="{{ item.browser_width or '' }}" placeholder="默认使用全局宽度 (例如: 3840)">
       <span class="form-tip">可选。为本项独立指定浏览器宽度，留空则继承巡检任务中的全局默认宽度。</span>
     </label>
     <label>
       单独浏览器高度 (px)
-      <input name="browser_height" type="number" value="{{ item.browser_height or '' }}" placeholder="默认使用全局高度 (例如: 1080)">
+      <input name="browser_height" type="number" value="{{ item.browser_height or '' }}" placeholder="默认使用全局高度 (例如: 2160)">
       <span class="form-tip">可选。为本项独立指定浏览器高度，留空则继承巡检任务中的全局默认高度。</span>
     </label>
     <label>
