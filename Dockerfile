@@ -8,7 +8,10 @@ ENV PYTHONUNBUFFERED=1 \
     APP_PORT=8000 \
     TZ=Asia/Shanghai \
     DEBIAN_FRONTEND=noninteractive \
-    DISPLAY=:99
+    DISPLAY=:99 \
+    XVFB_WIDTH=3840 \
+    XVFB_HEIGHT=2160 \
+    XVFB_DEPTH=24
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-noto-cjk \
@@ -34,4 +37,4 @@ RUN mkdir -p /app/data/screenshots /app/data/reports /app/data/logs /app/data/br
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "rm -f /tmp/.X99-lock && Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}"]
+CMD ["sh", "-c", "rm -f /tmp/.X99-lock && Xvfb ${DISPLAY:-:99} -screen 0 ${XVFB_WIDTH:-3840}x${XVFB_HEIGHT:-2160}x${XVFB_DEPTH:-24} -ac +extension GLX +render -noreset & uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}"]

@@ -76,17 +76,23 @@ def run_job(job_id: int, run_id: int | None = None) -> int:
 
         any_real_capture = any(bool(item.get("real_browser_capture") if "real_browser_capture" in item else 1) for item in items)
         headless_val = False if any_real_capture else True
-        launch_kwargs = {"headless": headless_val}
+        launch_kwargs = {
+            "headless": headless_val,
+            "args": [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--force-device-scale-factor=1",
+                "--high-dpi-support=1"
+            ]
+        }
         
         if any_real_capture:
             first_w = int(items[0].get("browser_width") or job.get("browser_width") or 1920)
             first_h = int(items[0].get("browser_height") or job.get("browser_height") or 1080)
-            launch_kwargs["args"] = [
+            launch_kwargs["args"].extend([
                 f"--window-size={first_w},{first_h}",
-                "--start-maximized",
-                "--no-sandbox",
-                "--disable-dev-shm-usage"
-            ]
+                "--start-maximized"
+            ])
 
         logger.info(f"启动批处理 Chromium 浏览器 (headless={launch_kwargs['headless']})...")
         with sync_playwright() as p:

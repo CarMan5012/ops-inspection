@@ -236,14 +236,20 @@ def _capture_once(
     if browser is None:
         with sync_playwright() as p:
             headless_val = False if is_real_capture else True
-            launch_kwargs = {"headless": headless_val}
-            if is_real_capture:
-                launch_kwargs["args"] = [
-                    "--window-position=0,0",
-                    f"--window-size={width},{height}",
+            launch_kwargs = {
+                "headless": headless_val,
+                "args": [
                     "--no-sandbox",
-                    "--disable-dev-shm-usage"
+                    "--disable-dev-shm-usage",
+                    "--force-device-scale-factor=1",
+                    "--high-dpi-support=1"
                 ]
+            }
+            if is_real_capture:
+                launch_kwargs["args"].extend([
+                    "--window-position=0,0",
+                    f"--window-size={width},{height}"
+                ])
             logger.info(f"启动单次使用 chromium 浏览器 (headless={headless_val})...")
             tmp_browser = p.chromium.launch(**launch_kwargs)
             try:
@@ -354,6 +360,7 @@ def _new_context(browser: Any, auth_profile: dict[str, Any] | None, width: int, 
         "ignore_https_errors": True,
         "locale": "zh-CN",
         "timezone_id": settings.default_timezone,
+        "device_scale_factor": 1.0,
     }
     if state_path and state_path.exists():
         logger.info(f"载入缓存的浏览器状态文件: {state_path}")
@@ -929,12 +936,21 @@ def test_auth_profile_login(auth_profile_id: int) -> dict[str, Any]:
     try:
         with sync_playwright() as p:
             logger.info(f"启动 chromium 测试浏览器登录: {login_url}")
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--force-device-scale-factor=1",
+                    "--high-dpi-support=1"
+                ]
+            )
             context = browser.new_context(
                 ignore_https_errors=True,
                 locale="zh-CN",
                 timezone_id=settings.default_timezone,
                 viewport={"width": 1280, "height": 720},
+                device_scale_factor=1.0,
             )
             page = context.new_page()
             page.set_default_timeout(timeout_ms)

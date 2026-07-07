@@ -13,6 +13,9 @@ services:
       APP_DATA_DIR: /app/data
       APP_SECRET_KEY_FILE: /run/secrets/app_secret_key
       DISPLAY: ":99"
+      XVFB_WIDTH: ${XVFB_WIDTH:-3840}
+      XVFB_HEIGHT: ${XVFB_HEIGHT:-2160}
+      XVFB_DEPTH: ${XVFB_DEPTH:-24}
       TZ: Asia/Shanghai
     volumes:
       - ./data:/app/data
