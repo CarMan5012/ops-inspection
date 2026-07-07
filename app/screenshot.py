@@ -680,14 +680,20 @@ def _draw_taskbar_clock(taskbar: Any, now: datetime) -> None:
 
     draw = ImageDraw.Draw(taskbar)
     font = _taskbar_font(max(12, round(height * 0.24)))
-    right = width - max(22, round(height * 0.3))
-    time_y = max(2, round(height * 0.1))
-    date_y = time_y + round(height * 0.27)
+    right = width - max(30, round(height * 0.44))
+    gap = max(3, round(height * 0.11))
+    time_bbox = draw.textbbox((0, 0), time_str, font=font)
+    date_bbox = draw.textbbox((0, 0), date_str, font=font)
+    time_h = time_bbox[3] - time_bbox[1]
+    date_h = date_bbox[3] - date_bbox[1]
+    top = max(0, round((height - time_h - gap - date_h) / 2))
 
-    for text, y in ((time_str, time_y), (date_str, date_y)):
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_w = bbox[2] - bbox[0]
-        draw.text((right - text_w, y), text, fill=text_color, font=font)
+    rows = (
+        (time_str, time_bbox, top - time_bbox[1]),
+        (date_str, date_bbox, top + time_h + gap - date_bbox[1]),
+    )
+    for text, bbox, y in rows:
+        draw.text((right - bbox[2], y), text, fill=text_color, font=font)
 
 
 def _apply_taskbar_template(image_path: Path, template_path: Path) -> None:
