@@ -278,8 +278,6 @@ def init_db() -> None:
 
         seed_system_defaults(conn)
         migrate_sensitive_values(conn)
-    with connect() as conn:
-        migrate_sensitive_values(conn)
 
 
 def migrate_sensitive_values(conn: sqlite3.Connection) -> None:
@@ -289,7 +287,7 @@ def migrate_sensitive_values(conn: sqlite3.Connection) -> None:
         data = dict(row)
         raw_secret = str(data.get("password_secret") or data.get("password") or "")
         encrypted = normalize_secret_for_storage(raw_secret, legacy_base64=True)
-        if encrypted or data.get("password"):
+        if encrypted != (data.get("password_secret") or "") or (data.get("password") or "") != "":
             conn.execute(
                 """
                 UPDATE auth_profiles
@@ -303,7 +301,7 @@ def migrate_sensitive_values(conn: sqlite3.Connection) -> None:
         data = dict(row)
         raw_secret = str(data.get("password_secret") or data.get("password") or "")
         encrypted = normalize_secret_for_storage(raw_secret, legacy_base64=True)
-        if encrypted or data.get("password"):
+        if encrypted != (data.get("password_secret") or "") or (data.get("password") or "") != "":
             conn.execute(
                 """
                 UPDATE mail_profiles

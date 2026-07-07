@@ -209,7 +209,7 @@ dwangchengyi7(王诚毅){% endif %}</textarea>
     }
   }
 
-  function onRealBrowserCaptureChange(checked) {
+  function onRealBrowserCaptureChange(checked, isInit = false) {
     const select = document.getElementsByName('capture_mode')[0];
     const fullPageOpt = document.getElementById('opt_full_page');
     const selectorOpt = document.getElementById('opt_selector');
@@ -217,16 +217,20 @@ dwangchengyi7(王诚毅){% endif %}</textarea>
     const cssInput = cssContainer ? cssContainer.querySelector('input') : null;
 
     if (checked) {
-      select.value = 'viewport';
-      toggleCssSelector('viewport');
+      if (!isInit) {
+        select.value = 'viewport';
+        toggleCssSelector('viewport');
+        if (cssInput) {
+          cssInput.value = '';
+        }
+      }
       if (fullPageOpt) {
         fullPageOpt.disabled = true;
       }
       if (selectorOpt) {
         selectorOpt.disabled = true;
       }
-      if (cssInput) {
-        cssInput.value = '';
+      if (!isInit && cssInput) {
         cssInput.removeAttribute('required');
       }
     } else {
@@ -245,13 +249,21 @@ dwangchengyi7(王诚毅){% endif %}</textarea>
       return;
     }
     config.style.opacity = checked ? '1' : '0.55';
+    const inputs = config.querySelectorAll('input, textarea');
+    inputs.forEach(el => {
+      if (checked) {
+        el.removeAttribute('disabled');
+      } else {
+        el.setAttribute('disabled', 'disabled');
+      }
+    });
   }
 
   // Initialize state
   document.addEventListener('DOMContentLoaded', () => {
     const checkbox = document.getElementById('real_browser_capture');
     if (checkbox) {
-      onRealBrowserCaptureChange(checkbox.checked);
+      onRealBrowserCaptureChange(checkbox.checked, true);
     }
     toggleCssSelector(document.getElementsByName('capture_mode')[0].value);
     const watermarkCheckbox = document.getElementById('watermark_enabled');

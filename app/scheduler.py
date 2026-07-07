@@ -71,6 +71,22 @@ def reload_jobs() -> None:
                         max_instances=1,
                         coalesce=True,
                     )
+
+                # 同步回写实际生成的 Cron 表达式到数据库的 cron_expression 字段
+                try:
+                    actual_mins = ",".join(sorted(list(set(str(t.fields[6]) for t in triggers)), key=int))
+                    actual_hours = ",".join(sorted(list(set(str(t.fields[5]) for t in triggers)), key=int))
+                    actual_dow = str(triggers[0].fields[4])
+                    if actual_dow == "mon-fri":
+                        actual_dow = "1-5"
+                    elif actual_dow == "*":
+                        actual_dow = "*"
+                    actual_cron = f"{actual_mins} {actual_hours} * * {actual_dow}"
+                    with connect() as conn:
+                        conn.execute("UPDATE report_jobs SET cron_expression = ? WHERE id = ?", (actual_cron, item["id"]))
+                except Exception as db_err:
+                    logger.error(f"同步写回任务 {item['id']} 的实际 Cron 表达式到数据库失败: {db_err}")
+
             except Exception as e:
                 load_error = f"简易定时配置解析失败: {e}"
                 logger.error(f"加载任务 {item['id']} ('{item['name']}') 失败: {load_error}")
@@ -216,4 +232,10 @@ def run_storage_cleanup_job() -> None:
         logger.info(f"自动存储清理完成: {res}")
     except Exception as e:
         logger.error(f"自动存储清理发生错误: {e}")
+
+    try:
+        logger.info("自动存储清理完成，正在重新加载巡检任务计划以刷新每日随机分钟点...")
+        reload_jobs()
+    except Exception as e:
+        logger.error(f"每日例行计划重载发生异常: {e}")
 

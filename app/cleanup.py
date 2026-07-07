@@ -126,9 +126,23 @@ def safe_delete_dir(dir_path: Path, dry_run: bool = False) -> tuple[int, int]:
 
 
 def parse_db_time(time_str: str) -> datetime:
-    """兼容各种格式解析数据库时间字符串"""
+    """兼容各种格式解析数据库时间字符串，统一转换到本地时区（支持 naive 与 timezone-aware 的混合比对）"""
     if not time_str:
         return datetime.min
+    from zoneinfo import ZoneInfo
+    from app.settings import settings
+    local_tz = ZoneInfo(settings.default_timezone)
+
+    # 1. 优先使用 fromisoformat 解析带时区偏移的 ISO-8601 格式
+    try:
+        dt = datetime.fromisoformat(time_str)
+        if dt.tzinfo is not None:
+            return dt.astimezone(local_tz).replace(tzinfo=None)
+        return dt
+    except ValueError:
+        pass
+
+    # 2. 备用原本的截取解析
     time_str = time_str.replace("T", " ")
     try:
         return datetime.strptime(time_str[:19], "%Y-%m-%d %H:%M:%S")

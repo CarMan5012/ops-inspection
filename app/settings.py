@@ -92,8 +92,12 @@ class Settings:
                 if value:
                     return value
             value = secrets.token_urlsafe(48)
-            key_path.write_text(value, encoding="utf-8")
-            return value
+            try:
+                with open(key_path, "x", encoding="utf-8") as f:
+                    f.write(value)
+            except FileExistsError:
+                pass
+            return key_path.read_text(encoding="utf-8").strip()
         except OSError:
             return "change-me"
 

@@ -51,7 +51,11 @@
       </label>
       <label>
         上午时间
-        <input type="time" name="morning_time" id="morning_time_val" value="09:05">
+        <input type="text" name="morning_time" id="morning_time_val" value="09:05" placeholder="例如: 09:05 或 09:R (分钟为 R 表示随机)" pattern="([0-1][0-9]|2[0-3]):([0-5][0-9]|[Rr])" required>
+        <label class="check" style="display: inline-block; margin-top: 6px; font-size: 12px; font-weight: normal; color: var(--text-muted);">
+          <input type="checkbox" id="morning_random_chk" onchange="toggleRandomMinute('morning', this.checked)">
+          随机分钟执行
+        </label>
       </label>
 
       <label class="check">
@@ -60,7 +64,11 @@
       </label>
       <label>
         下午时间
-        <input type="time" name="afternoon_time" id="afternoon_time_val" value="17:05">
+        <input type="text" name="afternoon_time" id="afternoon_time_val" value="17:05" placeholder="例如: 17:05 或 17:R (分钟为 R 表示随机)" pattern="([0-1][0-9]|2[0-3]):([0-5][0-9]|[Rr])" required>
+        <label class="check" style="display: inline-block; margin-top: 6px; font-size: 12px; font-weight: normal; color: var(--text-muted);">
+          <input type="checkbox" id="afternoon_random_chk" onchange="toggleRandomMinute('afternoon', this.checked)">
+          随机分钟执行
+        </label>
       </label>
     </div>
 
@@ -197,6 +205,29 @@
     return null;
   }
 
+  function toggleRandomMinute(prefix, checked) {
+    const timeInput = document.getElementById(prefix + '_time_val');
+    if (!timeInput) return;
+    
+    let currentVal = timeInput.value.trim();
+    let hour = prefix === "morning" ? "09" : "17";
+    
+    if (currentVal && currentVal.includes(':')) {
+      hour = currentVal.split(':')[0];
+    }
+    
+    if (checked) {
+      timeInput.dataset.savedMinute = currentVal.includes(':') ? currentVal.split(':')[1] : "05";
+      timeInput.value = `${hour}:R`;
+    } else {
+      let savedMin = timeInput.dataset.savedMinute || "05";
+      if (savedMin.toUpperCase() === "R") {
+        savedMin = "05";
+      }
+      timeInput.value = `${hour}:${savedMin}`;
+    }
+  }
+
   function toggleScheduleMode(mode) {
     const simpleContainer = document.getElementById('simple_schedule_container');
     const cronContainer = document.getElementById('cron_schedule_container');
@@ -219,7 +250,12 @@
     
     function updateTimeInputs() {
       morningTimeInput.disabled = !morningCheck.checked;
+      const morningRandomChk = document.getElementById('morning_random_chk');
+      if (morningRandomChk) morningRandomChk.disabled = !morningCheck.checked;
+
       afternoonTimeInput.disabled = !afternoonCheck.checked;
+      const afternoonRandomChk = document.getElementById('afternoon_random_chk');
+      if (afternoonRandomChk) afternoonRandomChk.disabled = !afternoonCheck.checked;
     }
     morningCheck.addEventListener('change', updateTimeInputs);
     afternoonCheck.addEventListener('change', updateTimeInputs);
@@ -255,6 +291,14 @@
       morningTimeInput.value = sc.morning_time || '09:05';
       afternoonCheck.checked = sc.afternoon_enabled !== undefined ? sc.afternoon_enabled : true;
       afternoonTimeInput.value = sc.afternoon_time || '17:05';
+
+      // 回显随机配置勾选框状态
+      if (morningTimeInput.value.toUpperCase().endsWith(':R')) {
+        document.getElementById('morning_random_chk').checked = true;
+      }
+      if (afternoonTimeInput.value.toUpperCase().endsWith(':R')) {
+        document.getElementById('afternoon_random_chk').checked = true;
+      }
     } else {
       document.getElementById('frequency_select').value = 'daily';
       morningCheck.checked = true;

@@ -330,7 +330,9 @@ def _capture_with_browser(
             logger.info(f"登录自愈重试完毕，再次载入截图页面 URL: {resolved_url}")
             page.goto(resolved_url, wait_until="domcontentloaded", timeout=timeout_ms)
 
+        _assert_not_login_page_before_screenshot(page, auth_profile)
         _wait_for_page(page, item, timeout_ms)
+        _assert_not_login_page_before_screenshot(page, auth_profile)
         _take_screenshot(page, item, output_path, is_real_capture)
         _apply_configured_watermark(output_path, item)
         _apply_simulated_taskbar(output_path, item)
@@ -380,15 +382,24 @@ def _storage_state_path(auth_profile: dict[str, Any] | None) -> Path | None:
 
 def _is_on_login_page(page: Page, auth_profile: dict[str, Any] | None) -> bool:
     """判定当前页面是否已退回到或处于登录页表单状态"""
-    if not auth_profile or auth_profile.get("auth_type") in {"", "none"}:
-        return False
-    
     current_url = str(page.url).lower()
-    
+
+    raw_login_url = str(auth_profile.get("login_url") or "").strip() if auth_profile else ""
+    login_url = resolve_env_placeholders(raw_login_url).strip().lower()
+    if login_url:
+        from urllib.parse import urlsplit
+
+        current_parts = urlsplit(current_url)
+        login_parts = urlsplit(login_url)
+        current_key = (current_parts.scheme, current_parts.netloc, current_parts.path.rstrip("/"))
+        login_key = (login_parts.scheme, login_parts.netloc, login_parts.path.rstrip("/"))
+        if current_key == login_key:
+            return True
+
     # 1. URL 特征识别
     if "/login" in current_url or "/signin" in current_url:
         return True
-        
+
     # 2. 密码框可见性识别
     try:
         password_count = page.locator(DEFAULT_PASSWORD_SELECTOR).count()
@@ -397,8 +408,17 @@ def _is_on_login_page(page: Page, auth_profile: dict[str, Any] | None) -> bool:
                 return True
     except Exception:
         pass
-        
+
     return False
+
+
+def _assert_not_login_page_before_screenshot(page: Page, auth_profile: dict[str, Any] | None) -> None:
+    if not _is_on_login_page(page, auth_profile):
+        return
+    if not auth_profile or auth_profile.get("auth_type") in {"", "none"}:
+        raise RuntimeError("页面需要登录，请先为截图项关联登录认证配置，已停止截图以避免保存登录页。")
+    profile_name = auth_profile.get("name") or auth_profile.get("id") or "当前认证配置"
+    raise RuntimeError(f"登录配置 {profile_name} 未登录成功或登录态已失效，已停止截图以避免保存登录页。")
 
 
 def safe_delete_auth_state(auth_profile: dict[str, Any]) -> None:
@@ -683,9 +703,13 @@ def _apply_simulated_taskbar(image_path: Path, item: dict[str, Any]) -> None:
 
     template_path = _taskbar_template_path()
     if not template_path.exists():
-        raise FileNotFoundError(f"Windows taskbar template not found: {template_path}")
+        logger.warning(f"Windows 任务栏模板未找到，已跳过拼接底栏美化逻辑。模板路径: {template_path}")
+        return
 
-    _apply_taskbar_template(image_path, template_path)
+    try:
+        _apply_taskbar_template(image_path, template_path)
+    except Exception as exc:
+        logger.error(f"拼接任务栏底栏失败: {exc}，已降级为不带底栏的原图。", exc_info=True)
 
 
 def _apply_default_watermark(image_path: Path) -> None:
@@ -799,6 +823,7 @@ def _apply_watermark(
 def _trim_mss_desktop_margin(image_path: Path, max_trim: int = 40) -> None:
     from PIL import Image
 
+    cropped_img = None
     with Image.open(image_path) as img:
         rgb = img.convert("RGB")
         width, height = rgb.size
@@ -820,8 +845,12 @@ def _trim_mss_desktop_margin(image_path: Path, max_trim: int = 40) -> None:
             top += 1
 
         if left or top:
-            img.crop((left, top, width, height)).save(image_path)
-            logger.info(f"Trimmed mss desktop margin: left={left}, top={top}, file={image_path}")
+            cropped_img = img.crop((left, top, width, height))
+            cropped_img.load()
+
+    if cropped_img is not None:
+        cropped_img.save(image_path)
+        logger.info(f"Trimmed mss desktop margin: left={left}, top={top}, file={image_path}")
 
 
 def _take_screenshot(page: Page, item: dict[str, Any], output_path: Path, is_real_capture: bool) -> None:

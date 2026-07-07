@@ -31,6 +31,14 @@ def run_job(job_id: int, run_id: int | None = None) -> int:
         logger.error(f"任务不存在: {job_id}")
         raise RuntimeError(f"任务不存在：{job_id}")
 
+    cron_expr = job.get("cron_expression") or ""
+    if is_scheduled and "L" in cron_expr:
+        from app.periodic_reporter import is_last_day_of_month
+        from app.utils import now_local
+        if not is_last_day_of_month(now_local()):
+            logger.info(f"任务 '{job['name']}' (ID: {job_id}) 配置为月末最后一天执行，今天不是当月最后一天，跳过自动调度运行。")
+            return 0
+
     logger.info(f"======> 启动巡检任务: '{job['name']}' (ID: {job_id}) <======")
     if run_id is None:
         run_id = create_run(job_id, str(job["name"]))
