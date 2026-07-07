@@ -318,6 +318,7 @@ def item_form(
     watermark_gap_x: int = Form(140),
     watermark_gap_y: int = Form(140),
     watermark_angle: int = Form(-45),
+    taskbar_enabled: str | None = Form(None),
 ) -> dict[str, Any]:
     real_capture_enabled = 1 if real_browser_capture else 0
     normalized_capture_mode = capture_mode
@@ -351,6 +352,7 @@ def item_form(
         "watermark_gap_x": max(20, min(800, int(watermark_gap_x))),
         "watermark_gap_y": max(20, min(800, int(watermark_gap_y))),
         "watermark_angle": max(-90, min(90, int(watermark_angle))),
+        "taskbar_enabled": 1 if taskbar_enabled else 0,
     }
 
 
@@ -875,6 +877,7 @@ def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
         "watermark_gap_x": clamp_int(payload.get("watermark_gap_x"), 140, 20, 800),
         "watermark_gap_y": clamp_int(payload.get("watermark_gap_y"), 140, 20, 800),
         "watermark_angle": clamp_int(payload.get("watermark_angle"), -45, -90, 90),
+        "taskbar_enabled": 1 if bool_value(payload.get("taskbar_enabled"), True) else 0,
     }
 
 

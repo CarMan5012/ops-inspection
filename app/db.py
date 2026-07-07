@@ -262,6 +262,7 @@ def init_db() -> None:
             ("screenshot_items", "watermark_gap_x", "INTEGER DEFAULT 140"),
             ("screenshot_items", "watermark_gap_y", "INTEGER DEFAULT 140"),
             ("screenshot_items", "watermark_angle", "INTEGER DEFAULT -45"),
+            ("screenshot_items", "taskbar_enabled", "INTEGER DEFAULT 1"),
         ]
         for table, col, t in migrations:
             try:

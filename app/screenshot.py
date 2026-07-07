@@ -27,6 +27,7 @@ DEFAULT_WATERMARK_TILE_GAP_X = 140
 DEFAULT_WATERMARK_TILE_GAP_Y = 140
 DEFAULT_WATERMARK_OPACITY = 65
 DEFAULT_WATERMARK_ANGLE = -45
+DEFAULT_TASKBAR_TEMPLATE_PATH = Path(__file__).resolve().parent / "static" / "images" / "windows-taskbar-template.png"
 
 
 @dataclass
@@ -238,8 +239,8 @@ def _capture_once(
             launch_kwargs = {"headless": headless_val}
             if is_real_capture:
                 launch_kwargs["args"] = [
+                    "--window-position=0,0",
                     f"--window-size={width},{height}",
-                    "--start-maximized",
                     "--no-sandbox",
                     "--disable-dev-shm-usage"
                 ]
@@ -332,6 +333,7 @@ def _capture_with_browser(
         _wait_for_page(page, item, timeout_ms)
         _take_screenshot(page, item, output_path, is_real_capture)
         _apply_configured_watermark(output_path, item)
+        _apply_simulated_taskbar(output_path, item)
         _persist_storage_state(context, auth_profile)
     finally:
         try:
@@ -560,6 +562,132 @@ def _apply_configured_watermark(image_path: Path, item: dict[str, Any]) -> None:
     )
 
 
+def _taskbar_template_path() -> Path:
+    return Path(os.getenv("TASKBAR_TEMPLATE_PATH", str(DEFAULT_TASKBAR_TEMPLATE_PATH))).resolve()
+
+
+def _format_taskbar_clock(now: datetime) -> tuple[str, str]:
+    return now.strftime("%H:%M"), f"{now.year}/{now.month}/{now.day}"
+
+
+def _fit_taskbar_template(template: Any, target_width: int) -> Any:
+    if target_width <= 0:
+        raise ValueError("target_width must be greater than 0")
+    if template.width == target_width:
+        return template.copy()
+
+    resample = getattr(getattr(template, "Resampling", template), "LANCZOS", None)
+    if resample is None:
+        from PIL import Image
+
+        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    target_height = max(1, round(template.height * target_width / template.width))
+    return template.resize((target_width, target_height), resample=resample)
+
+
+def _taskbar_now() -> datetime:
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo(settings.default_timezone))
+    except Exception:
+        return datetime.now()
+
+
+def _taskbar_font_paths() -> list[Path]:
+    configured = os.getenv("TASKBAR_CLOCK_FONT_PATH", "").strip()
+    paths = [
+        settings.data_dir / "fonts" / "msyh.ttc",
+        Path(__file__).resolve().parent / "static" / "fonts" / "msyh.ttc",
+        Path(r"C:\Windows\Fonts\msyh.ttc"),
+        Path(r"C:\Windows\Fonts\segoeui.ttf"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ]
+    if configured:
+        paths.insert(0, Path(configured))
+    return paths
+
+
+def _taskbar_font(size: int) -> Any:
+    from PIL import ImageFont
+
+    for font_path in _taskbar_font_paths():
+        if font_path.exists():
+            try:
+                return ImageFont.truetype(str(font_path), size)
+            except Exception:
+                pass
+    return ImageFont.load_default()
+
+
+def _draw_taskbar_clock(taskbar: Any, now: datetime) -> None:
+    from PIL import ImageDraw
+
+    time_str, date_str = _format_taskbar_clock(now)
+    width, height = taskbar.size
+    sample = taskbar.getpixel((max(0, width - max(4, round(height * 0.35))), max(0, height // 8)))
+    bg = sample[:3] if len(sample) == 3 else sample[:3]
+    brightness = sum(bg[:3]) / 3
+    text_color = (24, 28, 32, 255) if brightness > 150 else (245, 245, 245, 255)
+
+    draw = ImageDraw.Draw(taskbar)
+    font = _taskbar_font(max(11, round(height * 0.22)))
+    right = width - max(8, round(height * 0.18))
+    time_y = max(2, round(height * 0.12))
+    date_y = max(time_y + round(height * 0.34), round(height * 0.54))
+
+    for text, y in ((time_str, time_y), (date_str, date_y)):
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w = bbox[2] - bbox[0]
+        draw.text((right - text_w, y), text, fill=text_color, font=font)
+
+
+def _apply_taskbar_template(image_path: Path, template_path: Path) -> None:
+    from PIL import Image
+
+    with Image.open(image_path) as orig_img:
+        width, height = orig_img.size
+        img_rgba = orig_img.convert("RGBA")
+        img_rgba.load()
+
+    with Image.open(template_path) as template_img:
+        taskbar = _fit_taskbar_template(template_img.convert("RGBA"), width)
+        taskbar.load()
+
+    _draw_taskbar_clock(taskbar, _taskbar_now())
+
+    combined = Image.new("RGBA", (width, height + taskbar.height))
+    combined.paste(img_rgba, (0, 0))
+    combined.paste(taskbar, (0, height))
+
+    if image_path.suffix.lower() in {".jpg", ".jpeg"}:
+        combined.convert("RGB").save(image_path)
+    else:
+        combined.save(image_path)
+
+    logger.info(f"Applied real Windows taskbar template: {template_path} -> {image_path}")
+
+
+def _apply_simulated_taskbar(image_path: Path, item: dict[str, Any]) -> None:
+    if not _watermark_bool(item.get("taskbar_enabled"), True):
+        return
+
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError as err:
+        raise RuntimeError("Taskbar template composition failed: Pillow is not installed") from err
+
+    if not image_path.exists():
+        raise FileNotFoundError(f"Taskbar template composition failed: screenshot file not found {image_path}")
+
+    template_path = _taskbar_template_path()
+    if not template_path.exists():
+        raise FileNotFoundError(f"Windows taskbar template not found: {template_path}")
+
+    _apply_taskbar_template(image_path, template_path)
+
+
 def _apply_default_watermark(image_path: Path) -> None:
     _apply_watermark(
         image_path=image_path,
@@ -668,6 +796,34 @@ def _apply_watermark(
     logger.info(f"已为截图添加水印: {image_path}")
 
 
+def _trim_mss_desktop_margin(image_path: Path, max_trim: int = 40) -> None:
+    from PIL import Image
+
+    with Image.open(image_path) as img:
+        rgb = img.convert("RGB")
+        width, height = rgb.size
+
+        def is_black_column(x: int) -> bool:
+            black = sum(1 for y in range(height) if max(rgb.getpixel((x, y))) <= 20)
+            return black / height >= 0.98
+
+        def is_black_row(y: int) -> bool:
+            black = sum(1 for x in range(width) if max(rgb.getpixel((x, y))) <= 20)
+            return black / width >= 0.98
+
+        left = 0
+        while left < min(max_trim, width - 1) and is_black_column(left):
+            left += 1
+
+        top = 0
+        while top < min(max_trim, height - 1) and is_black_row(top):
+            top += 1
+
+        if left or top:
+            img.crop((left, top, width, height)).save(image_path)
+            logger.info(f"Trimmed mss desktop margin: left={left}, top={top}, file={image_path}")
+
+
 def _take_screenshot(page: Page, item: dict[str, Any], output_path: Path, is_real_capture: bool) -> None:
     if is_real_capture:
         logger.info("真实浏览器窗口截图模式已启用，正在使用 mss 进行系统级屏幕截图...")
@@ -699,6 +855,7 @@ def _take_screenshot(page: Page, item: dict[str, Any], output_path: Path, is_rea
                 monitor = sct.monitors[1]
                 sct_img = sct.grab(monitor)
                 mss.tools.to_png(sct_img.rgb, sct_img.size, output=str(output_path))
+                _trim_mss_desktop_margin(output_path)
                 logger.info(f"系统级真实窗口截图获取成功并保存至: {output_path}")
         except Exception as exc:
             raise RuntimeError(

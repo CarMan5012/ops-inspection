@@ -149,8 +149,22 @@ dwangchengyi7(王诚毅){% endif %}</textarea>
     </div>
   </div>
 
-  <!-- 第四部分：调试与尺寸选项 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">四、 自定义浏览器尺寸与排序</h3>
+  <!-- Windows 任务栏风格 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">四、 Windows 任务栏风格</h3>
+  <div class="form-grid" style="margin-bottom: 30px;">
+    <div style="display: flex; align-items: flex-end; padding-bottom: 8px;" class="span-2">
+      <label class="check">
+        <input type="checkbox" id="taskbar_enabled" name="taskbar_enabled" {% if item.taskbar_enabled is not defined or item.taskbar_enabled %}checked{% endif %}>
+        启用 Windows 任务栏风格
+        <span class="form-tip" style="display: block; margin-top: 4px; font-weight: normal;">
+          默认开启。开启后会在最终截图底部拼接真实 Windows 任务栏模板，右下角时间与截图时间同步。
+        </span>
+      </label>
+    </div>
+  </div>
+
+  <!-- 第五部分：调试与尺寸选项 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">五、 自定义浏览器尺寸与排序</h3>
   <div class="form-grid" style="margin-bottom: 24px;">
     <label>
       单独浏览器宽度 (px)

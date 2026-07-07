@@ -138,6 +138,7 @@ def save_screenshot_item(data: dict[str, Any], item_id: int | None = None) -> in
         "watermark_gap_x",
         "watermark_gap_y",
         "watermark_angle",
+        "taskbar_enabled",
     )
     defaults = {
         "real_browser_capture": 1,
@@ -148,6 +149,7 @@ def save_screenshot_item(data: dict[str, Any], item_id: int | None = None) -> in
         "watermark_gap_x": 140,
         "watermark_gap_y": 140,
         "watermark_angle": -45,
+        "taskbar_enabled": 1,
     }
     values = [
         defaults[field] if field in defaults and data.get(field) is None else data.get(field)
