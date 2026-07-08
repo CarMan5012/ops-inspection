@@ -6,6 +6,9 @@ const state = {
   mailProfiles: [],
   periodic: { settings: [], runs: [] },
   metrics: {},
+  runsPage: 1,
+  runsPageSize: 50,
+  runsTotal: 0,
   storage: { usage: {}, config: {}, cleanupRuns: [], swagger: { enabled: false }, security: {} }
 };
 
@@ -554,6 +557,8 @@ function setView(view) {
   });
   if (view === "storage") {
     loadStorage(false);
+  } else if (view === "runs") {
+    loadRunsData(state.runsPage || 1, state.runsPageSize || 50);
   }
 }
 
@@ -715,8 +720,145 @@ function renderRecentRuns() {
   renderRunsTable(regions.recentRuns, state.runs.slice(0, 8));
 }
 
+async function loadRunsData(page = 1, pageSize = 50) {
+  regions.runs.innerHTML = loadingTable(8);
+  try {
+    const data = await apiGet(`/runs?page=${page}&page_size=${pageSize}`);
+    state.runsPage = data.page || 1;
+    state.runsPageSize = data.page_size || 50;
+    state.runsTotal = data.total || 0;
+    
+    renderRunsPage(data.runs || []);
+  } catch (error) {
+    renderError(regions.runs, error);
+  }
+}
+
 function renderRuns() {
-  renderRunsTable(regions.runs, state.runs);
+  loadRunsData(state.runsPage || 1, state.runsPageSize || 50);
+}
+
+function renderRunsPage(runs) {
+  if (!runs.length) {
+    regions.runs.innerHTML = `<div class="empty">暂无运检记录。</div>`;
+    renderIcons(regions.runs);
+    return;
+  }
+
+  const totalPages = Math.ceil(state.runsTotal / state.runsPageSize) || 1;
+  const currentPage = state.runsPage;
+
+  let tableHtml = `
+    <table>
+      <thead>
+        <tr>
+          <th>运行 ID</th>
+          <th>任务名称</th>
+          <th>状态</th>
+          <th>开始时间</th>
+          <th>成功截图</th>
+          <th>失败截图</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${runs.map((run) => `
+          <tr>
+            <td><strong><a href="${route.runDetail(run.id)}">#${run.id}</a></strong></td>
+            <td>${escapeHtml(run.job_name || "-")}</td>
+            <td>${statusBadge(run.status, run.status_label)}</td>
+            <td>${escapeHtml(shortDate(run.started_at))}</td>
+            <td><span class="ok-text">${numberText(run.success_count)} 张</span></td>
+            <td>${Number(run.failed_count || 0) > 0 ? `<span class="bad-text">${numberText(run.failed_count)} 张</span>` : '<span class="muted-text">0 张</span>'}</td>
+            <td>
+              <div class="action-row">
+                <a class="button" href="${route.runDetail(run.id)}">${icon("panel-right-open")}详情</a>
+                ${run.report_url ? `<a class="button primary" href="${escapeAttr(run.report_url)}">${icon("download")}下载报告</a>` : ""}
+              </div>
+            </td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+
+  const pageSizes = [50, 60, 70, 80, 90, 100];
+  let sizeOptions = pageSizes.map(sz => `
+    <option value="${sz}" ${state.runsPageSize === sz ? 'selected' : ''}>${sz} 行/页</option>
+  `).join("");
+
+  let paginationHtml = "";
+  if (totalPages > 1) {
+    paginationHtml += `
+      <div class="pagination-buttons" style="display: flex; gap: 4px;">
+        <button class="button page-btn" data-page="1" ${currentPage === 1 ? 'disabled' : ''} title="第一页">${icon("chevrons-left")}</button>
+        <button class="button page-btn" data-page="${currentPage - 1}" ${currentPage === 1 ? 'disabled' : ''} title="上一页">${icon("chevron-left")}</button>
+    `;
+
+    let startPage = Math.max(1, currentPage - 2);
+    let endPage = Math.min(totalPages, currentPage + 2);
+    if (startPage > 1) {
+      paginationHtml += `<button class="button page-btn" data-page="1">1</button>`;
+      if (startPage > 2) {
+        paginationHtml += `<span class="page-ellipsis" style="align-self: center; padding: 0 4px; color: var(--muted-text);">...</span>`;
+      }
+    }
+
+    for (let p = startPage; p <= endPage; p++) {
+      paginationHtml += `
+        <button class="button page-btn ${p === currentPage ? 'primary active' : ''}" data-page="${p}">${p}</button>
+      `;
+    }
+
+    if (endPage < totalPages) {
+      if (endPage < totalPages - 1) {
+        paginationHtml += `<span class="page-ellipsis" style="align-self: center; padding: 0 4px; color: var(--muted-text);">...</span>`;
+      }
+      paginationHtml += `<button class="button page-btn" data-page="${totalPages}">${totalPages}</button>`;
+    }
+
+    paginationHtml += `
+        <button class="button page-btn" data-page="${currentPage + 1}" ${currentPage === totalPages ? 'disabled' : ''} title="下一页">${icon("chevron-right")}</button>
+        <button class="button page-btn" data-page="${totalPages}" ${currentPage === totalPages ? 'disabled' : ''} title="最后一页">${icon("chevrons-right")}</button>
+      </div>
+    `;
+  }
+
+  regions.runs.innerHTML = `
+    <div class="table-container">
+      ${tableHtml}
+    </div>
+    <div class="pagination-container" style="display: flex; align-items: center; justify-content: space-between; margin-top: 16px; flex-wrap: wrap; gap: 12px; padding: 4px 8px;">
+      <div class="pagination-info" style="color: var(--muted-text); font-size: 13px;">
+        第 <strong>${currentPage}</strong> / <strong>${totalPages}</strong> 页，共 <strong>${state.runsTotal}</strong> 条记录
+      </div>
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <select class="select page-size-select" style="padding: 4px 8px; font-size: 13px; height: 32px; width: auto;">
+          ${sizeOptions}
+        </select>
+        ${paginationHtml}
+      </div>
+    </div>
+  `;
+
+  renderIcons(regions.runs);
+
+  const sizeSelect = regions.runs.querySelector(".page-size-select");
+  if (sizeSelect) {
+    sizeSelect.addEventListener("change", (e) => {
+      const newSize = parseInt(e.target.value, 10);
+      loadRunsData(1, newSize);
+    });
+  }
+
+  regions.runs.querySelectorAll(".page-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const targetPage = parseInt(btn.dataset.page, 10);
+      if (targetPage && targetPage !== currentPage && targetPage >= 1 && targetPage <= totalPages) {
+        loadRunsData(targetPage, state.runsPageSize);
+      }
+    });
+  });
 }
 
 function renderRunsTable(region, runs) {

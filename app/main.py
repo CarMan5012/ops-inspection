@@ -26,6 +26,7 @@ from app.repository import (
     list_jobs,
     list_mail_profiles,
     list_runs,
+    list_runs_page,
     list_screenshot_items,
     list_screenshot_results,
     save_auth_profile,
@@ -1094,8 +1095,18 @@ def api_test_item(item_id: int, background_tasks: BackgroundTasks) -> dict[str, 
 
 
 @api_router.get("/runs", dependencies=[Depends(require_api_login)])
-def api_list_runs() -> dict[str, Any]:
-    return {"runs": [enrich_run(run) for run in list_runs(settings.max_recent_runs)]}
+def api_list_runs(page: int = 1, page_size: int = 50) -> dict[str, Any]:
+    if page_size not in (50, 60, 70, 80, 90, 100):
+        page_size = 50
+    if page < 1:
+        page = 1
+    runs_list, total = list_runs_page(page, page_size)
+    return {
+        "runs": [enrich_run(run) for run in runs_list],
+        "total": total,
+        "page": page,
+        "page_size": page_size
+    }
 
 
 @api_router.get("/runs/{run_id}", dependencies=[Depends(require_api_login)])
