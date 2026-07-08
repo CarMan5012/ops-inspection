@@ -74,14 +74,17 @@ def reload_jobs() -> None:
 
                 # 同步回写实际生成的 Cron 表达式到数据库的 cron_expression 字段
                 try:
-                    actual_mins = ",".join(sorted(list(set(str(t.fields[6]) for t in triggers)), key=int))
-                    actual_hours = ",".join(sorted(list(set(str(t.fields[5]) for t in triggers)), key=int))
-                    actual_dow = str(triggers[0].fields[4])
-                    if actual_dow == "mon-fri":
-                        actual_dow = "1-5"
-                    elif actual_dow == "*":
-                        actual_dow = "*"
-                    actual_cron = f"{actual_mins} {actual_hours} * * {actual_dow}"
+                    cron_parts = []
+                    for t in triggers:
+                        m = str(t.fields[6])
+                        h = str(t.fields[5])
+                        dom = str(t.fields[2])
+                        mon = str(t.fields[1])
+                        dow = str(t.fields[4])
+                        if dow == "mon-fri":
+                            dow = "1-5"
+                        cron_parts.append(f"{m} {h} {dom} {mon} {dow}")
+                    actual_cron = "; ".join(cron_parts)
                     with connect() as conn:
                         conn.execute("UPDATE report_jobs SET cron_expression = ? WHERE id = ?", (actual_cron, item["id"]))
                 except Exception as db_err:

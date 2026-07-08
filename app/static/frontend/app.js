@@ -1055,56 +1055,78 @@ function renderPeriodic() {
 
 function tryParseCronToSimple(cron) {
   if (!cron) return null;
-  const parts = cron.trim().split(/\s+/);
-  if (parts.length !== 5) return null;
-  const [mPart, hPart, domPart, monPart, dowPart] = parts;
-  if (domPart !== "*" || monPart !== "*") return null;
   
-  let frequency = "daily";
-  if (dowPart === "*" || dowPart === "?") {
-    frequency = "daily";
-  } else if (dowPart === "1-5" || dowPart === "mon-fri" || dowPart === "1,2,3,4,5") {
-    frequency = "workday";
-  } else {
-    return null;
-  }
+  const cronParts = cron.split(';').map(p => p.trim()).filter(Boolean);
+  if (cronParts.length === 0) return null;
   
-  const hours = hPart.split(",").map(Number);
-  const minutes = mPart.split(",").map(Number);
-  if (hours.some(isNaN) || minutes.some(isNaN) || hours.length > 2) return null;
+  let result = {
+    frequency: "daily",
+    morning_enabled: false,
+    morning_time: "",
+    afternoon_enabled: false,
+    afternoon_time: ""
+  };
   
-  if (hours.length === 1) {
-    const h = hours[0];
-    if (minutes.length !== 1) return null;
-    const m = minutes[0];
-    const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-    if (h < 12) {
-      return { frequency, morning_enabled: true, morning_time: timeStr, afternoon_enabled: false, afternoon_time: "17:05" };
-    } else {
-      return { frequency, morning_enabled: false, morning_time: "09:05", afternoon_enabled: true, afternoon_time: timeStr };
-    }
-  } else if (hours.length === 2) {
-    const h1 = Math.min(...hours);
-    const h2 = Math.max(...hours);
-    if (h1 >= 12 || h2 < 12) return null;
-    let m1, m2;
-    if (minutes.length === 1) {
-      m1 = m2 = minutes[0];
-    } else if (minutes.length === 2) {
-      m1 = minutes[0];
-      m2 = minutes[1];
+  for (const cronStr of cronParts) {
+    const parts = cronStr.split(/\s+/);
+    if (parts.length !== 5) return null;
+    const [mPart, hPart, domPart, monPart, dowPart] = parts;
+    if (domPart !== "*" || monPart !== "*") return null;
+    
+    let frequency = "daily";
+    if (dowPart === "*" || dowPart === "?") {
+      frequency = "daily";
+    } else if (dowPart === "1-5" || dowPart === "mon-fri" || dowPart === "1,2,3,4,5") {
+      frequency = "workday";
     } else {
       return null;
     }
-    return {
-      frequency,
-      morning_enabled: true,
-      morning_time: `${String(h1).padStart(2, '0')}:${String(m1).padStart(2, '0')}`,
-      afternoon_enabled: true,
-      afternoon_time: `${String(h2).padStart(2, '0')}:${String(m2).padStart(2, '0')}`
-    };
+    result.frequency = frequency;
+    
+    const hours = hPart.split(",").map(Number);
+    const minutes = mPart.split(",").map(Number);
+    if (hours.some(isNaN) || minutes.some(isNaN) || hours.length > 2) return null;
+    
+    if (hours.length === 1) {
+      const h = hours[0];
+      if (minutes.length !== 1) return null;
+      const m = minutes[0];
+      const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+      if (h < 12) {
+        result.morning_enabled = true;
+        result.morning_time = timeStr;
+      } else {
+        result.afternoon_enabled = true;
+        result.afternoon_time = timeStr;
+      }
+    } else if (hours.length === 2) {
+      const h1 = Math.min(...hours);
+      const h2 = Math.max(...hours);
+      if (h1 >= 12 || h2 < 12) return null;
+      let m1, m2;
+      if (minutes.length === 1) {
+        m1 = m2 = minutes[0];
+      } else if (minutes.length === 2) {
+        m1 = minutes[0];
+        m2 = minutes[1];
+      } else {
+        return null;
+      }
+      result.morning_enabled = true;
+      result.morning_time = `${String(h1).padStart(2, '0')}:${String(m1).padStart(2, '0')}`;
+      result.afternoon_enabled = true;
+      result.afternoon_time = `${String(h2).padStart(2, '0')}:${String(m2).padStart(2, '0')}`;
+    } else {
+      return null;
+    }
   }
-  return null;
+  
+  if (!result.morning_time) result.morning_time = "09:05";
+  if (!result.afternoon_time) result.afternoon_time = "17:05";
+  
+  if (!result.morning_enabled && !result.afternoon_enabled) return null;
+  
+  return result;
 }
 
 function bindJobFormEvents(form) {
@@ -1156,12 +1178,26 @@ function openJobModal(job = null) {
       scheduleMode = "cron";
     }
   }
+
+  const cronSimple = job?.cron_expression ? (tryParseCronToSimple(job.cron_expression) || {}) : {};
+  
+  let morningTime = sc.morning_time || "09:05";
+  let morningIsRandom = false;
+  if (morningTime.toUpperCase().endsWith(":R")) {
+    morningIsRandom = true;
+    morningTime = cronSimple.morning_time || "09:05";
+  }
+  
+  let afternoonTime = sc.afternoon_time || "17:05";
+  let afternoonIsRandom = false;
+  if (afternoonTime.toUpperCase().endsWith(":R")) {
+    afternoonIsRandom = true;
+    afternoonTime = cronSimple.afternoon_time || "17:05";
+  }
   
   const frequency = sc.frequency || "daily";
   const morningEnabled = sc.morning_enabled !== undefined ? sc.morning_enabled : true;
-  const morningTime = sc.morning_time || "09:05";
   const afternoonEnabled = sc.afternoon_enabled !== undefined ? sc.afternoon_enabled : true;
-  const afternoonTime = sc.afternoon_time || "17:05";
 
   const sendMailOnComplete = job ? asBool(job.send_mail_on_complete) : true;
   const sendMailOnError = job ? asBool(job.send_mail_on_error) : true;
@@ -1200,6 +1236,10 @@ function openJobModal(job = null) {
         <label>
           上午时间
           <input type="time" name="morning_time" value="${escapeAttr(morningTime)}">
+          <label class="check" style="display: inline-block; margin-top: 6px; font-size: 12px; font-weight: normal; color: var(--text-muted);">
+            <input type="checkbox" id="spa_morning_random_chk" ${morningIsRandom ? "checked" : ""}>
+            随机分钟执行
+          </label>
         </label>
         
         <label class="check">
@@ -1209,6 +1249,10 @@ function openJobModal(job = null) {
         <label>
           下午时间
           <input type="time" name="afternoon_time" value="${escapeAttr(afternoonTime)}">
+          <label class="check" style="display: inline-block; margin-top: 6px; font-size: 12px; font-weight: normal; color: var(--text-muted);">
+            <input type="checkbox" id="spa_afternoon_random_chk" ${afternoonIsRandom ? "checked" : ""}>
+            随机分钟执行
+          </label>
         </label>
       </div>
       
@@ -1290,7 +1334,63 @@ function openJobModal(job = null) {
   
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await submitForm(form, isEdit ? `/jobs/${job.id}` : "/jobs", isEdit ? "PUT" : "POST", isEdit ? "任务已更新" : "任务已创建");
+    if (!validateForm(form)) return;
+    
+    const morningTimeVal = form.querySelector('[name="morning_time"]');
+    const afternoonTimeVal = form.querySelector('[name="afternoon_time"]');
+    const morningRandom = form.querySelector('#spa_morning_random_chk');
+    const afternoonRandom = form.querySelector('#spa_afternoon_random_chk');
+    
+    let hiddenMorning = null;
+    let hiddenAfternoon = null;
+    
+    if (morningTimeVal && morningRandom && morningRandom.checked) {
+      const val = morningTimeVal.value.trim();
+      if (val && val.includes(':')) {
+        morningTimeVal.removeAttribute('name');
+        hiddenMorning = document.createElement('input');
+        hiddenMorning.type = 'hidden';
+        hiddenMorning.name = 'morning_time';
+        hiddenMorning.value = val.split(':')[0] + ':R';
+        form.appendChild(hiddenMorning);
+      }
+    }
+    
+    if (afternoonTimeVal && afternoonRandom && afternoonRandom.checked) {
+      const val = afternoonTimeVal.value.trim();
+      if (val && val.includes(':')) {
+        afternoonTimeVal.removeAttribute('name');
+        hiddenAfternoon = document.createElement('input');
+        hiddenAfternoon.type = 'hidden';
+        hiddenAfternoon.name = 'afternoon_time';
+        hiddenAfternoon.value = val.split(':')[0] + ':R';
+        form.appendChild(hiddenAfternoon);
+      }
+    }
+    
+    const submitButton = form.querySelector('button[type="submit"]');
+    setButtonLoading(submitButton, true);
+    try {
+      await apiJson(isEdit ? `/jobs/${job.id}` : "/jobs", { 
+        method: isEdit ? "PUT" : "POST", 
+        body: formToPayload(form) 
+      });
+      closeModal();
+      showSuccess(isEdit ? "任务已更新" : "任务已创建");
+      await loadAll();
+    } catch (error) {
+      showError(error.message || "保存失败，请检查输入。");
+    } finally {
+      setButtonLoading(submitButton, false);
+      if (morningTimeVal && hiddenMorning) {
+        morningTimeVal.setAttribute('name', 'morning_time');
+        hiddenMorning.remove();
+      }
+      if (afternoonTimeVal && hiddenAfternoon) {
+        afternoonTimeVal.setAttribute('name', 'afternoon_time');
+        hiddenAfternoon.remove();
+      }
+    }
   });
 }
 

@@ -36,29 +36,20 @@ def build_inspection_triggers(schedule_config: dict[str, Any], timezone: ZoneInf
     triggers = []
     frequency = schedule_config.get("frequency", "daily")
     day_of_week = "*" if frequency == "daily" else "mon-fri"
+    import random
     
-    # 检查是否包含随机 R 分钟配置，如果有，为触发器生成统一的随机分钟数以防笛卡尔积重复执行
-    common_rand_min = None
-    morning_time = str(schedule_config.get("morning_time") or "").strip()
-    afternoon_time = str(schedule_config.get("afternoon_time") or "").strip()
-    
-    if (schedule_config.get("morning_enabled") and morning_time.upper().endswith(":R")) or \
-       (schedule_config.get("afternoon_enabled") and afternoon_time.upper().endswith(":R")):
-        import random
-        common_rand_min = random.randint(0, 59)
-
     if schedule_config.get("morning_enabled"):
-        t_str = schedule_config.get("morning_time", "09:05")
+        t_str = str(schedule_config.get("morning_time", "09:05")).strip()
         h, m = parse_time_parts(t_str)
-        if t_str.upper().endswith(":R") and common_rand_min is not None:
-            m = common_rand_min
+        if t_str.upper().endswith(":R"):
+            m = random.randint(0, 59)
         triggers.append(CronTrigger(day_of_week=day_of_week, hour=h, minute=m, timezone=timezone))
         
     if schedule_config.get("afternoon_enabled"):
-        t_str = schedule_config.get("afternoon_time", "17:05")
+        t_str = str(schedule_config.get("afternoon_time", "17:05")).strip()
         h, m = parse_time_parts(t_str)
-        if t_str.upper().endswith(":R") and common_rand_min is not None:
-            m = common_rand_min
+        if t_str.upper().endswith(":R"):
+            m = random.randint(0, 59)
         triggers.append(CronTrigger(day_of_week=day_of_week, hour=h, minute=m, timezone=timezone))
         
     return triggers
@@ -123,36 +114,23 @@ def parse_simple_inspection_schedule(payload: dict[str, Any]) -> tuple[str, str,
     
     label = build_inspection_schedule_label(cfg)
     
-    # 转换成兼容的单条 Cron 表达式
-    common_rand_min = None
-    if (morning_enabled and morning_time.upper().endswith(":R")) or \
-       (afternoon_enabled and afternoon_time.upper().endswith(":R")):
-        import random
-        common_rand_min = random.randint(0, 59)
-
-    m_list = []
-    h_list = []
+    import random
+    cron_dow = "*" if frequency == "daily" else "1-5"
+    cron_parts = []
+    
     if morning_enabled:
         mh, mm = parse_time_parts(morning_time, force_fixed=False)
-        if morning_time.upper().endswith(":R") and common_rand_min is not None:
-            mm = common_rand_min
-        m_list.append(str(mm))
-        h_list.append(str(mh))
+        if morning_time.upper().endswith(":R"):
+            mm = random.randint(0, 59)
+        cron_parts.append(f"{mm} {mh} * * {cron_dow}")
+        
     if afternoon_enabled:
         ah, am = parse_time_parts(afternoon_time, force_fixed=False)
-        if afternoon_time.upper().endswith(":R") and common_rand_min is not None:
-            am = common_rand_min
-        m_list.append(str(am))
-        h_list.append(str(ah))
+        if afternoon_time.upper().endswith(":R"):
+            am = random.randint(0, 59)
+        cron_parts.append(f"{am} {ah} * * {cron_dow}")
         
-    mins = sorted(list(set(m_list)), key=int)
-    hours = sorted(list(set(h_list)), key=int)
-    
-    cron_mins = ",".join(mins)
-    cron_hours = ",".join(hours)
-    cron_dow = "*" if frequency == "daily" else "1-5"
-    
-    cron_expr = f"{cron_mins} {cron_hours} * * {cron_dow}"
+    cron_expr = "; ".join(cron_parts)
     
     return cron_expr, label, json.dumps(cfg, ensure_ascii=False)
 

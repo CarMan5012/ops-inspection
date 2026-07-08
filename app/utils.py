@@ -397,7 +397,8 @@ def get_next_run_times(cron_expression: str, limit: int = 3) -> list[str]:
                     fire_times.append(next_time)
             else:
                 fire_times.append(next_time)
-            prev = next_time
+            from datetime import timedelta
+            prev = next_time + timedelta(seconds=1)
             
     if not fire_times:
         return []
