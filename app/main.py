@@ -1728,7 +1728,8 @@ def artifact(request: Request, kind: str, run_id: int, filename: str):
     accept = request.headers.get("accept", "")
     raw = request.query_params.get("raw", "")
     
-    if "text/html" in accept and not raw:
+    is_image = filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'))
+    if "text/html" in accept and not raw and is_image:
         favicon_url = url_for_frontend("favicon.ico")
         raw_url = request.url.path + "?raw=true"
         html_content = f"""<!DOCTYPE html>
@@ -1810,9 +1811,9 @@ def artifact(request: Request, kind: str, run_id: int, filename: str):
         return HTMLResponse(content=html_content)
         
     if new_path.exists() and is_under(new_path, base.resolve()):
-        return FileResponse(new_path)
+        return FileResponse(new_path, filename=None if is_image else filename)
     elif legacy_path.exists() and is_under(legacy_path, base.resolve()):
-        return FileResponse(legacy_path)
+        return FileResponse(legacy_path, filename=None if is_image else filename)
         
     raise HTTPException(status_code=404, detail="文件不存在")
 
