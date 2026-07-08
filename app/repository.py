@@ -361,7 +361,7 @@ def list_runs(limit: int = 50) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def list_runs_page(page: int = 1, page_size: int = 50) -> tuple[list[dict[str, Any]], int]:
+def list_runs_page(page: int = 1, page_size: int = 10) -> tuple[list[dict[str, Any]], int]:
     offset = (page - 1) * page_size
     with connect() as conn:
         total = conn.execute("SELECT COUNT(*) FROM run_records").fetchone()[0]

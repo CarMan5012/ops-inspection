@@ -1095,9 +1095,9 @@ def api_test_item(item_id: int, background_tasks: BackgroundTasks) -> dict[str, 
 
 
 @api_router.get("/runs", dependencies=[Depends(require_api_login)])
-def api_list_runs(page: int = 1, page_size: int = 50) -> dict[str, Any]:
-    if page_size not in (50, 60, 70, 80, 90, 100):
-        page_size = 50
+def api_list_runs(page: int = 1, page_size: int = 10) -> dict[str, Any]:
+    if page_size not in (10, 20, 30, 40, 50, 100):
+        page_size = 10
     if page < 1:
         page = 1
     runs_list, total = list_runs_page(page, page_size)

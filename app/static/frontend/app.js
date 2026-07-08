@@ -7,7 +7,7 @@ const state = {
   periodic: { settings: [], runs: [] },
   metrics: {},
   runsPage: 1,
-  runsPageSize: 50,
+  runsPageSize: 10,
   runsTotal: 0,
   storage: { usage: {}, config: {}, cleanupRuns: [], swagger: { enabled: false }, security: {} }
 };
@@ -558,7 +558,7 @@ function setView(view) {
   if (view === "storage") {
     loadStorage(false);
   } else if (view === "runs") {
-    loadRunsData(state.runsPage || 1, state.runsPageSize || 50);
+    loadRunsData(state.runsPage || 1, state.runsPageSize || 10);
   }
 }
 
@@ -720,12 +720,12 @@ function renderRecentRuns() {
   renderRunsTable(regions.recentRuns, state.runs.slice(0, 8));
 }
 
-async function loadRunsData(page = 1, pageSize = 50) {
+async function loadRunsData(page = 1, pageSize = 10) {
   regions.runs.innerHTML = loadingTable(8);
   try {
     const data = await apiGet(`/runs?page=${page}&page_size=${pageSize}`);
     state.runsPage = data.page || 1;
-    state.runsPageSize = data.page_size || 50;
+    state.runsPageSize = data.page_size || 10;
     state.runsTotal = data.total || 0;
     
     renderRunsPage(data.runs || []);
@@ -735,7 +735,7 @@ async function loadRunsData(page = 1, pageSize = 50) {
 }
 
 function renderRuns() {
-  loadRunsData(state.runsPage || 1, state.runsPageSize || 50);
+  loadRunsData(state.runsPage || 1, state.runsPageSize || 10);
 }
 
 function renderRunsPage(runs) {
@@ -782,7 +782,7 @@ function renderRunsPage(runs) {
     </table>
   `;
 
-  const pageSizes = [50, 60, 70, 80, 90, 100];
+  const pageSizes = [10, 20, 30, 40, 50, 100];
   let sizeOptions = pageSizes.map(sz => `
     <option value="${sz}" ${state.runsPageSize === sz ? 'selected' : ''}>${sz} 行/页</option>
   `).join("");

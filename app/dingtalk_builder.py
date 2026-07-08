@@ -252,11 +252,7 @@ def build_periodic_report_message(
             )
     else:
         md_lines.append(
-            f"{hint_prefix}*提示：请及时登录系统 Web 后台下载/查看 Word 报告。*"
-        )
-        md_lines.append(
-            f"\n{_bold('下载指引')}: 归档包已打包完成。"
-            f"由于处于内网隔离环境，**请登录 Web 后台【周期报告】页面点击直接下载保存**！"
+            f"{hint_prefix}*提示：报告归档包已生成，请登录 Web 后台下载。*"
         )
 
     # ── 超时未完成任务列表

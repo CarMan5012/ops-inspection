@@ -222,8 +222,11 @@
     }
     
     if (checked) {
-      timeInput.dataset.savedMinute = currentVal.includes(':') ? currentVal.split(':')[1] : "05";
-      timeInput.value = `${hour}:R`;
+      let currentMin = currentVal.includes(':') ? currentVal.split(':')[1] : "05";
+      if (currentMin.toUpperCase() === "R") {
+        currentMin = "05";
+      }
+      timeInput.dataset.savedMinute = currentMin;
     } else {
       let savedMin = timeInput.dataset.savedMinute || "05";
       if (savedMin.toUpperCase() === "R") {
@@ -290,19 +293,27 @@
     scheduleModeSelect.value = scheduleMode;
     toggleScheduleMode(scheduleMode);
 
+    const cronExpr = '{{ job.cron_expression or "" }}';
+    const cronSimple = tryParseCronToSimple(cronExpr);
+
     if (sc) {
       document.getElementById('frequency_select').value = sc.frequency || 'daily';
       morningCheck.checked = sc.morning_enabled !== undefined ? sc.morning_enabled : true;
-      morningTimeInput.value = sc.morning_time || '09:05';
-      afternoonCheck.checked = sc.afternoon_enabled !== undefined ? sc.afternoon_enabled : true;
-      afternoonTimeInput.value = sc.afternoon_time || '17:05';
-
-      // 回显随机配置勾选框状态
-      if (morningTimeInput.value.toUpperCase().endsWith(':R')) {
+      
+      if (sc.morning_time && sc.morning_time.toUpperCase().endsWith(':R')) {
         document.getElementById('morning_random_chk').checked = true;
+        morningTimeInput.value = (cronSimple && cronSimple.morning_time) ? cronSimple.morning_time : '09:05';
+      } else {
+        morningTimeInput.value = sc.morning_time || '09:05';
       }
-      if (afternoonTimeInput.value.toUpperCase().endsWith(':R')) {
+
+      afternoonCheck.checked = sc.afternoon_enabled !== undefined ? sc.afternoon_enabled : true;
+      
+      if (sc.afternoon_time && sc.afternoon_time.toUpperCase().endsWith(':R')) {
         document.getElementById('afternoon_random_chk').checked = true;
+        afternoonTimeInput.value = (cronSimple && cronSimple.afternoon_time) ? cronSimple.afternoon_time : '17:05';
+      } else {
+        afternoonTimeInput.value = sc.afternoon_time || '17:05';
       }
     } else {
       document.getElementById('frequency_select').value = 'daily';
@@ -312,6 +323,24 @@
       afternoonTimeInput.value = '17:05';
     }
     updateTimeInputs();
+
+    const form = document.querySelector('form');
+    if (form) {
+      form.addEventListener('submit', () => {
+        if (document.getElementById('morning_random_chk').checked) {
+          const val = morningTimeInput.value.trim();
+          if (val.includes(':')) {
+            morningTimeInput.value = val.split(':')[0] + ':R';
+          }
+        }
+        if (document.getElementById('afternoon_random_chk').checked) {
+          const val = afternoonTimeInput.value.trim();
+          if (val.includes(':')) {
+            afternoonTimeInput.value = val.split(':')[0] + ':R';
+          }
+        }
+      });
+    }
   });
 </script>
 {% endblock %}
