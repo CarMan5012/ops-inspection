@@ -233,6 +233,15 @@ def run_job(job_id: int, run_id: int | None = None) -> int:
             error_summary=err_summary,
             mail_status=mail_status,
         )
+        
+    if is_scheduled:
+        try:
+            from app.scheduler import reload_jobs
+            reload_jobs()
+            logger.info(f"定时任务 {job_id} 执行完成，已刷新洗牌随机时间配置。")
+        except Exception as e:
+            logger.error(f"定时任务 {job_id} 自动重载刷新随机时间失败: {e}", exc_info=True)
+            
     return run_id
 
 
