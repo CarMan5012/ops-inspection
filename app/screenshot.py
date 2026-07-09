@@ -253,6 +253,7 @@ def _capture_once(
             launch_kwargs = {
                 "headless": headless_val,
                 "channel": "chrome",
+                "ignore_default_args": ["--enable-automation"],
                 "args": [
                     "--no-sandbox",
                     "--disable-dev-shm-usage",

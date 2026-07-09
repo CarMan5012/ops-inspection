@@ -137,6 +137,7 @@ def run_job(job_id: int, run_id: int | None = None, schedule_type: str | None = 
         launch_kwargs = {
             "headless": headless_val,
             "channel": "chrome",
+            "ignore_default_args": ["--enable-automation"],
             "args": [
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
