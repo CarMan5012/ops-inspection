@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import sqlite3
+from pysqlcipher3 import dbapi2 as sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +8,83 @@ from app.settings import settings
 
 
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(settings.db_path, timeout=10.0)
+    import os
+    import shutil
+
+    db_path = settings.db_path
+    db_key = os.getenv("SQLCIPHER_DB_KEY", settings.secret_key or "default-key-change-me")
+
+    # 1. 数据库不存在时，直接创建加密数据库
+    if not os.path.exists(db_path):
+        conn = sqlite3.connect(str(db_path), timeout=10.0)
+        conn.execute(f"PRAGMA key = '{db_key}'")
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        return conn
+
+    # 2. 数据库存在，探测其是明文还是已加密
+    is_plain = False
+    try:
+        import sqlite3 as std_sqlite
+        test_conn = std_sqlite.connect(db_path, timeout=5.0)
+        test_conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+        test_conn.close()
+        is_plain = True
+    except Exception:
+        try:
+            test_conn.close()
+        except Exception:
+            pass
+
+    # 3. 探测到是明文，自动执行热迁移并删除原明文备份
+    if is_plain:
+        temp_encrypted_path = str(db_path) + ".encrypted_tmp"
+        backup_path = str(db_path) + ".backup_before_encrypt"
+        
+        if os.path.exists(temp_encrypted_path):
+            try:
+                os.remove(temp_encrypted_path)
+            except Exception:
+                pass
+                
+        try:
+            # 复制明文备份，预防迁移中途断电等意外故障
+            shutil.copy2(db_path, backup_path)
+            
+            # 使用 ATTACH 将明文数据导入加密临时库
+            plain_conn = sqlite3.connect(str(db_path))
+            plain_conn.execute(f"ATTACH DATABASE '{temp_encrypted_path}' AS encrypted KEY '{db_key}'")
+            plain_conn.execute("SELECT sqlcipher_export('encrypted')")
+            plain_conn.execute("DETACH DATABASE encrypted")
+            plain_conn.close()
+            
+            # 覆盖原库
+            shutil.move(temp_encrypted_path, db_path)
+            
+            # 使用新密钥验证连接和查询是否正常
+            verify_conn = sqlite3.connect(str(db_path), timeout=5.0)
+            verify_conn.execute(f"PRAGMA key = '{db_key}'")
+            verify_conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+            verify_conn.close()
+            
+            # 验证成功，彻底物理删除明文备份
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+                
+        except Exception as e:
+            # 出错清理临时残留
+            for path in (temp_encrypted_path, backup_path):
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+            raise RuntimeError(f"自动将 SQLite 明文库加密热迁移失败: {e}")
+
+    # 4. 以加密连接打开
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
+    conn.execute(f"PRAGMA key = '{db_key}'")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL;")
@@ -221,6 +297,11 @@ def init_db() -> None:
                 value TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS token_blacklist (
+                token TEXT PRIMARY KEY,
+                expired_at REAL NOT NULL
+            );
             """
         )
         
@@ -297,9 +378,9 @@ def migrate_schema_defaults(conn: sqlite3.Connection) -> None:
         for table, old, new in replacements:
             cur = conn.execute(
                 """
-                UPDATE sqlite_schema
-                SET sql = replace(sql, ?, ?)
-                WHERE type = 'table' AND name = ? AND sql LIKE ?
+                 UPDATE sqlite_master
+                 SET sql = replace(sql, ?, ?)
+                 WHERE type = 'table' AND name = ? AND sql LIKE ?
                 """,
                 (old, new, table, f"%{old}%"),
             )
@@ -474,9 +555,8 @@ def seed_system_defaults(conn: sqlite3.Connection) -> None:
     for key, value in default_settings.items():
         conn.execute(
             """
-            INSERT INTO system_settings (key, value)
+            INSERT OR IGNORE INTO system_settings (key, value)
             VALUES (?, ?)
-            ON CONFLICT(key) DO NOTHING
             """,
             (key, value),
         )

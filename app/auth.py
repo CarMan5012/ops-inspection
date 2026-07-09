@@ -31,8 +31,50 @@ def create_token(username: str) -> str:
     return f"{payload}:{signature}"
 
 
+def is_token_revoked(token: str) -> bool:
+    if not token:
+        return True
+    try:
+        from app.db import connect
+        with connect() as conn:
+            # 定期清理已过期的 Token 黑名单数据
+            conn.execute("DELETE FROM token_blacklist WHERE expired_at < ?", (time.time(),))
+            row = conn.execute("SELECT 1 FROM token_blacklist WHERE token = ?", (token,)).fetchone()
+            return row is not None
+    except Exception:
+        return False
+
+
+def revoke_token(token: str | None) -> None:
+    if not token:
+        return
+    parts = token.split(":")
+    if len(parts) != 3:
+        return
+    username, timestamp, signature = parts
+    try:
+        issued_at = int(timestamp)
+    except ValueError:
+        return
+    
+    expired_at = issued_at + get_session_ttl_seconds()
+    if expired_at > time.time():
+        try:
+            from app.db import connect
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO token_blacklist (token, expired_at) VALUES (?, ?)",
+                    (token, expired_at)
+                )
+                conn.execute("DELETE FROM token_blacklist WHERE expired_at < ?", (time.time(),))
+        except Exception:
+            pass
+
+
 def verify_token(token: str | None) -> bool:
     if not token:
+        return False
+    if is_token_revoked(token):
         return False
     parts = token.split(":")
     if len(parts) != 3:

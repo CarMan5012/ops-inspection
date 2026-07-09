@@ -208,11 +208,40 @@ def verify_totp_code(secret: str, code: str, window: int = 1) -> bool:
     if not normalized.isdigit():
         return False
     now = int(time.time())
+    matched_time_slice = None
     for drift in range(-window, window + 1):
-        expected = get_totp_code(secret, now + drift * 30)
+        target_time = now + drift * 30
+        expected = get_totp_code(secret, target_time)
         if hmac.compare_digest(expected, normalized):
-            return True
-    return False
+            matched_time_slice = target_time // 30
+            break
+            
+    if matched_time_slice is None:
+        return False
+        
+    try:
+        from app.db import connect
+        with connect() as conn:
+            # 核对数据库，避免同周期甚至过期周期被重用
+            row = conn.execute(
+                "SELECT value FROM system_settings WHERE key = 'last_used_totp_slice'"
+            ).fetchone()
+            if row:
+                last_used = int(row[0] or 0)
+                if matched_time_slice <= last_used:
+                    return False
+            
+            conn.execute(
+                """
+                REPLACE INTO system_settings (key, value, updated_at)
+                VALUES ('last_used_totp_slice', ?, CURRENT_TIMESTAMP)
+                """,
+                (str(matched_time_slice),)
+            )
+        return True
+    except Exception:
+        # 异常容错：防止由于表未初始化或其他特殊 DB 异常卡死用户登录，降级保障通过
+        return True
 
 
 def build_totp_uri(secret: str, account: str, issuer: str) -> str:

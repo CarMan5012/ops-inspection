@@ -449,6 +449,7 @@ def login_page(request: Request) -> HTMLResponse:
 
 @frontend_router.post("/login")
 def login(
+    request: Request,
     login_payload: str = Form(""),
 ) -> RedirectResponse:
     if not login_payload:
@@ -469,18 +470,27 @@ def login(
         if not secret or not verify_totp_code(secret, mfa_code):
             return frontend_redirect("/login?error=mfa")
     response = frontend_redirect("/")
+    
+    # 检测当前请求协议是否为 HTTPS，是的话强制开启 Cookie 的 secure 属性以避免在非加密链接传输
+    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    
     response.set_cookie(
         COOKIE_NAME,
         create_token(username),
         httponly=True,
         samesite="lax",
+        secure=is_secure,
         max_age=get_session_ttl_seconds(),
     )
     return response
 
 
 @frontend_router.get("/logout")
-def logout() -> RedirectResponse:
+def logout(request: Request) -> RedirectResponse:
+    token = request.cookies.get(COOKIE_NAME)
+    if token:
+        from app.auth import revoke_token
+        revoke_token(token)
     response = frontend_redirect("/login")
     response.delete_cookie(COOKIE_NAME)
     return response

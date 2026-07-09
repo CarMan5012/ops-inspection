@@ -553,11 +553,8 @@ def set_system_setting(key: str, value: str) -> None:
     with connect() as conn:
         conn.execute(
             """
-            INSERT INTO system_settings (key, value, updated_at)
+            REPLACE INTO system_settings (key, value, updated_at)
             VALUES (?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value,
-                updated_at = CURRENT_TIMESTAMP
             """,
             (key, value),
         )

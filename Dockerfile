@@ -22,6 +22,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     xvfb \
     locales \
+    build-essential \
+    libsqlcipher-dev \
+    sqlcipher \
+    python3-dev \
     && sed -i -e 's/# zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen \
     && locale-gen \
     && ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime \
