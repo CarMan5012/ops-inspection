@@ -41,7 +41,7 @@ def connect() -> sqlite3.Connection:
 
     # 3. 探测到是明文，自动执行热迁移并删除原明文备份
     if is_plain:
-        temp_encrypted_path = str(db_path) + ".encrypted_tmp"
+        temp_encrypted_path = Path(str(db_path) + ".encrypted_tmp").as_posix()
         backup_path = str(db_path) + ".backup_before_encrypt"
         
         if os.path.exists(temp_encrypted_path):
