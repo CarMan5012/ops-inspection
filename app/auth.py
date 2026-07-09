@@ -86,7 +86,8 @@ def verify_token(token: str | None) -> bool:
         issued_at = int(timestamp)
     except ValueError:
         return False
-    if time.time() - issued_at > get_session_ttl_seconds():
+    now = time.time()
+    if now - issued_at > get_session_ttl_seconds() or issued_at > now + 60:
         return False
     for secret_value in [settings.secret_key, *getattr(settings, "legacy_secret_keys", [])]:
         expected = _sign(f"{username}:{timestamp}", settings.admin_password, secret_value)
