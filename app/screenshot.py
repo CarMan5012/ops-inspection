@@ -253,13 +253,14 @@ def _capture_once(
             launch_kwargs = {
                 "headless": headless_val,
                 "channel": "chrome",
-                "ignore_default_args": ["--enable-automation"],
+                "ignore_default_args": ["--enable-automation", "--disable-sync"],
                 "args": [
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     f"--force-device-scale-factor={scale_factor}",
                     "--high-dpi-support=1",
-                    "--lang=zh-CN"
+                    "--lang=zh-CN",
+                    "--enable-features=SidePanel,SharingHub,DesktopSharingHub"
                 ]
             }
             if is_real_capture:

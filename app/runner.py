@@ -137,13 +137,14 @@ def run_job(job_id: int, run_id: int | None = None, schedule_type: str | None = 
         launch_kwargs = {
             "headless": headless_val,
             "channel": "chrome",
-            "ignore_default_args": ["--enable-automation"],
+            "ignore_default_args": ["--enable-automation", "--disable-sync"],
             "args": [
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 f"--force-device-scale-factor={scale_factor}",
                 "--high-dpi-support=1",
-                "--lang=zh-CN"
+                "--lang=zh-CN",
+                "--enable-features=SidePanel,SharingHub,DesktopSharingHub"
             ]
         }
         
