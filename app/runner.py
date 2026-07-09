@@ -70,11 +70,7 @@ def run_job(job_id: int, run_id: int | None = None, schedule_type: str | None = 
                 if not started_at_str:
                     continue
                 try:
-                    if "T" in started_at_str:
-                        dt = datetime.fromisoformat(started_at_str)
-                    else:
-                        dt = datetime.strptime(started_at_str, "%Y-%m-%d %H:%M:%S")
-                    
+                    dt = datetime.fromisoformat(started_at_str)
                     local_dt = dt.replace(tzinfo=local_tz) if dt.tzinfo is None else dt.astimezone(local_tz)
                     # 匹配日期是今天，且小时数与设定的 target_hour 相同
                     if local_dt.strftime("%Y-%m-%d") == today_str and local_dt.hour == target_hour:
