@@ -136,6 +136,7 @@ def run_job(job_id: int, run_id: int | None = None, schedule_type: str | None = 
         scale_factor = float(job.get("browser_scale_factor") if job.get("browser_scale_factor") is not None else 1.5)
         launch_kwargs = {
             "headless": headless_val,
+            "channel": "chrome",
             "args": [
                 "--no-sandbox",
                 "--disable-dev-shm-usage",

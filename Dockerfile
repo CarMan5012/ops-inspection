@@ -34,7 +34,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 
-RUN playwright install --with-deps chromium
+RUN playwright install --with-deps chrome
 
 COPY app ./app
 COPY 服务器巡检-yyyy-mm-dd.docx .

@@ -252,6 +252,7 @@ def _capture_once(
             headless_val = False if is_real_capture else True
             launch_kwargs = {
                 "headless": headless_val,
+                "channel": "chrome",
                 "args": [
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
