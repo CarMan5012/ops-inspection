@@ -260,6 +260,7 @@ def _capture_once(
                     f"--force-device-scale-factor={scale_factor}",
                     "--high-dpi-support=1",
                     "--lang=zh-CN",
+                    "--disable-translate",
                     "--enable-features=SidePanel,SharingHub,DesktopSharingHub"
                 ]
             }
