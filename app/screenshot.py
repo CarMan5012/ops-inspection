@@ -379,7 +379,6 @@ def _capture_with_browser(
 
 
 def _new_context(browser: Any, auth_profile: dict[str, Any] | None, width: int, height: int, scale_factor: float = 1.5) -> BrowserContext:
-    state_path = _storage_state_path(auth_profile)
     kwargs: dict[str, Any] = {
         "viewport": {"width": width, "height": height},
         "ignore_https_errors": True,
@@ -387,9 +386,16 @@ def _new_context(browser: Any, auth_profile: dict[str, Any] | None, width: int, 
         "timezone_id": settings.default_timezone,
         "device_scale_factor": scale_factor,
     }
+    state_path = _storage_state_path(auth_profile)
     if state_path and state_path.exists():
-        logger.info(f"载入缓存的浏览器状态文件: {state_path}")
-        kwargs["storage_state"] = str(state_path)
+        logger.info(f"正在读取并解密浏览器状态缓存文件: {state_path}")
+        try:
+            import json
+            encrypted_bytes = state_path.read_bytes()
+            decrypted_str = _decrypt_state_data(encrypted_bytes)
+            kwargs["storage_state"] = json.loads(decrypted_str)
+        except Exception as e:
+            logger.error(f"解密或加载浏览器状态缓存失败，将跳过缓存重新登录: {e}")
     return browser.new_context(**kwargs)
 
 
@@ -542,7 +548,14 @@ def _persist_storage_state(context: BrowserContext, auth_profile: dict[str, Any]
     if state_path is None:
         return
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    context.storage_state(path=str(state_path))
+    try:
+        import json
+        state_dict = context.storage_state()
+        state_str = json.dumps(state_dict)
+        encrypted_bytes = _encrypt_state_data(state_str)
+        state_path.write_bytes(encrypted_bytes)
+    except Exception as exc:
+        logger.error(f"加密保存浏览器状态缓存失败: {exc}", exc_info=True)
 
 
 def _wait_for_page(page: Page, item: dict[str, Any], timeout_ms: int) -> None:
@@ -1035,3 +1048,33 @@ def test_auth_profile_login(auth_profile_id: int) -> dict[str, Any]:
         err_msg = f"{type(exc).__name__}: {exc}"
         logger.error(f"验证登录凭证异常: {err_msg}", exc_info=True)
         return {"success": False, "message": f"测试登录失败: {err_msg}"}
+
+
+def _encrypt_state_data(data_str: str) -> bytes:
+    key = settings.secret_key.encode("utf-8")
+    data_bytes = data_str.encode("utf-8")
+    return _rc4_crypt(data_bytes, key)
+
+
+def _decrypt_state_data(data_bytes: bytes) -> str:
+    key = settings.secret_key.encode("utf-8")
+    decrypted = _rc4_crypt(data_bytes, key)
+    return decrypted.decode("utf-8")
+
+
+def _rc4_crypt(data: bytes, key: bytes) -> bytes:
+    S = list(range(256))
+    j = 0
+    out = []
+    for i in range(256):
+        j = (j + S[i] + key[i % len(key)]) % 256
+        S[i], S[j] = S[j], S[i]
+    i = 0
+    j = 0
+    for byte in data:
+        i = (i + 1) % 256
+        j = (j + S[i]) % 256
+        S[i], S[j] = S[j], S[i]
+        k = S[(S[i] + S[j]) % 256]
+        out.append(byte ^ k)
+    return bytes(out)
