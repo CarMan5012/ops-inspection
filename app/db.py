@@ -13,6 +13,8 @@ def connect() -> sqlite3.Connection:
 
     db_path = settings.db_path
     db_key = os.getenv("SQLCIPHER_DB_KEY", settings.secret_key or "default-key-change-me")
+    # 对密钥中的单引号进行转义，防止特殊字符导致 SQL 注入或 PRAGMA 语法解析错
+    db_key = db_key.replace("'", "''")
 
     # 1. 数据库不存在时，直接创建加密数据库
     if not os.path.exists(db_path):
