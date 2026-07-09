@@ -24,12 +24,69 @@ from playwright.sync_api import sync_playwright
 logger = logging.getLogger("app.runner")
 
 
-def run_job(job_id: int, run_id: int | None = None) -> int:
+def run_job(job_id: int, run_id: int | None = None, schedule_type: str | None = None) -> int:
     is_scheduled = (run_id is None)
     job = get_job(job_id)
     if not job:
         logger.error(f"任务不存在: {job_id}")
         raise RuntimeError(f"任务不存在：{job_id}")
+
+    # 如果是简单巡检定时模式，且是自动定时触发的，增加“同天同时间段只成功执行一次”的判定，
+    # 防止由于执行完洗牌重新调度、手动保存任务配置或升级重启容器重新洗牌导致的重复执行。
+    if is_scheduled and job.get("schedule_mode") == "simple" and schedule_type in ("morning", "afternoon"):
+        import json
+        from app.schedule_utils import parse_time_parts
+        from app.repository import connect
+        
+        local_tz = ZoneInfo(settings.default_timezone)
+        now_dt = datetime.now(local_tz)
+        today_str = now_dt.strftime("%Y-%m-%d")
+        
+        # 1. 取得该时段所配置的小时数
+        config_str = job.get("schedule_config") or ""
+        target_hour = None
+        if config_str:
+            try:
+                cfg = json.loads(config_str)
+                time_str = cfg.get("morning_time", "09:05") if schedule_type == "morning" else cfg.get("afternoon_time", "17:05")
+                target_hour, _ = parse_time_parts(time_str, force_fixed=True)
+            except Exception as e:
+                logger.error(f"解析简单定时配置小时点失败: {e}")
+                
+        # 2. 如果成功取得配置的小时数，查数据库今天是否有该小时内且成功的运行记录
+        if target_hour is not None:
+            with connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT started_at FROM run_records 
+                    WHERE job_id = ? AND status IN ('success', 'partial_success')
+                    """,
+                    (job_id,)
+                ).fetchall()
+                
+            has_run = False
+            for row in rows:
+                started_at_str = row[0]
+                if not started_at_str:
+                    continue
+                try:
+                    if "T" in started_at_str:
+                        dt = datetime.fromisoformat(started_at_str)
+                    else:
+                        dt = datetime.strptime(started_at_str, "%Y-%m-%d %H:%M:%S")
+                    
+                    local_dt = dt.replace(tzinfo=local_tz) if dt.tzinfo is None else dt.astimezone(local_tz)
+                    # 匹配日期是今天，且小时数与设定的 target_hour 相同
+                    if local_dt.strftime("%Y-%m-%d") == today_str and local_dt.hour == target_hour:
+                        has_run = True
+                        break
+                except Exception as ex:
+                    logger.error(f"解析运行记录时间 {started_at_str} 失败: {ex}")
+                    
+            if has_run:
+                period_name = "上午" if schedule_type == "morning" else "下午"
+                logger.info(f"检测到任务 '{job['name']}' (ID: {job_id}) 今天{period_name}巡检 (小时点: {target_hour}) 已成功执行过，跳过本次自动调度运行。")
+                return 0
 
     cron_expr = job.get("cron_expression") or ""
     if is_scheduled and "L" in cron_expr:
