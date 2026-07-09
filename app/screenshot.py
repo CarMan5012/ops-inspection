@@ -256,7 +256,8 @@ def _capture_once(
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     f"--force-device-scale-factor={scale_factor}",
-                    "--high-dpi-support=1"
+                    "--high-dpi-support=1",
+                    "--lang=zh-CN"
                 ]
             }
             if is_real_capture:

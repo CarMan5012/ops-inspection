@@ -140,7 +140,8 @@ def run_job(job_id: int, run_id: int | None = None, schedule_type: str | None = 
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 f"--force-device-scale-factor={scale_factor}",
-                "--high-dpi-support=1"
+                "--high-dpi-support=1",
+                "--lang=zh-CN"
             ]
         }
         
