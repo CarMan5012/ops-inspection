@@ -647,7 +647,7 @@ def _taskbar_template_path(run_id: int | str | None = None) -> Path:
     return random.Random(str(run_id)).choice(paths)
 
 def _format_taskbar_clock(now: datetime) -> tuple[str, str]:
-    return now.strftime("%H:%M"), f"{now.year}/{now.month}/{now.day}"
+    return now.strftime("%H:%M"), now.strftime("%Y/%m/%d")
 
 
 def _fit_taskbar_template(template: Any, target_width: int) -> Any:
@@ -713,13 +713,13 @@ def _draw_taskbar_clock(taskbar: Any, now: datetime) -> None:
 
     draw = ImageDraw.Draw(taskbar)
     font = _taskbar_font(max(12, round(height * 0.24)))
-    right = width - max(30, round(height * 0.44))
+    right = width - max(20, round(height * 0.28))
     gap = max(3, round(height * 0.11))
     time_bbox = draw.textbbox((0, 0), time_str, font=font)
     date_bbox = draw.textbbox((0, 0), date_str, font=font)
     time_h = time_bbox[3] - time_bbox[1]
     date_h = date_bbox[3] - date_bbox[1]
-    top = max(0, round((height - time_h - gap - date_h) / 2))
+    top = max(0, round((height - time_h - gap - date_h) / 2) + max(2, round(height * 0.08)))
 
     rows = (
         (time_str, time_bbox, top - time_bbox[1]),
