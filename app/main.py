@@ -118,7 +118,16 @@ async def csrf_protect_middleware(request: Request, call_next):
 
                 try:
                     parsed = urlsplit(value)
-                    return parsed.scheme.lower() == forwarded_proto.lower() and parsed.netloc.lower() == forwarded_host.lower()
+                    # 剥离端口号进行比对，防止 Nginx 的 $host（无端口）与浏览器的 Origin（含端口）不一致
+                    parsed_host = parsed.netloc.split(":")[0]
+                    f_host_clean = forwarded_host.split(":")[0]
+                    
+                    # 允许 http 和 https 协议兼容（针对反向代理链路中的 SSL 卸载/Termination 情况）
+                    scheme_ok = (
+                        parsed.scheme.lower() == forwarded_proto.lower()
+                        or {parsed.scheme.lower(), forwarded_proto.lower()} <= {"http", "https"}
+                    )
+                    return scheme_ok and parsed_host.lower() == f_host_clean.lower()
                 except Exception:
                     return False
 
