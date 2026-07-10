@@ -1,170 +1,152 @@
 # 自动化巡检报告系统
 
-轻量级 Web 配置后台，用于配置 Grafana、Kibana/Elastic、普通网页截图任务，定时使用 Playwright/Chromium 截图，生成 Word 巡检报告，并通过 SMTP 邮件推送。
+本系统是一个轻量级的 **Web 运维巡检配置后台**。它支持对 Grafana、Kibana/Elastic 及任意普通网页进行自动化截图，基于配置的 Cron 表达式定时运行，自动生成 `.docx` 格式的 Word 巡检报告，并通过 SMTP 邮件进行自动推送。
 
-## 功能
+---
 
-- Web 页面配置巡检任务
-- 自定义截图 URL、CSS 选择器、等待规则、浏览器尺寸
-- 支持 Grafana、Kibana、普通网页截图
-- 手动测试单张截图并预览
-- 手动执行巡检任务
-- APScheduler 定时执行
-- 生成 `.docx` 报告
-- SMTP 邮件推送
-- 历史执行记录、截图和报告下载
+## 1. 核心业务流程与架构
 
-> 第一版建议单实例运行。SQLite、APScheduler 和本地浏览器状态文件都适合单容器部署；需要多实例时，应改为外部数据库、队列和独立 worker。
+系统主要包含 **任务调度、自动化登录与截图、图像后处理、报告生成、邮件推送** 五个核心模块。以下是系统在触发一次巡检任务时的底层逻辑流程图：
 
-## 本地运行
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+```mermaid
+graph TD
+    A([定时任务 / 手动触发]) --> B[初始化浏览器环境]
+    B --> C{是否关联登录认证?}
+    C -- 是 --> D{是否存在 Session 缓存?}
+    D -- 否 --> E[Playwright 模拟打开登录页面]
+    E --> F[自动填充账号密码并点击登录]
+    F --> G[加密保存 Session 状态至本地]
+    G --> H[载入目标巡检网页]
+    D -- 是 --> I[解密并载入已有 Session 状态]
+    I --> H
+    C -- 否 --> H
+    H --> J[等待网络空闲 & 元素渲染完成]
+    H -. 登录态失效重定向 .-> F
+    J --> K{是否开启真实浏览器窗口截图?}
+    K -- 是 --> L[通过 Xvfb 虚拟显示 + mss 物理截图]
+    K -- 否 --> M[Playwright 网页级截图 (视口/整页)]
+    L --> N[Pillow 拼装任务栏底栏 & 绘制真实时钟]
+    M --> O[Pillow 图像后处理: 添加斜体平铺水印]
+    N --> P[生成并排版 .docx Word 报告]
+    O --> P
+    P --> Q{是否开启邮件推送?}
+    Q -- 是 --> R[通过 SMTP 发送报告邮件]
+    Q -- 否 --> S([巡检任务结束])
+    R --> S
 ```
 
-Windows PowerShell:
+---
 
+## 2. 技术栈
+
+* **Web 后端**：基于 **FastAPI** + **Uvicorn**，提供高性能的异步接口和静态资源托管。
+* **定时调度**：基于 **APScheduler**，在后台维护内存定时任务队列，支持秒/分/时/日级别的 Cron 定时触发。
+* **安全数据库**：基于 **SQLite**，通过 **SQLCipher** 拓展进行物理加密，确保即使数据库文件被拷走，敏感配置数据也无法被读取。
+* **网页自动化**：基于 **Playwright (Chromium)**，通过有头或无头模式加载目标系统，支持全自动化登录表单填充与状态缓存。
+* **物理窗口截图**：在容器内启动 **Xvfb** (虚拟帧缓冲) 构建图形环境，并利用 Python 的 **mss** 库截取真实的 Chromium 物理桌面窗口，还原浏览器地址栏和标签。
+* **图像后处理**：基于 **Pillow (PIL)**，进行平铺防伪水印叠加，并模拟 Windows 任务栏时钟，按照截图时间动态渲染右下角时间。
+* **报告排版**：基于 **python-docx**，自动读取 `.docx` 模板文件，自动进行图片自适应缩放并排版生成报告。
+* **前端展示**：单页面应用 (SPA)，使用原生 Vanilla JavaScript + TailwindCSS (预编译) 进行敏捷交互。
+
+---
+
+## 3. 本地开发调试
+
+### 3.1 环境依赖
+您需要安装 Python 3.11+ 并在本地安装 Chromium 浏览器依赖。
+
+### 3.2 运行步骤（以 Windows PowerShell 为例）
 ```powershell
+# 1. 创建并激活虚拟环境
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+
+# 2. 安装依赖包
 pip install -r requirements.txt
+
+# 3. 安装 Playwright 底层 Chromium 浏览器
 playwright install chromium
+
+# 4. 运行后台服务 (本地调试默认会在数据目录自动创建 app-secret.key)
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+访问系统：`http://localhost:8000/ops`
 
-访问：
+---
 
-```text
-http://localhost:8000
-```
+## 4. 容器化部署
 
-## Docker 运行
+### 4.1 使用一键运行脚本 (单容器模式)
+系统提供了 [docker-run.sh](docker-run.sh) 脚本，可快速在 Linux 生产服务器上部署。
 
 ```bash
+# 1. 复制配置文件模板并根据需要更改
 cp .env.example .env
-# 编辑 .env 中的管理员账号密码
+
+# 2. 构建 Docker 镜像
 docker build -t ops-inspection:latest .
+
+# 3. 运行部署脚本（自动停止旧容器，启动新容器并做安全加固）
 bash docker-run.sh
 ```
 
-或者使用 Docker Compose：
+### 4.2 使用 Docker Compose 部署 (多容器模式)
+如果您需要启动系统自带的本地测试 Grafana，可以使用 Docker Compose。
 
 ```bash
-cp .env.example .env
-# 编辑 .env 中的管理员账号密码
-# 首次启动前请按 secrets/README.md 生成 secrets/app_secret_key 密钥文件。
+# 1. 生成加密主密钥（建议长度 48 字节的随机 Token）
+mkdir -p secrets
+python -c "import secrets; print(secrets.token_urlsafe(48))" > secrets/app_secret_key
+chmod 600 secrets/app_secret_key
+
+# 2. 启动 Compose
 docker compose up -d --build
 ```
+访问系统：`http://localhost:8000/ops`
 
-访问：
+---
 
-```text
-巡检系统: http://localhost:8000
-Grafana: http://localhost:3000
-```
+## 5. 安全与密钥设计
 
-## 本地 Grafana 测试
+为了保障生产环境下各项凭证（发信密码、目标系统密码）的安全，系统设计了双重密钥体系：
 
-Docker Compose 会同时启动巡检系统和一个本地 Grafana，暂时不需要本地搭建 Kibana。
+1. **数据库物理加密 (`SQLCIPHER_DB_KEY`)**：
+   * 在启动脚本 [docker-run.sh](docker-run.sh) 中设置，用于开启 SQLCipher 对 SQLite 数据库文件在磁盘上的物理级加密，强防库文件物理泄漏。
+2. **应用敏感字段加密 (`APP_SECRET_KEY`)**：
+   * 系统的主密钥，用于通过 Fernet/AES 算法在应用层对敏感输入（如邮箱 SMTP 授权码、登录凭证、钉钉 Token）进行二次加密。
+   * **推荐挂载方案**：将主密钥文件 `secrets/app_secret_key` 单独备份于宿主机，通过只读卷挂载到容器内 `/run/secrets/app_secret_key`。
+   * **自动生成方案**：若不挂载，系统会在持久化目录（宿主机 `/data/ops-inspection/data`）下自动生成 `app-secret.key` 文件。只要该目录不丢失，密钥即保持一致。
 
-- Grafana 镜像：`.env` 中的 `GRAFANA_IMAGE`，默认 `grafana/grafana-oss:11.4.0`
-- 默认账号：`.env` 中的 `GRAFANA_USER` / `GRAFANA_PASS`
-- 默认测试账号：`admin` / `admin`
-- 预置数据源：`Local TestData`
-- 预置 Dashboard：`Local Grafana Inspection Test`
+---
 
-启动：
+## 6. 特色功能详解
 
-```powershell
-Copy-Item .env.example .env
-docker compose up -d --build
-```
+### 6.1 真实浏览器窗口截图 (Xvfb + mss)
+* **原理**：很多时候监控截图需要呈现浏览器地址栏以证明其真实有效性。系统会在后台利用虚拟帧缓冲技术拉起一个真实的 Chromium 窗口（有头模式），并通过 Python 直接在屏幕像素级别截取这个浏览器窗口，从而完美保留地址栏、标签页以及窗口边框。
+* **配置方式**：在新建截图项时勾选 `real_browser_capture`（真实浏览器窗口截图）选项。
+* **限制**：该模式下浏览器渲染仅支持 **视口截图 (viewport)**。如果需要截取整页长图，请取消勾选此项以回退至标准 Playwright 无头页面截图模式。
 
-浏览器访问 Grafana：
+### 6.2 自动登录与 Session 自愈
+* **表单模拟**：配置认证方案后，系统会在第一次加载页面前，自动前往 `Login URL`，定位用户名和密码输入框，填充凭证并提交。
+* **状态持久化**：登录成功后，系统会将其 Session (Cookies、LocalStorage 等) 经主密钥加密后序列化到磁盘（`browser-state/`）。后续截图任务会直接载入缓存，省去频繁登录操作，提高运行速度。
+* **Session 自愈**：若截图加载中发现被重定向回了登录页，系统会自动判定 Session 已过期，立即物理清除本地 Session 缓存，拉起浏览器重新走一遍登录流程，无需人工干预。
 
-```text
-http://localhost:3000/d/local-inspection-test/local-grafana-inspection-test
-```
+### 6.3 图像后处理 (任务栏 & 水印)
+* **动态任务栏**：在截图底部拼接 Windows 任务栏背景，并利用系统字体根据截图时的真实时间，在任务栏右下角自动绘制电子时钟（支持高精度渲染），消除拼接痕迹。
+* **斜体水印**：支持自定义文字（包含截图时间、巡检人员姓名等占位符），在整张截图上平铺旋转水印，兼顾安全合规性与防伪需求。
 
-在巡检系统里测试 Grafana 截图：
+---
 
-1. 访问 `http://localhost:8000`，用 `.env` 中的 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 登录。
-2. 在 `Auth` 中编辑 `Grafana 用户名密码`。
-3. `Login URL` 填 `http://localhost:3000/login`。
-4. 用户名和密码直接填写 `.env` 中的 `GRAFANA_USER` / `GRAFANA_PASS`。
-5. `Success selector` 可留空，或按需填写 `.react-grid-layout`。
-6. 在 `Jobs` 里新建或打开一个任务，添加截图项。
-7. 截图项 `Type` 选 `grafana`，`URL` 填：
+## 7. 持久化数据目录结构
 
-```text
-http://localhost:3000/d/local-inspection-test/local-grafana-inspection-test?orgId=1&from=now-1h&to=now&kiosk
-```
-
-8. `Capture mode` 建议先选 `viewport` 或 `full_page`，`Wait selector` 填 `.react-grid-layout`。
-9. 保存后点击截图项的 `Test`，到 `Runs` 查看截图结果。
-
-> 本地测试时直接填写浏览器可访问的完整地址即可；生产环境部署后，在 Web 页面改成生产 Grafana 地址。
-
-## 环境变量
-
-```env
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=change-me
-
-GRAFANA_USER=admin
-GRAFANA_PASS=admin
-GRAFANA_IMAGE=grafana/grafana-oss:11.4.0
-KIBANA_USER=readonly-user
-KIBANA_PASS=readonly-password
-SMTP_PASSWORD=mail-password
-```
-
-容器化部署时不要把主密钥写进 `.env`。请按 `secrets/README.md` 生成 `secrets/app_secret_key`，`docker-compose.yml` 会把它以 Docker Secret 方式挂载到 `/run/secrets/app_secret_key`。这个文件必须单独备份，丢失后数据库中已加密的邮箱密码、MFA 密钥、钉钉密钥等将无法解密。
-
-Web 页面会显示当前配置，后续也可以直接在页面修改。
-
-如果 `docker compose up -d --build` 拉取 Grafana 镜像失败，请先在 Docker Desktop 中配置可用代理，或把 `.env` 里的 `GRAFANA_IMAGE` 改成你内网镜像仓库中的同版本 Grafana 镜像。
-
-## 使用建议
-
-1. 先在“Auth”里配置 Grafana/Kibana 登录方式。用户名、密码只填环境变量名。
-2. 在“Jobs”里创建巡检任务，设置 Cron、浏览器尺寸和是否发送邮件。
-3. 在任务详情里添加截图项。Grafana 可配置等待选择器 `.react-grid-layout`；Kibana 可配置 `[data-test-subj="dashboardViewport"]`。
-4. 对每个截图项先点 `Test`，确认截图可预览后再启用定时任务。
-5. 邮件配置完成后，在任务里开启 `Send mail after report`。
-
-## 真实浏览器窗口截图
-
-本系统默认开启 **真实浏览器窗口截图**，该功能通过容器内 `Xvfb` (虚拟显示) + Playwright 有头模式启动 Chromium，并在页面渲染完成后使用 `mss` 截取真实的浏览器物理窗口（截图中包含真实地址栏、标签栏及窗口边框）。
-
-### 部署与配置要求
-* **容器运行**：容器启动时会自动拉起后台 Xvfb 服务并配置 `DISPLAY=:99` 环境变量。请确保 Docker 运行在 seccomp 限制宽松或默认环境中，以使 Chromium 顺利启动。
-* **物理窗口限制**：该模式仅支持 **视口截图 (viewport)**。如果配置中勾选了该功能，即使截图项获取模式选择了“整页长截图”，系统在后台也会自动将其调整为“视口截图”执行。
-* **如何切回普通模式**：
-  在截图项配置页面中，您可以随时**取消勾选**“真实浏览器窗口截图”选项。取消后将切换为普通 Playwright 无头页面截图，该模式下支持完整的“整页长截图” (`full_page`) 及局部特定元素截图 (`selector`)，但截图上不再包含浏览器真实地址栏。
-
-## 目录
+所有生成的报告、运行记录均保存在宿主机的映射目录 `/data/ops-inspection/data` 下，目录结构如下：
 
 ```text
 data/
-  app.db
-  screenshots/
-  reports/
-  logs/
-  browser-state/
+  ├── app.db               # 加密过的 SQLite 数据库文件
+  ├── app-secret.key       # 自动生成的解密主密钥文件（仅在未手动挂载密钥时存在）
+  ├── screenshots/         # 存放按运行 ID (run_id) 隔离的巡检截图
+  ├── reports/             # 存放生成的 .docx Word 格式巡检报告
+  ├── logs/                # 存放巡检执行的系统运行日志
+  └── browser-state/       # 存放加密后的浏览器 Session 缓存 JSON 文件
 ```
-
-## 前后端分离入口
-
-当前登录后的 `/` 已切换为静态前端应用，资源位于 `app/static/frontend/`，页面通过 `/api/*` JSON 接口读取和更新数据。
-
-- `/api/dashboard`：总览数据、任务、最近运行、认证和邮件配置摘要
-- `/api/jobs`、`/api/jobs/{job_id}`：任务列表、创建、更新、删除
-- `/api/jobs/{job_id}/run`：触发巡检任务
-- `/api/runs`、`/api/runs/{run_id}`：运行记录与截图结果
-- `/api/auth-profiles`、`/api/mail-profiles`：认证与邮件配置
-- `/api/periodic-reports`：周期报告配置和历史包
