@@ -99,6 +99,12 @@ configure_openapi(app, settings.api_prefix, settings.app_name)
 
 @app.middleware("http")
 async def csrf_protect_middleware(request: Request, call_next):
+    # 豁免登出接口，防止由于会话超时、Token 丢失导致登出操作被 CSRF 403 拦截，确保用户能顺利退回登录页
+    path = request.url.path
+    logout_path = settings.frontend_base_path + "/logout"
+    if path.rstrip("/") == logout_path.rstrip("/"):
+        return await call_next(request)
+
     # 只针对非安全写入方法进行校验
     if request.method not in ("GET", "HEAD", "OPTIONS", "TRACE"):
         # 1. 校验 Origin / Referer 同源性
