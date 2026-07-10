@@ -544,6 +544,7 @@ def login_page(request: Request) -> HTMLResponse:
             "error": request.query_params.get("error", ""),
             "mfa_enabled": security["mfa_enabled"],
             "login_public_key": get_login_public_jwk(),
+            "csrf_token": csrf_token,
         },
     )
     

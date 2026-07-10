@@ -34,6 +34,7 @@
       {% if mfa_enabled %}
         <input data-login-mfa inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="MFA 验证码" required>
       {% endif %}
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="login_payload" data-login-payload>
       <button class="login-btn" type="submit">立即登录</button>
     </form>
