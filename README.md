@@ -46,17 +46,17 @@ http://localhost:8000
 
 ```bash
 cp .env.example .env
-# 编辑 .env 中的管理员账号密码，不要在 .env 写 APP_SECRET_KEY。
+# 编辑 .env 中的管理员账号密码
 docker build -t ops-inspection:latest .
-sh run.sh
+bash docker-run.sh
 ```
 
 或者使用 Docker Compose：
 
 ```bash
 cp .env.example .env
-# 编辑 .env 中的管理员账号密码，不要在 .env 写 APP_SECRET_KEY。
-# 首次启动前请按 secrets/README.md 生成 secrets/app_secret_key.txt。
+# 编辑 .env 中的管理员账号密码
+# 首次启动前请按 secrets/README.md 生成 secrets/app_secret_key 密钥文件。
 docker compose up -d --build
 ```
 
@@ -123,7 +123,7 @@ KIBANA_PASS=readonly-password
 SMTP_PASSWORD=mail-password
 ```
 
-容器化部署时不要把主密钥写进 `.env`。请按 `secrets/README.md` 生成 `secrets/app_secret_key.txt`，`docker-compose.yml` 会把它以 Docker Secret 方式挂载到 `/run/secrets/app_secret_key`。这个文件必须单独备份，丢失后数据库中已加密的邮箱密码、MFA 密钥、钉钉密钥等将无法解密。
+容器化部署时不要把主密钥写进 `.env`。请按 `secrets/README.md` 生成 `secrets/app_secret_key`，`docker-compose.yml` 会把它以 Docker Secret 方式挂载到 `/run/secrets/app_secret_key`。这个文件必须单独备份，丢失后数据库中已加密的邮箱密码、MFA 密钥、钉钉密钥等将无法解密。
 
 Web 页面会显示当前配置，后续也可以直接在页面修改。
 
