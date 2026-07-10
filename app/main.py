@@ -61,12 +61,12 @@ if not app_logger.handlers:
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
-    
+
     # 控制台标准输出
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
     app_logger.addHandler(stream_handler)
-    
+
     # 文件持久化滚动日志
     try:
         settings.ensure_dirs()
@@ -83,7 +83,7 @@ if not app_logger.handlers:
     except Exception as e:
         # 避免写文件失败导致应用无法启动，做降级处理
         stream_handler.stream.write(f"警告: 初始化文件日志失败: {e}\n")
-        
+
     app_logger.propagate = False
     app_logger.info(f"应用日志系统初始化完成. 日志级别: {log_level_str}")
 
@@ -95,6 +95,87 @@ app = FastAPI(
     openapi_tags=[],
 )
 configure_openapi(app, settings.api_prefix, settings.app_name)
+
+
+@app.middleware("http")
+async def csrf_protect_middleware(request: Request, call_next):
+    # 只针对非安全写入方法进行校验
+    if request.method not in ("GET", "HEAD", "OPTIONS", "TRACE"):
+        token = request.cookies.get(COOKIE_NAME)
+        # 如果带有登录Cookie，强制要求进行CSRF验证
+        if token and verify_token(token):
+            # 1. 校验 Origin / Referer 同源性
+            scheme = request.url.scheme
+            netloc = request.url.netloc
+            forwarded_proto = request.headers.get("x-forwarded-proto", scheme)
+            forwarded_host = request.headers.get("x-forwarded-host", netloc)
+
+            origin = request.headers.get("origin")
+            referer = request.headers.get("referer")
+
+            def same_origin(value: str) -> bool:
+                from urllib.parse import urlsplit
+
+                try:
+                    parsed = urlsplit(value)
+                    return parsed.scheme.lower() == forwarded_proto.lower() and parsed.netloc.lower() == forwarded_host.lower()
+                except Exception:
+                    return False
+
+            origin_ok = False
+            if origin:
+                if same_origin(origin):
+                    origin_ok = True
+            elif referer:
+                if same_origin(referer):
+                    origin_ok = True
+
+            if not origin_ok:
+                return HTMLResponse(content="Forbidden: Origin or Referer check failed", status_code=403)
+
+            # 2. 校验 CSRF Token
+            cookie_csrf = request.cookies.get("csrf_token")
+            if not cookie_csrf:
+                return HTMLResponse(content="Forbidden: Missing CSRF token in cookie", status_code=403)
+
+            request_csrf = request.headers.get("x-csrf-token")
+
+            # 若 Header 缺省且是 Form 表单提交，从 Form 中安全提取
+            if not request_csrf:
+                content_type = request.headers.get("content-type", "")
+                if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+                    # 复制备份 body，防止 request.form() 挂起
+                    body = await request.body()
+                    async def receive():
+                        return {"type": "http.request", "body": body, "more_body": False}
+                    request._receive = receive
+
+                    form_data = await request.form()
+                    request_csrf = form_data.get("csrf_token")
+
+            if not request_csrf or request_csrf != cookie_csrf:
+                return HTMLResponse(content="Forbidden: CSRF token mismatch", status_code=403)
+
+    response = await call_next(request)
+
+    # 当用户处于登录状态且缺失 csrf_token cookie 时，自动补发自愈
+    token = request.cookies.get(COOKIE_NAME)
+    if token and verify_token(token):
+        if not request.cookies.get("csrf_token"):
+            import secrets
+            csrf_token = secrets.token_urlsafe(32)
+            is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+            response.set_cookie(
+                "csrf_token",
+                csrf_token,
+                httponly=False,
+                samesite="lax",
+                secure=is_secure,
+                max_age=get_session_ttl_seconds(),
+            )
+
+    return response
+
 
 api_router = APIRouter(prefix=settings.api_prefix)
 
@@ -123,7 +204,7 @@ def url_for_frontend(path: str) -> str:
         if not path.startswith("/"):
             return "/" + path
         return path
-    
+
     cleaned_path = path.lstrip("/")
     if not cleaned_path:
         return base + "/"
@@ -245,10 +326,10 @@ def job_form(
     dingtalk_keyword: str | None = Form(""),
 ) -> dict[str, Any]:
     from app.schedule_utils import parse_simple_inspection_schedule
-    
+
     def parse_bool(v: Any) -> bool:
         return bool(v) if v is not None else False
-        
+
     payload = {
         "frequency": frequency,
         "morning_enabled": parse_bool(morning_enabled),
@@ -256,7 +337,7 @@ def job_form(
         "afternoon_enabled": parse_bool(afternoon_enabled),
         "afternoon_time": afternoon_time
     }
-    
+
     if schedule_mode == "simple":
         try:
             cron_expr, label_expr, schedule_config = parse_simple_inspection_schedule(payload)
@@ -266,12 +347,12 @@ def job_form(
         cron_expr = cron_expression
         label_expr = "高级 Cron"
         schedule_config = ""
-        
+
     send_comp = parse_bool(send_mail_on_complete)
     if send_mail is not None and send_mail_on_complete is None:
         send_comp = parse_bool(send_mail)
     send_err = parse_bool(send_mail_on_error) if send_mail_on_error is not None else True
-    
+
     return {
         "name": name,
         "environment": environment,
@@ -470,10 +551,17 @@ def login(
         if not secret or not verify_totp_code(secret, mfa_code):
             return frontend_redirect("/login?error=mfa")
     response = frontend_redirect("/")
-    
-    # 检测当前请求协议是否为 HTTPS，是的话强制开启 Cookie 的 secure 属性以避免在非加密链接传输
     is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
-    
+    import secrets
+    csrf_token = secrets.token_urlsafe(32)
+    response.set_cookie(
+        "csrf_token",
+        csrf_token,
+        httponly=False,
+        samesite="lax",
+        secure=is_secure,
+        max_age=get_session_ttl_seconds(),
+    )
     response.set_cookie(
         COOKIE_NAME,
         create_token(username),
@@ -485,7 +573,7 @@ def login(
     return response
 
 
-@frontend_router.get("/logout")
+@frontend_router.post("/logout")
 def logout(request: Request) -> RedirectResponse:
     token = request.cookies.get(COOKIE_NAME)
     if token:
@@ -493,6 +581,7 @@ def logout(request: Request) -> RedirectResponse:
         revoke_token(token)
     response = frontend_redirect("/login")
     response.delete_cookie(COOKIE_NAME)
+    response.delete_cookie("csrf_token")
     return response
 
 
@@ -514,21 +603,21 @@ DINGTALK_EMOJI_ENABLED_KEY = "dingtalk_emoji_enabled"
 
 def security_settings() -> dict[str, Any]:
     from app.utils import decrypt_secret
-    
+
     db_webhook = get_system_setting("dingtalk_webhook", "")
     if db_webhook:
         try:
             db_webhook = decrypt_secret(db_webhook)
         except Exception:
             pass
-            
+
     db_secret = get_system_setting("dingtalk_secret", "")
     if db_secret:
         try:
             db_secret = decrypt_secret(db_secret)
         except Exception:
             pass
-            
+
     db_keyword = get_system_setting("dingtalk_keyword", "")
 
     return {
@@ -816,7 +905,7 @@ def api_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
     cron_expr = text_value(payload, "cron_expression", "0 9 * * *")
     schedule_label = text_value(payload, "schedule_label", "高级 Cron")
     schedule_config = text_value(payload, "schedule_config", "")
-    
+
     if schedule_mode == "simple":
         try:
             cron_expr, schedule_label, schedule_config = parse_simple_inspection_schedule(payload)
@@ -1145,9 +1234,9 @@ def api_update_auth_profile(auth_id: int, payload: dict[str, Any]) -> dict[str, 
     changed = any(
         str(data.get(field) or "") != str(old.get(field) or "")
         for field in (
-            "auth_type", "login_url", "username_value", "username", 
-            "username_selector", "password_selector", "submit_selector", 
-            "success_selector", "username_source", "password_source", 
+            "auth_type", "login_url", "username_value", "username",
+            "username_selector", "password_selector", "submit_selector",
+            "success_selector", "username_source", "password_source",
             "username_env", "password_env", "storage_state_path"
         )
     )
@@ -1292,14 +1381,14 @@ def job_detail(request: Request, job_id: int) -> HTMLResponse:
     job = dict(db_job) if db_job else None
     if not job:
         raise HTTPException(status_code=404, detail="任务不存在")
-        
+
     next_runs = []
     if int(job.get("enabled") or 0):
         from app.utils import get_next_run_times
         next_runs = get_next_run_times(job.get("cron_expression") or "", limit=3)
-    
+
     items = list_screenshot_items(job_id)
-    
+
     runs_list = list_runs(50)
     last_status = "暂无运行"
     for run in runs_list:
@@ -1488,11 +1577,11 @@ def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form))
         # 若留空代表不修改，沿用旧凭据
         if not form.get("password"):
             form["password_secret"] = old.get("password_secret")
-            
+
         if not form.get("username_value"):
             form["username_value"] = old.get("username_value")
             form["username"] = old.get("username")
-            
+
         # 沿用未提交的高级选择器；如果页面提交了新值，则保存新配置。
         for field in ["username_selector", "password_selector", "submit_selector", "success_selector"]:
             if not form.get(field):
@@ -1501,9 +1590,9 @@ def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form))
         changed = any(
             str(form.get(field) or "") != str(old.get(field) or "")
             for field in (
-                "auth_type", "login_url", "username_value", "username", 
-                "username_selector", "password_selector", "submit_selector", 
-                "success_selector", "username_source", "password_source", 
+                "auth_type", "login_url", "username_value", "username",
+                "username_selector", "password_selector", "submit_selector",
+                "success_selector", "username_source", "password_source",
                 "username_env", "password_env", "storage_state_path"
             )
         )
@@ -1512,7 +1601,7 @@ def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form))
 
         if changed:
             clear_auth_state_cache(dict(old))
-            
+
     save_auth_profile(form, auth_id)
     return frontend_redirect("/auth-profiles")
 
@@ -1599,7 +1688,7 @@ def test_mail_profile(mail_id: int, test_recipient: str = Form("")) -> RedirectR
     if not recipient:
         from urllib.parse import quote
         return frontend_redirect(f"/mail-profiles?error={quote('收件人为空且无法提取默认收件人，请指定测试收件邮箱')}")
-        
+
     import tempfile
     from docx import Document
     from urllib.parse import quote
@@ -1613,11 +1702,11 @@ def test_mail_profile(mail_id: int, test_recipient: str = Form("")) -> RedirectR
         doc.add_paragraph("这是一封由系统自动生成的巡检报告测试附件。")
         doc.add_paragraph("如果您收到这封邮件，说明您的 SMTP 邮件服务配置成功，且能够成功传递带附件的报告。")
         doc.save(test_doc_path)
-        
+
         test_profile = dict(profile)
         test_profile["recipients"] = recipient
         test_profile["cc"] = ""
-        
+
         dummy_job = {
             "name": "邮件配置连接测试",
             "environment": "SRE测试环境",
@@ -1634,7 +1723,7 @@ def test_mail_profile(mail_id: int, test_recipient: str = Form("")) -> RedirectR
                 os.remove(test_doc_path)
             except Exception:
                 pass
-                
+
     from urllib.parse import quote
     return frontend_redirect(f"/mail-profiles?success={quote('测试邮件已成功发出！请检查您的邮箱收件箱。')}")
 
@@ -1644,7 +1733,7 @@ def test_mail_profile_async(mail_id: int, test_recipient: str = Form("")) -> dic
     profile = get_mail_profile(mail_id)
     if not profile:
         return {"success": False, "message": "邮件配置不存在"}
-        
+
     recipient = test_recipient.strip()
     if not recipient:
         recipient = str(profile.get("recipients") or "").strip()
@@ -1652,7 +1741,7 @@ def test_mail_profile_async(mail_id: int, test_recipient: str = Form("")) -> dic
         recipient = str(profile.get("sender") or profile.get("username") or "").strip()
     if not recipient:
         return {"success": False, "message": "收件人为空且无法提取默认收件人，请指定测试收件邮箱"}
-        
+
     import tempfile
     from docx import Document
     from app.mailer import send_report_mail
@@ -1665,11 +1754,11 @@ def test_mail_profile_async(mail_id: int, test_recipient: str = Form("")) -> dic
         doc.add_paragraph("这是一封由系统自动生成的巡检报告测试附件。")
         doc.add_paragraph("如果您收到这封邮件，说明您的 SMTP 邮件服务配置成功，且能够成功传递带附件的报告。")
         doc.save(test_doc_path)
-        
+
         test_profile = dict(profile)
         test_profile["recipients"] = recipient
         test_profile["cc"] = ""
-        
+
         dummy_job = {
             "name": "邮件配置连接测试",
             "environment": "SRE测试环境",
@@ -1730,23 +1819,35 @@ def artifact(request: Request, kind: str, run_id: int, filename: str):
     base = {"screenshots": settings.screenshot_dir, "reports": settings.report_dir}.get(kind)
     if base is None:
         raise HTTPException(status_code=404, detail="未知文件类型")
-        
+
     yyyy, mm, dd = get_run_date(run_id)
     new_path = (base / yyyy / mm / dd / f"run-{run_id}" / filename).resolve()
     legacy_path = (base / str(run_id) / filename).resolve()
-    
+
+    # 提前校验文件安全性与物理存在性
+    target_path = None
+    if new_path.exists() and is_under(new_path, base.resolve()):
+        target_path = new_path
+    elif legacy_path.exists() and is_under(legacy_path, base.resolve()):
+        target_path = legacy_path
+
+    if target_path is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
     accept = request.headers.get("accept", "")
     raw = request.query_params.get("raw", "")
-    
+
     is_image = filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'))
     if "text/html" in accept and not raw and is_image:
-        favicon_url = url_for_frontend("favicon.ico")
-        raw_url = request.url.path + "?raw=true"
+        import html
+        escaped_filename = html.escape(filename)
+        escaped_raw_url = html.escape(request.url.path + "?raw=true")
+        favicon_url = html.escape(url_for_frontend("favicon.ico"))
         html_content = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>查看图片 - {filename}</title>
+    <title>查看图片 - {escaped_filename}</title>
     <link rel="shortcut icon" href="{favicon_url}" type="image/x-icon">
     <style>
         body {{
@@ -1802,11 +1903,11 @@ def artifact(request: Request, kind: str, run_id: int, filename: str):
 </head>
 <body>
     <div class="container">
-        <img id="preview" src="{raw_url}" alt="截图预览">
+        <img id="preview" src="{escaped_raw_url}" alt="截图预览">
     </div>
     <div class="toolbar">
         <button class="btn" onclick="rotateImage()">↻ 旋转</button>
-        <a class="btn" href="{raw_url}" download>⬇ 下载原图</a>
+        <a class="btn" href="{escaped_raw_url}" download>⬇ 下载原图</a>
         <button class="btn" onclick="window.close()">✕ 关闭</button>
     </div>
     <script>
@@ -1819,13 +1920,8 @@ def artifact(request: Request, kind: str, run_id: int, filename: str):
 </body>
 </html>"""
         return HTMLResponse(content=html_content)
-        
-    if new_path.exists() and is_under(new_path, base.resolve()):
-        return FileResponse(new_path, filename=None if is_image else filename)
-    elif legacy_path.exists() and is_under(legacy_path, base.resolve()):
-        return FileResponse(legacy_path, filename=None if is_image else filename)
-        
-    raise HTTPException(status_code=404, detail="文件不存在")
+
+    return FileResponse(target_path, filename=None if is_image else filename)
 
 
 def require_value(value: Any, message: str) -> Any:
@@ -1870,14 +1966,14 @@ def parse_optional_int(value: str | None) -> int | None:
 def reset_database() -> RedirectResponse:
     from app.db import reset_database_data
     from app.scheduler import reload_jobs
-    
+
     app_logger.info("用户请求一键重置所有本地测试数据")
     try:
         reset_database_data()
         reload_jobs()
     except Exception as exc:
         app_logger.error(f"重置数据库失败: {exc}", exc_info=True)
-        
+
     from urllib.parse import quote
     return frontend_redirect(f"/?success={quote('系统所有配置及历史数据已成功清空并重置！')}")
 
@@ -1896,7 +1992,7 @@ def edit_periodic_report(request: Request, report_type: str) -> HTMLResponse:
     setting = get_periodic_report_setting(report_type)
     if not setting:
         raise HTTPException(status_code=404, detail="周期报告配置不存在")
-        
+
     # 解密敏感字段以在表单中回显
     for f in ("dingtalk_webhook", "dingtalk_secret"):
         if setting.get(f):
@@ -1904,7 +2000,7 @@ def edit_periodic_report(request: Request, report_type: str) -> HTMLResponse:
                 setting[f] = decrypt_secret(setting[f])
             except Exception:
                 pass
-        
+
     return templates.TemplateResponse(
         "periodic_form.html",
         {
@@ -1966,7 +2062,7 @@ def update_periodic_report(
                 t_ampm = t.get("ampm", "am")
                 t_hour = int(t.get("hour", 9))
                 t_minute = int(t.get("minute", 0))
-                
+
                 if t_ampm == "pm" and t_hour < 12:
                     h_24 = t_hour + 12
                 elif t_ampm == "am" and t_hour == 12:
@@ -1976,7 +2072,7 @@ def update_periodic_report(
                 cron_list.append(f"0 {t_minute} {h_24} * * *")
                 t_ampm_cn = "上午" if t_ampm == "am" else "下午"
                 label_times.append(f"{t_ampm_cn}{t_hour}点{t_minute:02d}分" if t_minute else f"{t_ampm_cn}{t_hour}点")
-            
+
             cron_expr = ";".join(cron_list)
             label_expr = f"每月最后一天 {', '.join(label_times)}"
             schedule_config = json.dumps({
@@ -2023,7 +2119,7 @@ def update_periodic_report(
         "dingtalk_secret": dingtalk_secret.strip(),
         "dingtalk_keyword": dingtalk_keyword.strip(),
     }
-    
+
     save_periodic_report_setting(report_type, update_data)
     reload_jobs()
     return frontend_redirect(f"/periodic-reports?success={quote('周期汇总配置保存成功！')}")
@@ -2040,10 +2136,13 @@ def run_periodic_report_now(report_type: str, background_tasks: BackgroundTasks)
 @frontend_router.get("/periodic-reports/download/{run_id}", dependencies=[Depends(require_login)])
 def download_periodic_report_zip(run_id: int) -> FileResponse:
     from app.repository import get_periodic_report_run
+    from app.storage_paths import is_safe_path
     run = get_periodic_report_run(run_id)
     if not run or not run.get("zip_path"):
         raise HTTPException(status_code=404, detail="周期报告包不存在")
     path = Path(run["zip_path"]).resolve()
+    if not is_safe_path(path):
+        raise HTTPException(status_code=403, detail="非法路径，拒绝访问")
     if not path.exists():
         raise HTTPException(status_code=400, detail="周期报告附件已按数据保留策略被自动清理")
     return FileResponse(path, media_type="application/zip", filename=path.name)
@@ -2072,7 +2171,7 @@ def delete_periodic_report_run_route(run_id: int) -> RedirectResponse:
 def api_get_storage() -> dict[str, Any]:
     from app.cleanup import get_storage_usage
     from app.db import connect
-    
+
     try:
         usage = get_storage_usage()
     except Exception as e:
@@ -2082,15 +2181,15 @@ def api_get_storage() -> dict[str, Any]:
             "logs_bytes": 0, "browser_state_bytes": 0, "periodic_reports_bytes": 0,
             "sqlite_db_bytes": 0, "estimated_cleanup_bytes": 0, "estimated_cleanup_files": 0
         }
-    
+
     with connect() as conn:
         row = conn.execute("SELECT * FROM storage_cleanup_settings ORDER BY id DESC LIMIT 1").fetchone()
         config = dict(row) if row else {}
-    
+
     with connect() as conn:
         row_run = conn.execute("SELECT * FROM storage_cleanup_runs ORDER BY id DESC LIMIT 1").fetchone()
         latest_run = dict(row_run) if row_run else None
-        
+
     return {
         "usage": usage,
         "config": config,
@@ -2103,14 +2202,14 @@ def api_update_storage_settings(payload: dict[str, Any]) -> dict[str, Any]:
     from app.db import connect
     from app.scheduler import reload_jobs
     import json
-    
+
     enabled = bool_value(payload.get("enabled"), True)
     allow_manual_cleanup = bool_value(payload.get("allow_manual_cleanup"), True)
     cleanup_schedule_mode = text_value(payload, "cleanup_schedule_mode", "daily")
-    
+
     cleanup_schedule_label = text_value(payload, "cleanup_schedule_label", "")
     cleanup_schedule_config = text_value(payload, "cleanup_schedule_config", "")
-    
+
     if not cleanup_schedule_label:
         if cleanup_schedule_config:
             try:
@@ -2129,7 +2228,7 @@ def api_update_storage_settings(payload: dict[str, Any]) -> dict[str, Any]:
                 cleanup_schedule_label = "每天 02:30"
         else:
             cleanup_schedule_label = "每天 02:30"
-            
+
     periodic_sent_retention_days = int_value(payload, "periodic_sent_retention_days", 3)
     periodic_failed_retention_days = int_value(payload, "periodic_failed_retention_days", 30)
     screenshot_retention_days = int_value(payload, "screenshot_retention_days", 7)
@@ -2139,7 +2238,7 @@ def api_update_storage_settings(payload: dict[str, Any]) -> dict[str, Any]:
     browser_state_retention_days = int_value(payload, "browser_state_retention_days", 30)
     browser_state_cleanup_enabled = bool_value(payload.get("browser_state_cleanup_enabled"), False)
     protect_recent_days = int_value(payload, "protect_recent_days", 3)
-    
+
     with connect() as conn:
         row = conn.execute("SELECT id FROM storage_cleanup_settings ORDER BY id DESC LIMIT 1").fetchone()
         if row:
@@ -2189,7 +2288,7 @@ def api_update_storage_settings(payload: dict[str, Any]) -> dict[str, Any]:
                     protect_recent_days
                 )
             )
-    
+
     reload_jobs()
     return {"ok": True}
 

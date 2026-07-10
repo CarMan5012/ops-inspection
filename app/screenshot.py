@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import random
 import logging
 from datetime import datetime
 from dataclasses import dataclass
@@ -27,7 +28,9 @@ DEFAULT_WATERMARK_TILE_GAP_X = 140
 DEFAULT_WATERMARK_TILE_GAP_Y = 140
 DEFAULT_WATERMARK_OPACITY = 65
 DEFAULT_WATERMARK_ANGLE = -45
-DEFAULT_TASKBAR_TEMPLATE_PATH = Path(__file__).resolve().parent / "static" / "images" / "windows-taskbar-template.png"
+TASKBAR_TEMPLATE_DIR = Path(__file__).resolve().parent / "static" / "images"
+TASKBAR_TEMPLATE_NAMES = ("windows-taskbar-template.png", "1.png", "2.png", "3.png")
+DEFAULT_TASKBAR_TEMPLATE_PATH = TASKBAR_TEMPLATE_DIR / "windows-taskbar-template.png"
 
 
 @dataclass
@@ -366,7 +369,7 @@ def _capture_with_browser(
         _assert_not_login_page_before_screenshot(page, auth_profile)
         _take_screenshot(page, item, output_path, is_real_capture, width, height)
         _apply_configured_watermark(output_path, item)
-        _apply_simulated_taskbar(output_path, item)
+        _apply_simulated_taskbar(output_path, item, run_id)
         _persist_storage_state(context, auth_profile)
     finally:
         try:
@@ -404,7 +407,9 @@ def _storage_state_path(auth_profile: dict[str, Any] | None) -> Path | None:
         return None
     raw_path = str(auth_profile.get("storage_state_path") or "").strip()
     if raw_path:
-        return Path(raw_path).expanduser().resolve()
+        safe_filename = Path(raw_path).name
+        if safe_filename:
+            return (settings.browser_state_dir / safe_filename).resolve()
     if auth_profile.get("auth_type") in {"form", "state"}:
         name = safe_name(str(auth_profile.get("name") or f"auth_{auth_profile['id']}"))
         raw_login_url = str(auth_profile.get("login_url") or "").strip()
@@ -475,14 +480,13 @@ def safe_delete_auth_state(auth_profile: dict[str, Any]) -> None:
         try:
             resolved_state = state_path.resolve()
             resolved_state_dir = settings.browser_state_dir.resolve()
-            in_browser_state_dir = resolved_state_dir in resolved_state.parents
+            in_browser_state_dir = resolved_state_dir in resolved_state.parents or resolved_state == resolved_state_dir
         except Exception:
             in_browser_state_dir = False
             
         in_data_dir = is_safe_path(state_path)
-        is_custom_path = bool(str(auth_profile.get("storage_state_path") or "").strip())
         
-        if in_browser_state_dir or in_data_dir or is_custom_path:
+        if in_browser_state_dir or in_data_dir:
             state_path.unlink(missing_ok=True)
             logger.info(f"成功清理浏览器 session 状态缓存文件: {state_path}")
         else:
@@ -627,9 +631,20 @@ def _apply_configured_watermark(image_path: Path, item: dict[str, Any]) -> None:
     )
 
 
-def _taskbar_template_path() -> Path:
-    return Path(os.getenv("TASKBAR_TEMPLATE_PATH", str(DEFAULT_TASKBAR_TEMPLATE_PATH))).resolve()
+def _taskbar_template_paths() -> list[Path]:
+    configured = os.getenv("TASKBAR_TEMPLATE_PATH", "").strip()
+    if configured:
+        return [Path(configured).resolve()]
+    return [(TASKBAR_TEMPLATE_DIR / name).resolve() for name in TASKBAR_TEMPLATE_NAMES if (TASKBAR_TEMPLATE_DIR / name).exists()]
 
+
+def _taskbar_template_path(run_id: int | str | None = None) -> Path:
+    paths = _taskbar_template_paths()
+    if not paths:
+        return DEFAULT_TASKBAR_TEMPLATE_PATH.resolve()
+    if run_id is None:
+        return random.choice(paths)
+    return random.Random(str(run_id)).choice(paths)
 
 def _format_taskbar_clock(now: datetime) -> tuple[str, str]:
     return now.strftime("%H:%M"), f"{now.year}/{now.month}/{now.day}"
@@ -740,7 +755,7 @@ def _apply_taskbar_template(image_path: Path, template_path: Path) -> None:
     logger.info(f"Applied real Windows taskbar template: {template_path} -> {image_path}")
 
 
-def _apply_simulated_taskbar(image_path: Path, item: dict[str, Any]) -> None:
+def _apply_simulated_taskbar(image_path: Path, item: dict[str, Any], run_id: int | str | None = None) -> None:
     if not _watermark_bool(item.get("taskbar_enabled"), True):
         return
 
@@ -752,7 +767,7 @@ def _apply_simulated_taskbar(image_path: Path, item: dict[str, Any]) -> None:
     if not image_path.exists():
         raise FileNotFoundError(f"Taskbar template composition failed: screenshot file not found {image_path}")
 
-    template_path = _taskbar_template_path()
+    template_path = _taskbar_template_path(run_id)
     if not template_path.exists():
         logger.warning(f"Windows 任务栏模板未找到，已跳过拼接底栏美化逻辑。模板路径: {template_path}")
         return
@@ -1051,30 +1066,10 @@ def test_auth_profile_login(auth_profile_id: int) -> dict[str, Any]:
 
 
 def _encrypt_state_data(data_str: str) -> bytes:
-    key = settings.secret_key.encode("utf-8")
-    data_bytes = data_str.encode("utf-8")
-    return _rc4_crypt(data_bytes, key)
+    from app.utils import encrypt_secret
+    return encrypt_secret(data_str).encode("utf-8")
 
 
 def _decrypt_state_data(data_bytes: bytes) -> str:
-    key = settings.secret_key.encode("utf-8")
-    decrypted = _rc4_crypt(data_bytes, key)
-    return decrypted.decode("utf-8")
-
-
-def _rc4_crypt(data: bytes, key: bytes) -> bytes:
-    S = list(range(256))
-    j = 0
-    out = []
-    for i in range(256):
-        j = (j + S[i] + key[i % len(key)]) % 256
-        S[i], S[j] = S[j], S[i]
-    i = 0
-    j = 0
-    for byte in data:
-        i = (i + 1) % 256
-        j = (j + S[i]) % 256
-        S[i], S[j] = S[j], S[i]
-        k = S[(S[i] + S[j]) % 256]
-        out.append(byte ^ k)
-    return bytes(out)
+    from app.utils import decrypt_secret
+    return decrypt_secret(data_bytes.decode("utf-8"))

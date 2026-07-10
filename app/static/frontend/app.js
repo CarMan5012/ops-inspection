@@ -480,6 +480,7 @@ function bindStaticActions(root) {
 
   root.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", (event) => {
+      event.preventDefault();
       handleAction(button.dataset.action, button.dataset.id, button);
       event.stopPropagation();
     });
@@ -490,6 +491,7 @@ function bindStaticActions(root) {
 function bindDynamicActions(root) {
   root.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", (event) => {
+      event.preventDefault();
       handleAction(button.dataset.action, button.dataset.id, button);
       event.stopPropagation();
     });
@@ -544,6 +546,8 @@ function handleAction(action, id, triggerButton = null) {
     resetAllJobs(triggerButton);
   } else if (action === "close-modal") {
     closeModal();
+  } else if (action === "logout") {
+    logout();
   }
 }
 
@@ -604,9 +608,9 @@ async function loadPeriodic(showToast = false) {
 }
 
 function checkAndScheduleSilentRefresh() {
-  const hasRunning = state.runs.some(run => run.status === 'running') || 
+  const hasRunning = state.runs.some(run => run.status === 'running') ||
                      (state.periodic.runs || []).some(run => run.status === 'running');
-  
+
   if (hasRunning) {
     if (!silentRefreshTimer) {
       silentRefreshTimer = setInterval(refreshAllSilently, 4000);
@@ -634,10 +638,10 @@ async function refreshAllSilently() {
     renderRuns();
     renderAuthProfiles();
     renderMailProfiles();
-    
+
     state.periodic = await apiGet("/periodic-reports");
     renderPeriodic();
-    
+
     checkAndScheduleSilentRefresh();
   } catch (error) {
     console.error("静默刷新数据失败:", error);
@@ -727,7 +731,7 @@ async function loadRunsData(page = 1, pageSize = 10) {
     state.runsPage = data.page || 1;
     state.runsPageSize = data.page_size || 10;
     state.runsTotal = data.total || 0;
-    
+
     renderRunsPage(data.runs || []);
   } catch (error) {
     renderError(regions.runs, error);
@@ -1055,10 +1059,10 @@ function renderPeriodic() {
 
 function tryParseCronToSimple(cron) {
   if (!cron) return null;
-  
+
   const cronParts = cron.split(';').map(p => p.trim()).filter(Boolean);
   if (cronParts.length === 0) return null;
-  
+
   let result = {
     frequency: "daily",
     morning_enabled: false,
@@ -1066,13 +1070,13 @@ function tryParseCronToSimple(cron) {
     afternoon_enabled: false,
     afternoon_time: ""
   };
-  
+
   for (const cronStr of cronParts) {
     const parts = cronStr.split(/\s+/);
     if (parts.length !== 5) return null;
     const [mPart, hPart, domPart, monPart, dowPart] = parts;
     if (domPart !== "*" || monPart !== "*") return null;
-    
+
     let frequency = "daily";
     if (dowPart === "*" || dowPart === "?") {
       frequency = "daily";
@@ -1082,11 +1086,11 @@ function tryParseCronToSimple(cron) {
       return null;
     }
     result.frequency = frequency;
-    
+
     const hours = hPart.split(",").map(Number);
     const minutes = mPart.split(",").map(Number);
     if (hours.some(isNaN) || minutes.some(isNaN) || hours.length > 2) return null;
-    
+
     if (hours.length === 1) {
       const h = hours[0];
       if (minutes.length !== 1) return null;
@@ -1120,12 +1124,12 @@ function tryParseCronToSimple(cron) {
       return null;
     }
   }
-  
+
   if (!result.morning_time) result.morning_time = "09:05";
   if (!result.afternoon_time) result.afternoon_time = "17:05";
-  
+
   if (!result.morning_enabled && !result.afternoon_enabled) return null;
-  
+
   return result;
 }
 
@@ -1134,7 +1138,7 @@ function bindJobFormEvents(form) {
   const modeSelect = form.querySelector('#job-schedule-mode-select');
   const simpleSec = form.querySelector('#simple-schedule-section');
   const cronSec = form.querySelector('#cron-schedule-section');
-  
+
   function updateSections() {
     const mode = modeSelect.value;
     if (mode === "simple") {
@@ -1147,15 +1151,15 @@ function bindJobFormEvents(form) {
       form.querySelector('[name="cron_expression"]').required = true;
     }
   }
-  
+
   modeSelect.addEventListener("change", updateSections);
   updateSections();
-  
+
   const morningCheck = form.querySelector('[name="morning_enabled"]');
   const morningTimeInput = form.querySelector('[name="morning_time"]');
   const afternoonCheck = form.querySelector('[name="afternoon_enabled"]');
   const afternoonTimeInput = form.querySelector('[name="afternoon_time"]');
-  
+
   function updateTimeInputs() {
     morningTimeInput.disabled = !morningCheck.checked;
     afternoonTimeInput.disabled = !afternoonCheck.checked;
@@ -1167,7 +1171,7 @@ function bindJobFormEvents(form) {
 
 function openJobModal(job = null) {
   const isEdit = Boolean(job);
-  
+
   let scheduleMode = job?.schedule_mode || "simple";
   let sc = {};
   if (job?.schedule_config) {
@@ -1180,21 +1184,21 @@ function openJobModal(job = null) {
   }
 
   const cronSimple = job?.cron_expression ? (tryParseCronToSimple(job.cron_expression) || {}) : {};
-  
+
   let morningTime = sc.morning_time || "09:05";
   let morningIsRandom = false;
   if (morningTime.toUpperCase().endsWith(":R")) {
     morningIsRandom = true;
     morningTime = cronSimple.morning_time || "09:05";
   }
-  
+
   let afternoonTime = sc.afternoon_time || "17:05";
   let afternoonIsRandom = false;
   if (afternoonTime.toUpperCase().endsWith(":R")) {
     afternoonIsRandom = true;
     afternoonTime = cronSimple.afternoon_time || "17:05";
   }
-  
+
   const frequency = sc.frequency || "daily";
   const morningEnabled = sc.morning_enabled !== undefined ? sc.morning_enabled : true;
   const afternoonEnabled = sc.afternoon_enabled !== undefined ? sc.afternoon_enabled : true;
@@ -1206,11 +1210,11 @@ function openJobModal(job = null) {
     <form class="form-grid wide" data-form="job">
       ${field("任务名称", "name", job?.name || "", "text", true)}
       ${field("运行环境", "environment", job?.environment || "生产环境")}
-      
+
       <div class="span-2" style="border-top: 1px solid #ddd; margin: 5px 0; padding-top: 10px;">
         <strong>定时巡检计划配置：</strong>
       </div>
-      
+
       <label class="span-2">
         巡检定时模式
         <select name="schedule_mode" id="job-schedule-mode-select">
@@ -1218,7 +1222,7 @@ function openJobModal(job = null) {
           <option value="cron" ${scheduleMode === "cron" ? "selected" : ""}>高级时间规则模式</option>
         </select>
       </label>
-      
+
       <!-- 简易配置容器 -->
       <div id="simple-schedule-section" class="span-2 form-grid wide" style="padding: 0; gap: 15px;">
         <label class="span-2">
@@ -1228,7 +1232,7 @@ function openJobModal(job = null) {
             <option value="workday" ${frequency === "workday" ? "selected" : ""}>周一到周五</option>
           </select>
         </label>
-        
+
         <label class="check">
           <input type="checkbox" name="morning_enabled" ${morningEnabled ? "checked" : ""}>
           启用上午巡检
@@ -1241,7 +1245,7 @@ function openJobModal(job = null) {
             随机分钟执行
           </label>
         </label>
-        
+
         <label class="check">
           <input type="checkbox" name="afternoon_enabled" ${afternoonEnabled ? "checked" : ""}>
           启用下午巡检
@@ -1255,7 +1259,7 @@ function openJobModal(job = null) {
           </label>
         </label>
       </div>
-      
+
       <!-- 高级时间规则配置 -->
       <div id="cron-schedule-section" class="span-2 form-grid wide" style="padding: 0; gap: 15px; display: none;">
         ${field("高级时间规则", "cron_expression", job?.cron_expression || "0 9 * * *", "text", false)}
@@ -1265,10 +1269,10 @@ function openJobModal(job = null) {
       <div class="span-2" style="border-top: 1px solid #ddd; margin: 5px 0; padding-top: 10px;">
         <strong>发信与浏览器配置：</strong>
       </div>
-      
+
       ${selectField("邮件配置", "mail_profile_id", job?.mail_profile_id || "", state.mailProfiles.map((profile) => [profile.id, profile.name]))}
       ${field("时间范围", "time_range_label", job?.time_range_label || "最近24小时")}
-      
+
       <label class="check">
         <input type="checkbox" name="send_mail_on_complete" ${sendMailOnComplete ? "checked" : ""}>
         巡检完成后发送邮件
@@ -1285,7 +1289,7 @@ function openJobModal(job = null) {
         <input type="checkbox" name="dingtalk_enabled" id="spa_dingtalk_enabled_chk" ${job && asBool(job.dingtalk_enabled) ? "checked" : ""}>
         启用钉钉群组推送 (使用全局配置)
       </label>
-      
+
       <details class="advanced-settings span-2" style="margin-top: 10px;">
         <summary>高级浏览器设置</summary>
         <div class="form-grid wide advanced-grid">
@@ -1298,16 +1302,16 @@ function openJobModal(job = null) {
           </label>
         </div>
       </details>
-      
+
       ${checkField("启用任务", "enabled", job ? asBool(job.enabled) : true)}
- 
+
       <div class="form-actions span-2" style="margin-top: 10px;">
         <button class="button" type="button" data-action="close-modal">取消</button>
         <button class="button primary" type="submit">${isEdit ? "保存修改" : "创建任务"}</button>
       </div>
     </form>
   `);
- 
+
   const form = regions.modal.querySelector('[data-form="job"]');
   bindJobFormEvents(form);
 
@@ -1331,19 +1335,19 @@ function openJobModal(job = null) {
     dtCheck.addEventListener('change', updateDingtalkFields);
     updateDingtalkFields();
   }
-  
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!validateForm(form)) return;
-    
+
     const morningTimeVal = form.querySelector('[name="morning_time"]');
     const afternoonTimeVal = form.querySelector('[name="afternoon_time"]');
     const morningRandom = form.querySelector('#spa_morning_random_chk');
     const afternoonRandom = form.querySelector('#spa_afternoon_random_chk');
-    
+
     let hiddenMorning = null;
     let hiddenAfternoon = null;
-    
+
     if (morningTimeVal && morningRandom && morningRandom.checked) {
       const val = morningTimeVal.value.trim();
       if (val && val.includes(':')) {
@@ -1355,7 +1359,7 @@ function openJobModal(job = null) {
         form.appendChild(hiddenMorning);
       }
     }
-    
+
     if (afternoonTimeVal && afternoonRandom && afternoonRandom.checked) {
       const val = afternoonTimeVal.value.trim();
       if (val && val.includes(':')) {
@@ -1367,13 +1371,13 @@ function openJobModal(job = null) {
         form.appendChild(hiddenAfternoon);
       }
     }
-    
+
     const submitButton = form.querySelector('button[type="submit"]');
     setButtonLoading(submitButton, true);
     try {
-      await apiJson(isEdit ? `/jobs/${job.id}` : "/jobs", { 
-        method: isEdit ? "PUT" : "POST", 
-        body: formToPayload(form) 
+      await apiJson(isEdit ? `/jobs/${job.id}` : "/jobs", {
+        method: isEdit ? "PUT" : "POST",
+        body: formToPayload(form)
       });
       closeModal();
       showSuccess(isEdit ? "任务已更新" : "任务已创建");
@@ -1738,11 +1742,28 @@ async function apiGet(path) {
   return apiJson(path, { method: "GET" });
 }
 
+function getCookie(name) {
+  const value = `; ${document.cookie}`;
+  const parts = value.split(`; ${name}=`);
+  if (parts.length === 2) return parts.pop().split(';').shift();
+  return "";
+}
+
 async function apiJson(path, options = {}) {
   const url = apiUrl(path);
+  const method = options.method || "GET";
+  const headers = { "Content-Type": "application/json", "Accept": "application/json" };
+
+  if (method !== "GET" && method !== "HEAD") {
+    const csrfToken = getCookie("csrf_token");
+    if (csrfToken) {
+      headers["X-CSRF-Token"] = csrfToken;
+    }
+  }
+
   const response = await fetch(url, {
-    method: options.method || "GET",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    method: method,
+    headers: headers,
     credentials: "same-origin",
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
@@ -1761,6 +1782,16 @@ async function apiJson(path, options = {}) {
   return data;
 }
 
+async function logout() {
+  const csrfToken = getCookie("csrf_token");
+  const headers = csrfToken ? { "X-CSRF-Token": csrfToken } : {};
+  await fetch(getFrontendUrl("logout"), {
+    method: "POST",
+    headers,
+    credentials: "same-origin",
+  });
+  window.location.href = getFrontendUrl("login");
+}
 function statusBadge(status, label) {
   const value = String(status || "").toLowerCase();
   const className = value === "success" ? "ok" : value === "failed" ? "bad" : value === "partial_success" ? "warn" : value === "running" ? "info" : "";
@@ -2110,7 +2141,7 @@ async function loadStorage(showToast = false) {
     const data = await apiGet("/storage");
     state.storage.usage = data.usage || {};
     state.storage.config = data.config || {};
-    
+
     const runsData = await apiGet("/storage/cleanup-runs");
     state.storage.cleanupRuns = runsData.runs || [];
 
@@ -2119,7 +2150,7 @@ async function loadStorage(showToast = false) {
 
     const securityData = await apiGet("/security-settings");
     state.storage.security = securityData || {};
-    
+
     renderStorage();
     if (showToast) {
       showSuccess("存储状态数据已刷新");
@@ -2393,7 +2424,7 @@ function renderStorage() {
 function bindStorageFormEvents(form) {
   if (!form) return;
   bindFormValidation(form);
-  
+
   const modeSelect = form.querySelector('[name="cleanup_schedule_mode"]');
   const dowLabel = form.querySelector('#storage-dow-label');
   const domLabel = form.querySelector('#storage-dom-label');
@@ -2427,7 +2458,7 @@ function bindStorageFormEvents(form) {
 
   modeSelect.addEventListener("change", updateScheduleFields);
   bsCheckbox.addEventListener("change", updateBrowserFields);
-  
+
   updateScheduleFields();
   updateBrowserFields();
 
@@ -2436,10 +2467,10 @@ function bindStorageFormEvents(form) {
     if (!validateForm(form)) return;
     const submitButton = form.querySelector('button[type="submit"]');
     setButtonLoading(submitButton, true);
-    
+
     try {
       const payload = formToPayload(form);
-      
+
       const scheduleConfig = {
         time: form.querySelector('[name="schedule_time"]').value || "02:30"
       };
@@ -2448,13 +2479,13 @@ function bindStorageFormEvents(form) {
       } else if (payload.cleanup_schedule_mode === "monthly") {
         scheduleConfig.day_of_month = form.querySelector('[name="schedule_day_of_month"]').value || "1";
       }
-      
+
       payload.cleanup_schedule_config = JSON.stringify(scheduleConfig);
-      
+
       delete payload.schedule_time;
       delete payload.schedule_day_of_week;
       delete payload.schedule_day_of_month;
-      
+
       await apiJson("/storage/settings", { method: "PUT", body: payload });
       showSuccess("数据保留策略配置保存成功！");
       await loadStorage(false);
@@ -2568,7 +2599,7 @@ async function resetAllJobs(btn) {
     message: "警告：此操作将永久清空所有历史运行记录、截图及报告文件，并重置流水号从 #1 开始。\n\n✅ 巡检任务配置将完整保留，无需重新配置。\n\n历史数据一旦删除将不可恢复！",
     confirmText: "确认清空历史"
   });
-  
+
   if (!mfaCode) return; // 用户取消
 
   setButtonLoading(btn, true);
@@ -2578,7 +2609,7 @@ async function resetAllJobs(btn) {
       body: { mfa_code: mfaCode }
     });
     showSuccess(result.message || "历史运行记录已清空，任务配置已保留！");
-    
+
     // 重新加载统计数据刷新 UI
     await loadStorage(true);
   } catch (error) {
