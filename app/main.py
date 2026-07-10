@@ -101,69 +101,74 @@ configure_openapi(app, settings.api_prefix, settings.app_name)
 async def csrf_protect_middleware(request: Request, call_next):
     # 只针对非安全写入方法进行校验
     if request.method not in ("GET", "HEAD", "OPTIONS", "TRACE"):
-        token = request.cookies.get(COOKIE_NAME)
-        # 如果带有登录Cookie，强制要求进行CSRF验证
-        if token and verify_token(token):
-            # 1. 校验 Origin / Referer 同源性
-            scheme = request.url.scheme
-            netloc = request.url.netloc
-            forwarded_proto = request.headers.get("x-forwarded-proto", scheme)
-            forwarded_host = request.headers.get("x-forwarded-host", netloc)
+        # 1. 校验 Origin / Referer 同源性
+        scheme = request.url.scheme
+        netloc = request.url.netloc
+        forwarded_proto = request.headers.get("x-forwarded-proto", scheme)
+        forwarded_host = request.headers.get("x-forwarded-host", netloc)
 
-            origin = request.headers.get("origin")
-            referer = request.headers.get("referer")
+        origin = request.headers.get("origin")
+        referer = request.headers.get("referer")
 
-            def same_origin(value: str) -> bool:
-                from urllib.parse import urlsplit
+        def same_origin(value: str) -> bool:
+            from urllib.parse import urlsplit
 
-                try:
-                    parsed = urlsplit(value)
-                    # 剥离端口号进行比对，防止 Nginx 的 $host（无端口）与浏览器的 Origin（含端口）不一致
-                    parsed_host = parsed.netloc.split(":")[0]
-                    f_host_clean = forwarded_host.split(":")[0]
-                    
-                    # 允许 http 和 https 协议兼容（针对反向代理链路中的 SSL 卸载/Termination 情况）
-                    scheme_ok = (
-                        parsed.scheme.lower() == forwarded_proto.lower()
-                        or {parsed.scheme.lower(), forwarded_proto.lower()} <= {"http", "https"}
-                    )
-                    return scheme_ok and parsed_host.lower() == f_host_clean.lower()
-                except Exception:
-                    return False
+            try:
+                parsed = urlsplit(value)
+                # 剥离端口号进行比对，防止 Nginx 的 $host（无端口）与浏览器的 Origin（含端口）不一致
+                parsed_host = parsed.netloc.split(":")[0]
+                f_host_clean = forwarded_host.split(":")[0]
+                
+                # 允许 http 和 https 协议兼容（针对反向代理链路中的 SSL 卸载/Termination 情况）
+                scheme_ok = (
+                    parsed.scheme.lower() == forwarded_proto.lower()
+                    or {parsed.scheme.lower(), forwarded_proto.lower()} <= {"http", "https"}
+                )
+                return scheme_ok and parsed_host.lower() == f_host_clean.lower()
+            except Exception:
+                return False
 
-            origin_ok = False
-            if origin:
-                if same_origin(origin):
-                    origin_ok = True
-            elif referer:
-                if same_origin(referer):
-                    origin_ok = True
+        origin_ok = False
+        if origin:
+            if same_origin(origin):
+                origin_ok = True
+        elif referer:
+            if same_origin(referer):
+                origin_ok = True
 
-            if not origin_ok:
-                return HTMLResponse(content="Forbidden: Origin or Referer check failed", status_code=403)
+        if not origin_ok:
+            app_logger.warning("CSRF Forbidden: Origin or Referer check failed")
+            return HTMLResponse(content="Forbidden: Origin or Referer check failed", status_code=403)
 
-            # 2. 校验 CSRF Token
-            cookie_csrf = request.cookies.get("csrf_token")
-            if not cookie_csrf:
-                return HTMLResponse(content="Forbidden: Missing CSRF token in cookie", status_code=403)
+        # 2. 校验 CSRF Token
+        cookie_csrf = request.cookies.get("csrf_token")
+        if not cookie_csrf:
+            app_logger.warning("CSRF Forbidden: Missing CSRF token in cookie")
+            return HTMLResponse(content="Forbidden: Missing CSRF token in cookie", status_code=403)
 
-            request_csrf = request.headers.get("x-csrf-token")
+        request_csrf = request.headers.get("x-csrf-token")
 
-            # 若 Header 缺省且是 Form 表单提交，从 Form 中安全提取
-            if not request_csrf:
-                content_type = request.headers.get("content-type", "")
-                if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
-                    # 复制备份 body，防止 request.form() 挂起
-                    body = await request.body()
-                    async def receive():
-                        return {"type": "http.request", "body": body, "more_body": False}
-                    request._receive = receive
+        # 若 Header 缺省且是 Form 表单提交，从 Form 中安全提取
+        if not request_csrf:
+            content_type = request.headers.get("content-type", "")
+            if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+                # 复制备份 body，防止 request.form() 挂起
+                body = await request.body()
+                async def receive():
+                    return {"type": "http.request", "body": body, "more_body": False}
+                request._receive = receive
 
-                    form_data = await request.form()
-                    request_csrf = form_data.get("csrf_token")
+                form_data = await request.form()
+                request_csrf = form_data.get("csrf_token")
 
-            if not request_csrf or request_csrf != cookie_csrf:
-                return HTMLResponse(content="Forbidden: CSRF token mismatch", status_code=403)
+        if not request_csrf:
+            app_logger.warning("CSRF Forbidden: Missing CSRF token in request")
+            return HTMLResponse(content="Forbidden: Missing CSRF token in request", status_code=403)
+
+        import hmac
+        if not hmac.compare_digest(request_csrf, cookie_csrf):
+            app_logger.warning("CSRF Forbidden: CSRF token mismatch")
+            return HTMLResponse(content="Forbidden: CSRF token mismatch", status_code=403)
 
     response = await call_next(request)
 
@@ -180,6 +185,7 @@ async def csrf_protect_middleware(request: Request, call_next):
                 httponly=False,
                 samesite="lax",
                 secure=is_secure,
+                path=settings.frontend_base_path,
                 max_age=get_session_ttl_seconds(),
             )
 
@@ -526,7 +532,12 @@ def on_shutdown() -> None:
 @frontend_router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request) -> HTMLResponse:
     security = security_settings()
-    return templates.TemplateResponse(
+    
+    # 每次渲染登录页面时，主动生成并下发一个新的强随机 csrf_token，确保页面表单与 Cookie 状态保持一致
+    import secrets
+    csrf_token = secrets.token_urlsafe(32)
+    
+    response = templates.TemplateResponse(
         "login.html",
         {
             "request": request,
@@ -535,6 +546,32 @@ def login_page(request: Request) -> HTMLResponse:
             "login_public_key": get_login_public_jwk(),
         },
     )
+    
+    # 动态识别请求协议，自适应设置 secure 属性
+    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    cookie_path = settings.frontend_base_path
+    
+    response.set_cookie(
+        "csrf_token",
+        csrf_token,
+        httponly=False,
+        samesite="lax",
+        secure=is_secure,
+        path=cookie_path,
+        max_age=get_session_ttl_seconds(),
+    )
+    
+    # 检查请求中是否带有旧的且已经失效的会话 Cookie。如果是，主动从浏览器中清理它，避免干扰
+    token = request.cookies.get(COOKIE_NAME)
+    if token and not verify_token(token):
+        response.delete_cookie(COOKIE_NAME, path=cookie_path)
+        
+    # 添加防缓存头部，避免浏览器或代理缓存登录页面
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    
+    return response
 
 
 @frontend_router.post("/login")
@@ -561,6 +598,7 @@ def login(
             return frontend_redirect("/login?error=mfa")
     response = frontend_redirect("/")
     is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    cookie_path = settings.frontend_base_path
     import secrets
     csrf_token = secrets.token_urlsafe(32)
     response.set_cookie(
@@ -569,6 +607,7 @@ def login(
         httponly=False,
         samesite="lax",
         secure=is_secure,
+        path=cookie_path,
         max_age=get_session_ttl_seconds(),
     )
     response.set_cookie(
@@ -577,8 +616,13 @@ def login(
         httponly=True,
         samesite="lax",
         secure=is_secure,
+        path=cookie_path,
         max_age=get_session_ttl_seconds(),
     )
+    # 添加防缓存头部，防止代理缓存登录状态
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     return response
 
 
@@ -589,8 +633,13 @@ def logout(request: Request) -> RedirectResponse:
         from app.auth import revoke_token
         revoke_token(token)
     response = frontend_redirect("/login")
-    response.delete_cookie(COOKIE_NAME)
-    response.delete_cookie("csrf_token")
+    cookie_path = settings.frontend_base_path
+    response.delete_cookie(COOKIE_NAME, path=cookie_path)
+    response.delete_cookie("csrf_token", path=cookie_path)
+    # 添加防缓存头部
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     return response
 
 
