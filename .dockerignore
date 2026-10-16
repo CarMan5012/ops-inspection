@@ -7,3 +7,5 @@ data
 .env
 .pytest_cache
 .mypy_cache
+frontend/node_modules
+app/static/vue

@@ -2,37 +2,33 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <h1>{{ "修改巡检任务" if job.id else "新建巡检任务" }}</h1>
-    <p class="muted">巡检任务是调度的核心单元，控制着执行频率、截图合并生成的 Word 报告内容以及发信目标邮箱。</p>
+    <h1>{{ "编辑任务" if job.id else "新增任务" }}</h1>
   </div>
 </div>
 
-<form method="post" action="{{ action }}" class="panel">
+<form method="post" action="{{ action }}" class="panel form-page">
   <!-- 第一部分：基本信息 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 任务基本信息</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">基本信息</h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label>
-      任务名称 <span style="color: var(--danger);">* (必填)</span>
+      任务名称 <span style="color: var(--danger);">*</span>
       <input name="name" value="{{ job.name or '' }}" required placeholder="例如：核心看板每日早巡检">
-      <span class="form-tip">给巡检计划起一个易于识别的名称。</span>
     </label>
     <label>
-      运行环境 <span style="color: var(--danger);">* (必填)</span>
+      运行环境 <span style="color: var(--danger);">*</span>
       <input name="environment" value="{{ job.environment or '生产环境' }}" required placeholder="例如：生产环境、测试环境">
-      <span class="form-tip">标识本项任务所属的基础设施环境。</span>
     </label>
   </div>
 
   <!-- 第二部分：执行计划 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 巡检时间计划</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">巡检时间</h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label class="span-2">
-      时间配置模式 <span style="color: var(--danger);">*</span>
+      时间设置 <span style="color: var(--danger);">*</span>
       <select name="schedule_mode" id="job-schedule-mode-select" onchange="toggleScheduleMode(this.value)">
-        <option value="simple" {% if job.schedule_mode == 'simple' or not job.schedule_mode %}selected{% endif %}>常规中文配置计划 (推荐)</option>
-        <option value="cron" {% if job.schedule_mode == 'cron' %}selected{% endif %}>高级 Cron 表达式</option>
+        <option value="simple" {% if job.schedule_mode == 'simple' or not job.schedule_mode %}selected{% endif %}>按时间设置</option>
+        <option value="cron" {% if job.schedule_mode == 'cron' %}selected{% endif %}>Cron 表达式</option>
       </select>
-      <span class="form-tip">您可以直接在下方选择简易中文频率与时间，或使用高级 Cron 表达式。</span>
     </label>
 
     <!-- 简单中文时间配置 -->
@@ -51,7 +47,7 @@
       </label>
       <label>
         上午时间
-        <input type="text" name="morning_time" id="morning_time_val" value="09:05" placeholder="例如: 09:05 或 09:R (分钟为 R 表示随机)" pattern="([0-1][0-9]|2[0-3]):([0-5][0-9]|[Rr])" required>
+      <input type="text" name="morning_time" id="morning_time_val" value="09:05" placeholder="09:05" pattern="([0-1][0-9]|2[0-3]):([0-5][0-9]|[Rr])" required>
         <label class="check" style="display: inline-block; margin-top: 6px; font-size: 12px; font-weight: normal; color: var(--text-muted);">
           <input type="checkbox" id="morning_random_chk" onchange="toggleRandomMinute('morning', this.checked)">
           随机分钟执行
@@ -64,7 +60,7 @@
       </label>
       <label>
         下午时间
-        <input type="text" name="afternoon_time" id="afternoon_time_val" value="17:05" placeholder="例如: 17:05 或 17:R (分钟为 R 表示随机)" pattern="([0-1][0-9]|2[0-3]):([0-5][0-9]|[Rr])" required>
+      <input type="text" name="afternoon_time" id="afternoon_time_val" value="17:05" placeholder="17:05" pattern="([0-1][0-9]|2[0-3]):([0-5][0-9]|[Rr])" required>
         <label class="check" style="display: inline-block; margin-top: 6px; font-size: 12px; font-weight: normal; color: var(--text-muted);">
           <input type="checkbox" id="afternoon_random_chk" onchange="toggleRandomMinute('afternoon', this.checked)">
           随机分钟执行
@@ -76,66 +72,63 @@
     <label id="cron_schedule_container" class="span-2">
       Cron 表达式 <span style="color: var(--danger);">*</span>
       <input name="cron_expression" value="{{ job.cron_expression or '0 9 * * *' }}">
-      <span class="form-tip">使用标准 5 位 Linux Cron，例如 <code>0 9 * * *</code> (每天上午9点)。</span>
+      <span class="form-tip">5 位 Cron，例如 <code>0 9 * * *</code>（每天 9 点）。</span>
     </label>
   </div>
 
   <!-- 第三部分：报告文件与推送 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、 报告文件与推送设置</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">报告与通知</h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label>
-      报告封面标题 <span style="color: var(--danger);">* (必填)</span>
+      报告标题 <span style="color: var(--danger);">*</span>
       <input name="report_title" value="{{ job.report_title or '自动化巡检报告' }}" required>
-      <span class="form-tip">生成的 Word 文档封面大标题。</span>
+      <span class="form-tip">用于报告封面和文件名。</span>
     </label>
     <label>
-      封面统计周期描述 <span style="color: var(--danger);">* (必填)</span>
+      时间范围 <span style="color: var(--danger);">*</span>
       <input name="time_range_label" value="{{ job.time_range_label or '最近24小时' }}" required>
-      <span class="form-tip">封面展示的时间范围描述，例如“最近24小时”或“即时”。</span>
     </label>
     <label class="span-2">
-      关联的邮件发信服务器配置
+      邮件配置
       <select name="mail_profile_id">
-        <option value="">暂不进行邮件推送 (仅保留本地文件归档)</option>
+        <option value="">不发送邮件</option>
         {% for profile in mail_profiles %}
         <option value="{{ profile.id }}" {% if job.mail_profile_id == profile.id %}selected{% endif %}>{{ profile.name }}</option>
         {% endfor %}
       </select>
-      <span class="form-tip">选择巡检报告生成后，用于执行发信的 SMTP 邮箱配置。</span>
     </label>
 
     <!-- 钉钉群组推送 -->
     <div class="span-2" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 16px; border-radius: 6px; margin-top: 10px;">
       <label class="check" style="margin-bottom: 0; display: block; font-weight: 600;">
         <input name="dingtalk_enabled" type="checkbox" {% if job.dingtalk_enabled %}checked{% endif %}>
-        启用钉钉群组推送 (使用全局配置)
+        发送钉钉通知（使用系统配置）
       </label>
     </div>
   </div>
 
   <!-- 第四部分：浏览器运行配置 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">四、 浏览器与截图选项</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">浏览器设置</h3>
   <div class="form-grid" style="margin-bottom: 24px;">
     <label>
-      默认浏览器宽度 (px) <span style="color: var(--danger);">*</span>
+      浏览器宽度（px） <span style="color: var(--danger);">*</span>
       <input name="browser_width" type="number" value="{{ job.browser_width or 3840 }}" required>
-      <span class="form-tip">模拟浏览器窗口的宽度，常用于自适应看板分辨率（推荐 3840）。</span>
     </label>
     <label>
-      默认浏览器高度 (px) <span style="color: var(--danger);">*</span>
+      浏览器高度（px） <span style="color: var(--danger);">*</span>
       <input name="browser_height" type="number" value="{{ job.browser_height or 2160 }}" required>
-      <span class="form-tip">模拟浏览器窗口的高度（推荐 2160）。</span>
+      <span class="form-tip">真实窗口截图的最终图片高度，已包含任务栏。</span>
     </label>
     <label>
-      浏览器显示缩放比例 (DPR) <span style="color: var(--danger);">*</span>
+      显示缩放 <span style="color: var(--danger);">*</span>
       <input name="browser_scale_factor" type="number" step="0.1" min="0.5" max="3.0" value="{{ job.get('browser_scale_factor') if job.get('browser_scale_factor') is not none else 1.5 }}" required>
-      <span class="form-tip">页面渲染缩放比（1.5 代表 150%，默认为 1.5。配合分辨率可以得到合适大小字体的排版效果）。</span>
+      <span class="form-tip">1.5 = 浏览器按 150% 显示，截图尺寸不变。</span>
     </label>
     
     <div class="span-2" style="display: flex; gap: 24px; margin: 8px 0; flex-wrap: wrap;">
       <label class="check">
         <input name="enabled" type="checkbox" {% if job.enabled is not defined or job.enabled %}checked{% endif %}>
-        启用此任务计划 (自动定时运行)
+        启用定时巡检
       </label>
       <label class="check">
         <input name="send_mail_on_complete" type="checkbox" {% if job.send_mail_on_complete %}checked{% endif %}>

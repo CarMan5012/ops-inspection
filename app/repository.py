@@ -4,7 +4,21 @@ import sqlite3
 from typing import Any
 
 from app.db import connect
+from app.watermark import WATERMARK_DEFAULTS
 from app.utils import normalize_secret_for_storage
+
+
+def dashboard_data() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read the dashboard snapshot with one SQLCipher connection."""
+    with connect() as conn:
+        jobs = conn.execute("""
+            SELECT j.*, m.name AS mail_profile_name FROM report_jobs j
+            LEFT JOIN mail_profiles m ON m.id = j.mail_profile_id ORDER BY j.id DESC
+        """).fetchall()
+        runs = conn.execute("SELECT * FROM run_records ORDER BY id DESC LIMIT 12").fetchall()
+        auth_profiles = conn.execute("SELECT * FROM auth_profiles ORDER BY id ASC").fetchall()
+        mail_profiles = conn.execute("SELECT * FROM mail_profiles ORDER BY id ASC").fetchall()
+    return tuple([dict(row) for row in rows] for rows in (jobs, runs, auth_profiles, mail_profiles))
 
 
 def list_jobs() -> list[dict[str, Any]]:
@@ -51,6 +65,7 @@ def save_job(data: dict[str, Any], job_id: int | None = None) -> int:
         "cron_expression",
         "time_range_label",
         "report_title",
+        "template_id",
         "mail_profile_id",
         "send_mail",
         "browser_width",
@@ -63,6 +78,9 @@ def save_job(data: dict[str, Any], job_id: int | None = None) -> int:
         "send_mail_on_complete",
         "send_mail_on_error",
         "dingtalk_enabled",
+        "dingtalk_profile_id",
+        "send_dingtalk_on_complete",
+        "send_dingtalk_on_error",
         "dingtalk_webhook",
         "dingtalk_secret",
         "dingtalk_keyword",
@@ -118,8 +136,7 @@ def get_screenshot_item(item_id: int) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
-def save_screenshot_item(data: dict[str, Any], item_id: int | None = None) -> int:
-    fields = (
+_SCREENSHOT_ITEM_FIELDS = (
         "job_id",
         "auth_profile_id",
         "name",
@@ -131,6 +148,7 @@ def save_screenshot_item(data: dict[str, Any], item_id: int | None = None) -> in
         "wait_selector",
         "wait_seconds",
         "timeout_seconds",
+        "total_timeout_seconds",
         "retry_count",
         "browser_width",
         "browser_height",
@@ -138,6 +156,8 @@ def save_screenshot_item(data: dict[str, Any], item_id: int | None = None) -> in
         "enabled",
         "real_browser_capture",
         "watermark_enabled",
+        "watermark_time_enabled",
+        "watermark_time_format",
         "watermark_text",
         "watermark_opacity",
         "watermark_font_size",
@@ -145,22 +165,27 @@ def save_screenshot_item(data: dict[str, Any], item_id: int | None = None) -> in
         "watermark_gap_y",
         "watermark_angle",
         "taskbar_enabled",
-    )
+        "taskbar_template_key",
+)
+
+
+def _screenshot_item_values(data: dict[str, Any]) -> list[Any]:
     defaults = {
-        "real_browser_capture": 1,
-        "watermark_enabled": 0,
-        "watermark_text": "",
-        "watermark_opacity": 65,
-        "watermark_font_size": 24,
-        "watermark_gap_x": 140,
-        "watermark_gap_y": 140,
-        "watermark_angle": -45,
+        "total_timeout_seconds": 240,
+        "real_browser_capture": 0,
+        **WATERMARK_DEFAULTS,
         "taskbar_enabled": 1,
+        "taskbar_template_key": "",
     }
-    values = [
+    return [
         defaults[field] if field in defaults and data.get(field) is None else data.get(field)
-        for field in fields
+        for field in _SCREENSHOT_ITEM_FIELDS
     ]
+
+
+def save_screenshot_item(data: dict[str, Any], item_id: int | None = None) -> int:
+    fields = _SCREENSHOT_ITEM_FIELDS
+    values = _screenshot_item_values(data)
     with connect() as conn:
         if item_id:
             assignments = ", ".join(f"{field} = ?" for field in fields)
@@ -175,6 +200,20 @@ def save_screenshot_item(data: dict[str, Any], item_id: int | None = None) -> in
             values,
         )
         return int(cur.lastrowid)
+
+
+def save_screenshot_items_batch(items: list[dict[str, Any]]) -> list[int]:
+    fields = _SCREENSHOT_ITEM_FIELDS
+    names = ", ".join(fields)
+    placeholders = ", ".join("?" for _ in fields)
+    with connect() as conn:
+        return [
+            int(conn.execute(
+                f"INSERT INTO screenshot_items ({names}) VALUES ({placeholders})",
+                _screenshot_item_values(item),
+            ).lastrowid)
+            for item in items
+        ]
 
 
 def delete_screenshot_item(item_id: int) -> None:
@@ -244,6 +283,56 @@ def delete_auth_profile(auth_id: int) -> None:
         conn.execute("DELETE FROM auth_profiles WHERE id = ?", (auth_id,))
 
 
+def list_dingtalk_profiles() -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM dingtalk_profiles ORDER BY id ASC").fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_dingtalk_profile(profile_id: int | None) -> dict[str, Any] | None:
+    if not profile_id:
+        return None
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM dingtalk_profiles WHERE id = ?", (profile_id,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def save_dingtalk_profile(data: dict[str, Any], profile_id: int | None = None) -> int:
+    data = dict(data)
+    if data.get("webhook"):
+        data["webhook"] = normalize_secret_for_storage(str(data.get("webhook") or ""))
+    if data.get("secret"):
+        data["secret"] = normalize_secret_for_storage(str(data.get("secret") or ""))
+
+    fields = (
+        "name",
+        "webhook",
+        "secret",
+        "keyword",
+        "emoji_enabled",
+    )
+    values = [data.get(field) for field in fields]
+    with connect() as conn:
+        if profile_id:
+            assignments = ", ".join(f"{field} = ?" for field in fields)
+            conn.execute(
+                f"UPDATE dingtalk_profiles SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (*values, profile_id),
+            )
+            return profile_id
+        placeholders = ", ".join("?" for _ in fields)
+        cur = conn.execute(
+            f"INSERT INTO dingtalk_profiles ({', '.join(fields)}) VALUES ({placeholders})",
+            values,
+        )
+        return int(cur.lastrowid)
+
+
+def delete_dingtalk_profile(profile_id: int) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM dingtalk_profiles WHERE id = ?", (profile_id,))
+
+
 def list_mail_profiles() -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute("SELECT * FROM mail_profiles ORDER BY id ASC").fetchall()
@@ -305,7 +394,7 @@ def delete_mail_profile(mail_id: int) -> None:
         conn.execute("DELETE FROM mail_profiles WHERE id = ?", (mail_id,))
 
 
-def create_run(job_id: int | None, job_name: str) -> int:
+def create_run(job_id: int | None, job_name: str, schedule_slot: str = "") -> int:
     from datetime import datetime
     from zoneinfo import ZoneInfo
     from app.settings import settings
@@ -313,8 +402,8 @@ def create_run(job_id: int | None, job_name: str) -> int:
     now_str = datetime.now(local_tz).isoformat(timespec="seconds")
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO run_records (job_id, job_name, started_at) VALUES (?, ?, ?)",
-            (job_id, job_name, now_str),
+            "INSERT INTO run_records (job_id, job_name, started_at, schedule_slot) VALUES (?, ?, ?, ?)",
+            (job_id, job_name, now_str, schedule_slot),
         )
         return int(cur.lastrowid)
 
@@ -337,8 +426,13 @@ def add_screenshot_result(data: dict[str, Any]) -> int:
         "status",
         "file_path",
         "error_message",
+        "duration_seconds",
+        "content_status",
+        "content_summary",
+        "monitor_status",
+        "monitor_data",
     )
-    values = [data.get(field) for field in fields]
+    values = [data.get(field, "not_applicable" if field in {"monitor_status", "content_status"} else "") for field in fields]
     with connect() as conn:
         cur = conn.execute(
             f"INSERT INTO screenshot_results ({', '.join(fields)}) VALUES ({', '.join('?' for _ in fields)})",
@@ -398,45 +492,44 @@ def list_screenshot_results(run_id: int) -> list[dict[str, Any]]:
 
 
 def get_previous_run_today(job_id: int, current_run_id: int) -> dict[str, Any] | None:
-    from pathlib import Path
-    from datetime import datetime, timezone
+    from datetime import datetime
     from zoneinfo import ZoneInfo
     from app.settings import settings
+    from app.storage_paths import resolve_artifact_path
 
+    with connect() as conn:
+        current = conn.execute("SELECT started_at FROM run_records WHERE id = ?", (current_run_id,)).fetchone()
+    if current is None:
+        return None
+    local_tz = ZoneInfo(settings.default_timezone)
+    started = datetime.fromisoformat(str(current["started_at"]))
+    report_day = (started.astimezone(local_tz) if started.tzinfo else started).date()
+    for run in list_report_runs_for_day(job_id, current_run_id, report_day.isoformat()):
+        previous = datetime.fromisoformat(str(run["started_at"]))
+        previous_day = (previous.astimezone(local_tz) if previous.tzinfo else previous).date()
+        if previous_day == report_day and resolve_artifact_path(run["report_path"]).is_file():
+            return run
+    return None
+
+
+def list_report_runs_for_day(job_id: int, current_run_id: int, day: str) -> list[dict[str, Any]]:
+    """Return earlier runs with reports for rebuilding one job's daily Word file."""
+    from datetime import date, timedelta
+
+    report_day = date.fromisoformat(day)
+    nearby_days = [(report_day + timedelta(days=offset)).isoformat() for offset in (-1, 0, 1)]
     with connect() as conn:
         rows = conn.execute(
             """
             SELECT * FROM run_records
-            WHERE job_id = ? AND id < ? AND report_path != '' AND report_path IS NOT NULL
+            WHERE job_id = ? AND id < ?
+              AND report_path IS NOT NULL AND report_path != ''
+              AND substr(started_at, 1, 10) IN (?, ?, ?)
             ORDER BY id DESC
-            LIMIT 20
             """,
-            (job_id, current_run_id),
+            (job_id, current_run_id, *nearby_days),
         ).fetchall()
-
-    local_tz = ZoneInfo(settings.default_timezone)
-    today_str = datetime.now(local_tz).strftime("%Y-%m-%d")
-
-    for row in rows:
-        run = dict(row)
-        started_at_str = run.get("started_at")
-        if not started_at_str:
-            continue
-        try:
-            if "T" in started_at_str:
-                dt = datetime.fromisoformat(started_at_str)
-            else:
-                dt = datetime.strptime(started_at_str, "%Y-%m-%d %H:%M:%S")
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            local_date = dt.astimezone(local_tz).strftime("%Y-%m-%d")
-            if local_date == today_str:
-                p_path = run.get("report_path")
-                if p_path and Path(p_path).exists():
-                    return run
-        except Exception:
-            continue
-    return None
+    return [dict(row) for row in rows]
 
 
 def list_periodic_report_settings() -> list[dict[str, Any]]:
@@ -481,6 +574,7 @@ def save_periodic_report_setting(report_type: str, data: dict[str, Any]) -> None
         "dingtalk_webhook",
         "dingtalk_secret",
         "dingtalk_keyword",
+        "dingtalk_profile_id",
     )
     values = [data.get(field) for field in fields]
     with connect() as conn:

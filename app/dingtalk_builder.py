@@ -90,19 +90,19 @@ def build_inspection_report_message(
     # ── 执行状态 HTML
     if is_success:
         status_html = _c(_bold("执行成功"), _C_SUCCESS)
+    elif status == "monitor_alert":
+        status_html = _c(_bold("发现 Prometheus 告警"), _C_FAILED)
+    elif status in {"monitor_unknown", "monitor_unconfigured"}:
+        status_html = _c(_bold("数据监测无法确认"), _C_FAILED)
     elif status == "failed":
         status_html = _c(_bold("执行失败"), _C_FAILED)
+    elif status == "partial_success":
+        status_html = _c(_bold("部分截图失败"), _C_FAILED)
     else:
         status_html = _c(_bold(status), _C_INFO)
 
     # ── Word 报告状态
-    if is_success:
-        if has_word_report:
-            docx_html = _c("生成成功", _C_SUCCESS)
-        else:
-            docx_html = _c("生成失败", _C_FAILED)
-    else:
-        docx_html = _c("未生成", _C_FAILED)
+    docx_html = _c("生成成功", _C_SUCCESS) if has_word_report else _c("未生成", _C_FAILED)
 
     # ── 截图数量
     sc_success_html = _c(str(success_count), _C_SUCCESS)

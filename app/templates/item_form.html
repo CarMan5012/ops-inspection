@@ -2,19 +2,17 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <h1>{{ "修改截图项" if item.id else "新建截图项" }}</h1>
-    <p class="muted">配置需要被截图的目标 URL 页面，以及用于验证页面数据加载完毕的选择器指示物。</p>
+    <h1>{{ "编辑截图项" if item.id else "新增截图项" }}</h1>
   </div>
 </div>
 
-<form method="post" action="{{ action }}" class="panel">
+<form method="post" action="{{ action }}" class="panel form-page">
   <!-- 第一部分：基本配置 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 截图项基本信息</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">基本信息</h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label>
-      截图项名称 <span style="color: var(--danger);">* (必填)</span>
+      截图项名称 <span style="color: var(--danger);">*</span>
       <input name="name" value="{{ item.name or '' }}" required placeholder="例如：应用CPU使用率看板">
-      <span class="form-tip">给当前截图项起一个简明易懂的名称。</span>
     </label>
     <label>
       类型 <span style="color: var(--danger);">*</span>
@@ -23,111 +21,108 @@
         <option value="{{ t[0] }}" {% if item.item_type == t[0] %}selected{% endif %}>{{ t[1] }}</option>
         {% endfor %}
       </select>
-      <span class="form-tip">选择目标系统类型，以便系统做部分特定的自适应渲染优化。</span>
     </label>
     <label class="span-2">
-      目标 URL 链接地址 <span style="color: var(--danger);">* (必填)</span>
+      页面地址 <span style="color: var(--danger);">*</span>
       <textarea name="url" rows="3" required placeholder="http://localhost:3000/d/xxxxxx">{{ item.url or '' }}</textarea>
-      <span class="form-tip">
-        直接填写需要截图的完整页面地址，系统会按页面上填写的地址访问。
-      </span>
     </label>
     <label>
-      Word 报告所属章节名称 <span style="color: var(--danger);">* (必填)</span>
+      报告章节 <span style="color: var(--danger);">*</span>
       <input name="section" value="{{ item.section or '巡检截图' }}" required list="template-section-options" placeholder="如：1服务器资源">
       <datalist id="template-section-options">
         {% for section in template_sections or [] %}
         <option value="{{ section }}"></option>
         {% endfor %}
       </datalist>
-      <span class="form-tip">推荐选择 Word 模板中的监控点标题。截图项名称可自由命名，报告插图位置以这里的章节名称为准。</span>
     </label>
     <label>
-      关联登录认证配置
+      登录认证
       <select name="auth_profile_id">
-        <option value="">无需登录 (匿名访问或常规公网网页)</option>
+        <option value="">无需登录</option>
         {% for profile in auth_profiles %}
         <option value="{{ profile.id }}" {% if item.auth_profile_id == profile.id %}selected{% endif %}>{{ profile.name }}</option>
         {% endfor %}
       </select>
-      <span class="form-tip">如果该页面需要登录才能查看，请关联对应的认证配置。</span>
     </label>
   </div>
 
   <!-- 第二部分：截图与加载配置 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 截图与渲染等待配置</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">截图与等待</h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label class="span-2">
-      截图获取模式 <span style="color: var(--danger);">*</span>
+      截图模式 <span style="color: var(--danger);">*</span>
       <select name="capture_mode" onchange="toggleCssSelector(this.value)">
-        <option value="viewport" {% if item.capture_mode == "viewport" %}selected{% endif %}>视口截图 (仅捕获当前浏览器窗口可视区域 - 仪表盘看板推荐)</option>
-        <option value="full_page" id="opt_full_page" {% if item.capture_mode == "full_page" %}selected{% endif %}>整页长截图 (向下自动滚动，截取完整纵深长页面)</option>
-        <option value="selector" id="opt_selector" {% if item.capture_mode == "selector" %}selected{% endif %}>局部特定元素截图 (仅获取页面中指定的某个图表卡片)</option>
+        <option value="viewport" {% if item.capture_mode == "viewport" %}selected{% endif %}>视口截图</option>
+        <option value="full_page" id="opt_full_page" {% if item.capture_mode == "full_page" %}selected{% endif %}>整页截图</option>
+        <option value="selector" id="opt_selector" {% if item.capture_mode == "selector" %}selected{% endif %}>元素截图</option>
       </select>
-      <span class="form-tip">通常仪表盘推荐使用“视口截图”以获得最佳的长宽一致性。若使用“局部特定元素截图”，请填下方的 CSS 选择器。</span>
     </label>
     <div style="display: flex; align-items: flex-end; padding-bottom: 8px;" class="span-2">
       <label class="check">
-        <input type="checkbox" id="real_browser_capture" name="real_browser_capture" {% if item.real_browser_capture is not defined or item.real_browser_capture %}checked{% endif %} onchange="onRealBrowserCaptureChange(this.checked)">
+        <input type="checkbox" id="real_browser_capture" name="real_browser_capture" {% if item.real_browser_capture %}checked{% endif %} onchange="onRealBrowserCaptureChange(this.checked)">
         真实浏览器窗口截图
         <span class="form-tip" style="display: block; margin-top: 4px; font-weight: normal;">
-          开启后：截图包含真实浏览器地址栏。<br>
-          关闭后：截图速度更快，但不包含浏览器地址栏。
+          截取完整浏览器窗口，包含标签、地址栏和右上角按钮。
         </span>
       </label>
     </div>
     <label id="css_selector_container">
-      CSS 选择器 (局部截图专用) <span style="color: var(--danger);">*</span>
+      CSS 选择器（元素截图） <span style="color: var(--danger);">*</span>
       <input name="css_selector" value="{{ item.css_selector or '' }}" placeholder="例如：div[data-panelid='12'] 或 #my-chart-id">
-      <span class="form-tip">当截图获取模式选为“局部特定元素截图”时必填。用于在页面上唯一指定待截取的 HTML 节点。</span>
+      <span class="form-tip">元素截图时必填。</span>
     </label>
     <label>
-      等待目标元素加载可见 (加载检测)
+      等待元素
       <input name="wait_selector" value="{{ item.wait_selector or '' }}" placeholder="例如：.react-grid-layout">
-      <span class="form-tip">
-        在按下快门截图前，Chromium 会持续检测网页，直到该元素呈现在页面上才执行截图。能极好防范因数据加载缓慢产生白屏。<b>Grafana</b> 看板推荐填 <code>.react-grid-layout</code>。
-      </span>
+      <span class="form-tip">选填；元素出现后再截图。</span>
     </label>
     <label>
-      额外静止等待秒数 (秒) <span style="color: var(--danger);">*</span>
-      <input name="wait_seconds" type="number" step="0.5" value="{{ item.wait_seconds or 3.0 }}" required>
-      <span class="form-tip">等待上述元素加载完毕后，再强行静止等待这几秒（用于等待折线图动画渲染、数据完全打满），随后再截图。</span>
+      手动等待（秒） <span style="color: var(--danger);">*</span>
+      <input name="wait_seconds" type="number" step="0.5" min="0" value="{{ item.wait_seconds if item.wait_seconds is not none else 3.0 }}" required>
     </label>
     <label>
-      网页加载最大超时时间 (秒) <span style="color: var(--danger);">*</span>
-      <input name="timeout_seconds" type="number" value="{{ item.timeout_seconds or 60 }}" required>
-      <span class="form-tip">等待网页初始化及获取数据的最长时限，超时将引发该项超时报警。</span>
+      单次页面截图超时（秒） <span style="color: var(--danger);">*</span>
+      <input name="timeout_seconds" type="number" min="1" value="{{ item.timeout_seconds or 60 }}" required>
+      <span class="form-tip">只计算页面访问到截图完成。</span>
     </label>
     <label>
-      失败自动重试次数 <span style="color: var(--danger);">*</span>
+      单项最长耗时（秒） <span style="color: var(--danger);">*</span>
+      <input name="total_timeout_seconds" type="number" min="1" value="{{ item.total_timeout_seconds or 240 }}" required>
+      <span class="form-tip">包含登录和重试；到时自动停止。</span>
+    </label>
+    <label>
+      失败重试次数 <span style="color: var(--danger);">*</span>
       <input name="retry_count" type="number" value="{{ item.retry_count if item.retry_count is not none else 2 }}" required>
-      <span class="form-tip">若因网络波动或加载超时导致截图失败，系统在后台自动重试测试的次数。</span>
     </label>
   </div>
 
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、截图水印配置</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">水印</h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <div style="display: flex; align-items: flex-end; padding-bottom: 8px;" class="span-2">
       <label class="check">
         <input type="checkbox" id="watermark_enabled" name="watermark_enabled" {% if item.watermark_enabled %}checked{% endif %} onchange="onWatermarkChange(this.checked)">
-        启用截图水印
-        <span class="form-tip" style="display: block; margin-top: 4px; font-weight: normal;">
-          默认关闭。开启后会按最终截图尺寸自动铺满浅色斜向水印。
-        </span>
+        启用截屏水印
       </label>
     </div>
     <div id="watermark_config" class="span-2 form-grid" style="padding: 0;">
+      <label class="check span-2">
+        <input type="checkbox" id="watermark_time_enabled" name="watermark_time_enabled" {% if item.watermark_time_enabled %}checked{% endif %} onchange="onWatermarkTimeChange(this.checked)">
+        启用时间水印
+      </label>
+      <label class="span-2" id="watermark_time_format_field">
+        时间格式
+        <select name="watermark_time_format">
+          {% for option in watermark_time_formats %}<option value="{{ option.id }}" {% if item.watermark_time_format == option.id %}selected{% endif %}>{{ option.label }}</option>{% endfor %}
+        </select>
+      </label>
       <label class="span-2">
-        水印内容
-        <textarea name="watermark_text" rows="3" placeholder="{time}&#10;省客户服务中心&#10;dwangchengyi7(王诚毅)">{% if item.watermark_text %}{{ item.watermark_text }}{% else %}{time}
-省客户服务中心
-dwangchengyi7(王诚毅){% endif %}</textarea>
-        <span class="form-tip">{time} 会自动替换为截图时间。默认内容即参考图样式。</span>
+        自定义水印内容
+        <textarea name="watermark_text" rows="3">{{ item.watermark_text or '' }}</textarea>
+        <span class="form-tip">可留空，仅显示时间水印。</span>
       </label>
       <label>
         透明度
         <input name="watermark_opacity" type="number" min="0" max="255" value="{{ item.watermark_opacity if item.watermark_opacity is not none else 65 }}">
-        <span class="form-tip">默认 65。数值越大越明显。</span>
       </label>
       <label>
         字号
@@ -144,47 +139,41 @@ dwangchengyi7(王诚毅){% endif %}</textarea>
       <label>
         倾斜角度
         <input name="watermark_angle" type="number" min="-90" max="90" value="{{ item.watermark_angle if item.watermark_angle is not none else -45 }}">
-        <span class="form-tip">默认 -45，和参考图一致。</span>
       </label>
     </div>
   </div>
 
   <!-- Windows 任务栏风格 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">四、 Windows 任务栏风格</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">任务栏</h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <div style="display: flex; align-items: flex-end; padding-bottom: 8px;" class="span-2">
       <label class="check">
         <input type="checkbox" id="taskbar_enabled" name="taskbar_enabled" {% if item.taskbar_enabled is not defined or item.taskbar_enabled %}checked{% endif %}>
         启用 Windows 任务栏风格
-        <span class="form-tip" style="display: block; margin-top: 4px; font-weight: normal;">
-          默认开启。开启后会在最终截图底部拼接真实 Windows 任务栏模板，右下角时间与截图时间同步。
-        </span>
       </label>
     </div>
   </div>
 
   <!-- 第五部分：调试与尺寸选项 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">五、 自定义浏览器尺寸与排序</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">尺寸与排序</h3>
   <div class="form-grid" style="margin-bottom: 24px;">
     <label>
-      单独浏览器宽度 (px)
-      <input name="browser_width" type="number" value="{{ item.browser_width or '' }}" placeholder="默认使用全局宽度 (例如: 3840)">
-      <span class="form-tip">可选。为本项独立指定浏览器宽度，留空则继承巡检任务中的全局默认宽度。</span>
+      浏览器宽度（px）
+      <input name="browser_width" type="number" value="{{ item.browser_width or '' }}" placeholder="留空使用任务设置">
     </label>
     <label>
-      单独浏览器高度 (px)
-      <input name="browser_height" type="number" value="{{ item.browser_height or '' }}" placeholder="默认使用全局高度 (例如: 2160)">
-      <span class="form-tip">可选。为本项独立指定浏览器高度，留空则继承巡检任务中的全局默认高度。</span>
+      浏览器高度（px）
+      <input name="browser_height" type="number" value="{{ item.browser_height or '' }}" placeholder="留空使用任务设置">
     </label>
     <label>
-      报告中排放排序序号
+      报告排序
       <input name="sort_order" type="number" value="{{ item.sort_order or 100 }}" required>
-      <span class="form-tip">用于控制本图片在 Word 报告章节中的生成顺序。数值越小，图片位置越靠前。</span>
+      <span class="form-tip">数字越小，在报告中越靠前。</span>
     </label>
     <div style="display: flex; align-items: flex-end; padding-bottom: 8px;">
       <label class="check">
         <input name="enabled" type="checkbox" {% if item.enabled is not defined or item.enabled %}checked{% endif %}>
-        启用此截图项 (若关闭，则自动在巡检运行中跳过本项)
+        启用截图项
       </label>
     </div>
   </div>
@@ -248,15 +237,13 @@ dwangchengyi7(王诚毅){% endif %}</textarea>
     if (!config) {
       return;
     }
-    config.style.opacity = checked ? '1' : '0.55';
-    const inputs = config.querySelectorAll('input, textarea');
-    inputs.forEach(el => {
-      if (checked) {
-        el.removeAttribute('disabled');
-      } else {
-        el.setAttribute('disabled', 'disabled');
-      }
-    });
+    config.style.display = checked ? '' : 'none';
+    onWatermarkTimeChange(checked && document.getElementById('watermark_time_enabled').checked);
+  }
+
+  function onWatermarkTimeChange(checked) {
+    const field = document.getElementById('watermark_time_format_field');
+    if (field) field.style.display = checked ? '' : 'none';
   }
 
   // Initialize state

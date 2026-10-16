@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from app.settings import settings
 from app.db import connect
-from app.storage_paths import resolve_artifact_path
+from app.storage_paths import resolve_artifact_path, unique_artifact_path
 from app.repository import (
     get_periodic_report_setting,
     get_periodic_report_run,
@@ -57,9 +57,22 @@ def check_today_jobs_completed(now_dt: datetime) -> tuple[bool, list[str]]:
     
     for job in jobs:
         should_run_today = False
+        expected_slots: dict[str, datetime | None] = {}
         schedule_mode = job.get("schedule_mode") or "cron"
         
-        if schedule_mode == "simple" and job.get("schedule_config"):
+        if schedule_mode == "calendar" and job.get("schedule_config"):
+            try:
+                from app.date_schedule import from_job, matches, resolved_time
+                cfg = from_job(job)
+                should_run_today = matches(now_dt.date(), cfg) is True if cfg else False
+                if should_run_today:
+                    for value in cfg["times"]:
+                        expected_slots[f"calendar-{value.replace(':', '')}"] = datetime.combine(
+                            now_dt.date(), resolved_time(value, now_dt.date(), int(job["id"])), tzinfo=local_tz,
+                        )
+            except Exception as e:
+                logger.error("解析任务 '%s' 日期计划失败: %s", job["name"], e)
+        elif schedule_mode == "simple" and job.get("schedule_config"):
             try:
                 cfg = json.loads(job["schedule_config"])
                 freq = cfg.get("frequency")
@@ -82,50 +95,45 @@ def check_today_jobs_completed(now_dt: datetime) -> tuple[bool, list[str]]:
                     last_day = calendar.monthrange(now_dt.year, now_dt.month)[1]
                     if now_dt.day == last_day:
                         should_run_today = True
+                if should_run_today:
+                    for slot in ("morning", "afternoon"):
+                        if cfg.get(f"{slot}_enabled"):
+                            expected_slots[slot] = None
             except Exception as e:
                 logger.error(f"解析任务 '{job['name']}' schedule_config 发生异常: {e}")
                 should_run_today = True
         else:
-            # 3. 对高级 Cron 任务：利用 CronTrigger 判定今天是否有任何触发火化时间点，避免每天都卡在等待列表中
-            cron_parts = [p.strip() for p in (job.get("cron_expression") or "").split(";") if p.strip()]
-            should_run_today = False
-            
-            # 今天 00:00 之后，一天内的最晚可能触发时间是今天 23:59:59
-            today_start = datetime.combine(now_dt.date(), time.min).replace(tzinfo=local_tz)
-            from apscheduler.triggers.cron import CronTrigger
-            
-            for cron_str in cron_parts:
-                cron_str_test = cron_str.replace("L", "*")
-                parts = cron_str_test.split()
-                if len(parts) == 6:
-                    cron_str_test = " ".join(parts[1:])
-                try:
-                    trigger = CronTrigger.from_crontab(cron_str_test, timezone=local_tz)
-                    next_fire = trigger.get_next_fire_time(None, today_start)
-                    if next_fire and next_fire.date() == now_dt.date():
-                        should_run_today = True
-                        break
-                except Exception as e:
-                    logger.error(f"预测高级 Cron '{cron_str}' 在今天触发时间出错: {e}")
-                    should_run_today = True # 降级容错
-                    break
+            # 旧表达式计划已暂停，不作为当天应执行任务。
+            continue
 
         if should_run_today:
-            # 查询该任务今天是否有已运行完成的历史记录
+            # 每个计划时段都要有完成记录；手动运行不能替代计划运行。
             with connect() as conn:
-                run = conn.execute(
+                runs = conn.execute(
                     """
-                    SELECT id, status FROM run_records 
-                    WHERE job_id = ? AND started_at LIKE ? 
-                    ORDER BY id DESC LIMIT 1
+                    SELECT schedule_slot, status, started_at FROM run_records
+                    WHERE job_id = ? AND substr(started_at, 1, 10) = ?
+                    ORDER BY id DESC
                     """,
-                    (job["id"], f"{today_str}%")
-                ).fetchone()
-                
-                if not run:
-                    unfinished.append(f"任务 '{job['name']}' 今日尚未触发执行")
-                elif run["status"] == "running":
-                    unfinished.append(f"任务 '{job['name']}' 正在截图中")
+                    (job["id"], today_str),
+                ).fetchall()
+
+            for slot, latest_fire in expected_slots.items():
+                matching = []
+                for run in runs:
+                    if run["schedule_slot"] != slot:
+                        continue
+                    started = datetime.fromisoformat(run["started_at"])
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=local_tz)
+                    if latest_fire is None or started >= latest_fire:
+                        matching.append(run)
+                if not matching:
+                    unfinished.append(f"任务 '{job['name']}' 的 {slot} 时段今日尚未执行")
+                elif matching[0]["status"] == "running":
+                    unfinished.append(f"任务 '{job['name']}' 的 {slot} 时段正在截图中")
+            if not expected_slots:
+                unfinished.append(f"任务 '{job['name']}' 今日计划无法确认")
                     
     if unfinished:
         return False, unfinished
@@ -218,15 +226,32 @@ def trigger_periodic_report(report_type: str, is_manual: bool = False) -> int | 
             logger.info("今天不是当月的最后一天，跳过月报触发。")
             return None
 
-    # 2. 计算周期报告时间范围（起止日期）
     if report_type == "weekly":
         today_weekday = now_dt.weekday()
-        # 上周一 00:00:00 至上周日 23:59:59
-        last_week_start = now_dt - timedelta(days=today_weekday + 7)
-        last_week_end = now_dt - timedelta(days=today_weekday + 1)
-        
-        start_dt = datetime.combine(last_week_start.date(), time.min).replace(tzinfo=local_tz)
-        end_dt = datetime.combine(last_week_end.date(), time.max).replace(tzinfo=local_tz)
+        if is_manual:
+            # 手动立即生成：如果本周已有巡检则汇总本周至今，否则汇总上一完整周
+            this_week_start = now_dt - timedelta(days=today_weekday)
+            cand_start = datetime.combine(this_week_start.date(), time.min).replace(tzinfo=local_tz)
+            cand_end = datetime.combine(now_dt.date(), time.max).replace(tzinfo=local_tz)
+            with connect() as conn:
+                count_this_week = conn.execute(
+                    "SELECT COUNT(*) FROM run_records WHERE substr(replace(started_at, 'T', ' '), 1, 19) >= ? AND report_path IS NOT NULL AND report_path != ''",
+                    (cand_start.strftime("%Y-%m-%d %H:%M:%S"),)
+                ).fetchone()[0]
+            if count_this_week > 0:
+                start_dt = cand_start
+                end_dt = cand_end
+            else:
+                last_week_start = now_dt - timedelta(days=today_weekday + 7)
+                last_week_end = now_dt - timedelta(days=today_weekday + 1)
+                start_dt = datetime.combine(last_week_start.date(), time.min).replace(tzinfo=local_tz)
+                end_dt = datetime.combine(last_week_end.date(), time.max).replace(tzinfo=local_tz)
+        else:
+            # 计划定时触发：汇总上一完整周（上周一 00:00:00 至上周日 23:59:59）
+            last_week_start = now_dt - timedelta(days=today_weekday + 7)
+            last_week_end = now_dt - timedelta(days=today_weekday + 1)
+            start_dt = datetime.combine(last_week_start.date(), time.min).replace(tzinfo=local_tz)
+            end_dt = datetime.combine(last_week_end.date(), time.max).replace(tzinfo=local_tz)
     else:
         # monthly
         # 本月1号 00:00:00 至本月最后一天 23:59:59
@@ -302,23 +327,12 @@ def _run_local_date(run: dict[str, Any]) -> str:
 
 
 def _unique_zip_filename(src_report: Path, run: dict[str, Any], used_names: set[str]) -> str:
-    base_name = safe_name(src_report.stem, f"run_{run.get('id') or 'unknown'}")
+    base_name = safe_name(src_report.stem, "report")
     suffix = src_report.suffix or ".docx"
     candidate = f"{base_name}{suffix}"
-    if candidate not in used_names:
-        used_names.add(candidate)
-        return candidate
-
-    run_date = _run_local_date(run)
-    candidate = f"{base_name}_{run_date}{suffix}"
-    if candidate not in used_names:
-        used_names.add(candidate)
-        return candidate
-
-    candidate = f"{base_name}_{run_date}_run-{run.get('id') or 'unknown'}{suffix}"
     counter = 2
     while candidate in used_names:
-        candidate = f"{base_name}_{run_date}_run-{run.get('id') or 'unknown'}_{counter}{suffix}"
+        candidate = f"{base_name}-{counter}{suffix}"
         counter += 1
     used_names.add(candidate)
     return candidate
@@ -337,6 +351,10 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
     setting = get_periodic_report_setting(report_type)
     if not setting:
         logger.error(f"无法为周期报告运行 ID {run_id} 找到配置设定。")
+        run["status"] = "failed"
+        run["error_summary"] = "周期报告配置不存在"
+        run["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_periodic_report_run(run, run_id)
         return
 
     logger.info(f"正在为周期报告 '{setting['name']}' 运行打包发信流程 (ID: {run_id})")
@@ -358,7 +376,11 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
             (period_start, period_end),
         ).fetchall()
 
+    from app.report import _run_period
+
     latest_run_by_job_date: dict[tuple[Any, str], dict[str, Any]] = {}
+    latest_run_by_period: dict[tuple[Any, str, str], dict[str, Any]] = {}
+    local_tz = ZoneInfo(settings.default_timezone)
     for row in rows:
         run_item = dict(row)
         src_report = resolve_artifact_path(run_item.get("report_path") or "")
@@ -372,6 +394,7 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
         run_item["_resolved_report_path"] = str(src_report)
         group_key = (run_item.get("job_id") or run_item.get("job_name") or run_item.get("id"), _run_local_date(run_item))
         latest_run_by_job_date[group_key] = run_item
+        latest_run_by_period[(*group_key, _run_period(run_item, local_tz))] = run_item
 
     runs_in_period = list(latest_run_by_job_date.values())
 
@@ -388,82 +411,55 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
     if report_type == "weekly":
         start_date = period_start[:10]
         end_date = period_end[:10]
-        zip_filename = f"周报_{start_date}_至_{end_date}_run-{run_id}.zip"
+        zip_stem = f"周报_{start_date}_至_{end_date}"
     else:
         year_month = period_start[:7]
-        zip_filename = f"月报_{year_month}_run-{run_id}.zip"
+        zip_stem = f"月报_{year_month}"
 
-    zip_dir = settings.data_dir / "periodic-reports"
+    generated_at = datetime.now(ZoneInfo(settings.default_timezone))
+    zip_dir = settings.data_dir / generated_at.strftime("%Y") / generated_at.strftime("%m")
     zip_dir.mkdir(parents=True, exist_ok=True)
-    zip_filepath = zip_dir / zip_filename
+    zip_filepath = unique_artifact_path(zip_dir, zip_stem, ".zip")
 
     temp_dir = Path(tempfile.mkdtemp(prefix=f"report_temp_{run_id}_"))
 
     try:
-        manifest_data = {
-            "report_type": report_type,
-            "period_start": period_start,
-            "period_end": period_end,
-            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "report_count": len(runs_in_period),
-            "jobs": []
-        }
-
         # 拷贝周期内每日最终 Word 文档，平铺放入 ZIP 根目录
+        include_docx = int(setting.get("include_docx") or 0)
         include_screenshots = int(setting.get("include_screenshots") or 0)
         used_report_names: set[str] = set()
         
         for r in runs_in_period:
             src_report = Path(r["_resolved_report_path"])
             report_name = _unique_zip_filename(src_report, r, used_report_names)
-            report_target = temp_dir / report_name
-            shutil.copy2(src_report, report_target)
-            report_copied_path = report_name
-            logger.info(
-                "拷贝运行 ID %s 的每日最终文档 %s 到周期压缩包根目录: %s",
-                r.get("id"),
-                src_report.name,
-                report_name,
-            )
-                
-            # 统计截图数量；如配置要求包含截图，放在 screenshots/run-{id} 下，避免影响 Word 平铺结构。
-            screenshot_count = 0
-            with connect() as conn:
-                results_rows = conn.execute(
-                    "SELECT item_name, file_path, status FROM screenshot_results WHERE run_id = ? AND status = 'success'",
-                    (r["id"],)
-                ).fetchall()
+            if include_docx:
+                report_target = temp_dir / report_name
+                shutil.copy2(src_report, report_target)
+                logger.info(
+                    "拷贝运行 ID %s 的每日最终文档 %s 到周期压缩包根目录: %s",
+                    r.get("id"),
+                    src_report.name,
+                    report_name,
+                )
                 
             if include_screenshots:
-                screenshots_temp_dir = temp_dir / "screenshots" / f"run-{r['id']}"
+                screenshots_temp_dir = temp_dir / "screenshots" / Path(report_name).stem
                 screenshots_temp_dir.mkdir(parents=True, exist_ok=True)
-                for res in results_rows:
-                    if res["file_path"]:
-                        img_path = resolve_artifact_path(res["file_path"])
-                        if img_path.exists():
-                            shutil.copy2(img_path, screenshots_temp_dir / img_path.name)
-                            screenshot_count += 1
-            else:
-                for res in results_rows:
-                    if res["file_path"] and resolve_artifact_path(res["file_path"]).exists():
-                        screenshot_count += 1
-
-            manifest_data["jobs"].append({
-                "job_name": r["job_name"],
-                "run_id": r["id"],
-                "run_time": r["started_at"],
-                "finished_at": r.get("finished_at") or "",
-                "status": r.get("status") or "success",
-                "report_file": report_copied_path,
-                "success_count": int(r.get("success_count") or 0),
-                "failed_count": int(r.get("failed_count") or 0),
-                "screenshot_count": screenshot_count
-            })
-
-        # 写入 manifest.json 记录运行时间、状态、报告路径及截图数量
-        manifest_path = temp_dir / "manifest.json"
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest_data, f, ensure_ascii=False, indent=2)
+                group_key = (r.get("job_id") or r.get("job_name") or r.get("id"), _run_local_date(r))
+                for period in ("上午", "下午"):
+                    source_run = latest_run_by_period.get((*group_key, period))
+                    if not source_run or source_run["_resolved_report_path"] != r["_resolved_report_path"]:
+                        continue
+                    with connect() as conn:
+                        results_rows = conn.execute(
+                            "SELECT item_name, file_path, status FROM screenshot_results WHERE run_id = ? AND status = 'success'",
+                            (source_run["id"],)
+                        ).fetchall()
+                    for res in results_rows:
+                        if res["file_path"]:
+                            img_path = resolve_artifact_path(res["file_path"])
+                            if img_path.exists():
+                                shutil.copy2(img_path, screenshots_temp_dir / img_path.name)
 
         # 压缩临时文件夹
         with zipfile.ZipFile(zip_filepath, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -548,30 +544,49 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
         run["mail_status"] = "skipped: 未启用邮件推送"
         run["status"] = "success" if not force_warning else "partial_success"
 
+    # 先保存报告和邮件结果，通知异常不能让已完成的报告一直显示运行中。
+    run["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    save_periodic_report_run(run, run_id)
+
     # 7. 钉钉通知推送 (当配置了 dingtalk_enabled == 1 时进行推送)
     if setting.get("dingtalk_enabled") == 1:
         from app.utils import decrypt_secret
         from app.dingtalk import send_dingtalk_msg
         from app.repository import get_system_setting
 
-        db_webhook = get_system_setting("dingtalk_webhook", "")
-        if db_webhook:
-            try:
-                db_webhook = decrypt_secret(db_webhook)
-            except Exception:
-                pass
-        webhook = db_webhook or settings.dingtalk_webhook
+        from app.repository import get_dingtalk_profile, list_dingtalk_profiles
+        bot_profile = None
+        if setting.get("dingtalk_profile_id"):
+            bot_profile = get_dingtalk_profile(setting.get("dingtalk_profile_id"))
+        if not bot_profile:
+            all_bots = list_dingtalk_profiles()
+            if all_bots:
+                bot_profile = all_bots[0]
 
-        if webhook:
+        if bot_profile:
+            webhook = decrypt_secret(bot_profile.get("webhook", "")) if bot_profile.get("webhook") else ""
+            secret = decrypt_secret(bot_profile.get("secret", "")) if bot_profile.get("secret") else ""
+            keyword = bot_profile.get("keyword", "") or ""
+            emoji_enabled = bool(bot_profile.get("emoji_enabled", 1))
+        else:
+            db_webhook = get_system_setting("dingtalk_webhook", "")
+            if db_webhook:
+                try:
+                    db_webhook = decrypt_secret(db_webhook)
+                except Exception:
+                    pass
+            webhook = db_webhook or settings.dingtalk_webhook
             db_secret = get_system_setting("dingtalk_secret", "")
             if db_secret:
                 try:
                     db_secret = decrypt_secret(db_secret)
                 except Exception:
                     pass
-            secret  = db_secret or settings.dingtalk_secret
+            secret = db_secret or settings.dingtalk_secret
             keyword = get_system_setting("dingtalk_keyword", "") or settings.dingtalk_keyword
+            emoji_enabled = get_system_setting("dingtalk_emoji_enabled", "0") == "1"
 
+        if webhook:
             # 归档包大小
             size_str = "-"
             try:
@@ -590,9 +605,6 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
             mail_status_html = ""
             if setting.get("enable_email") == 1:
                 mail_status_html = build_mail_status_html(run.get("mail_status") or "")
-
-            # Emoji 开关
-            emoji_enabled = get_system_setting("dingtalk_emoji_enabled", "0") == "1"
 
             # 构建消息
             title, text = build_periodic_report_message(

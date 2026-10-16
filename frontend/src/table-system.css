@@ -1,0 +1,50 @@
+/* Shared table geometry. Long text must not decide the width of a column. */
+.responsive-table,.run-table-card { overflow-x:auto; overscroll-behavior-inline:contain; }
+.data-table { width:100%; table-layout:fixed; border-collapse:collapse; font-size:12px; }
+.data-table th { height:42px; box-sizing:border-box; padding:10px 16px; background:#f7f9fb;
+  color:#647987; font-size:12px; font-weight:500; line-height:20px; letter-spacing:0;
+  text-align:left; white-space:nowrap; border-bottom:1px solid #e6ecef; }
+.data-table td { height:56px; box-sizing:border-box; padding:12px 16px; vertical-align:middle;
+  color:#415b6b; line-height:20px; white-space:nowrap; border-top:1px solid #edf1f3; }
+.data-table tbody tr:hover { background:#f7f9fb; }
+.data-table .align-center { text-align:center; }
+.data-table .align-right { text-align:right; font-variant-numeric:tabular-nums; }
+.data-table .table-actions,.data-table .table-img-actions { display:inline-flex; vertical-align:middle;
+  align-items:center; justify-content:center; gap:4px; }
+.data-table .status-chip,.data-table .pill-chip { vertical-align:middle; font-size:11px; font-weight:500; }
+.data-table .item-name-bold { color:#253f4e; font-weight:600; }
+.data-table .table-primary { color:#253f4e; font-weight:600; }
+.table-name-link { display:block; min-width:0; }
+.data-table .table-name-link:hover { color:var(--blue); }
+.table-file-info { display:flex; flex-direction:column; align-items:flex-end; line-height:19px; }
+.table-file-info small { color:#8495a1; font-size:11px; }
+.data-table .text-error-cell { color:#bb4548; }
+.data-table .text-warning-cell { color:#9a691b; }
+.recent-runs-table { min-width:720px; }
+.runs-data-table { min-width:1040px; }
+.periodic-data-table { min-width:1000px; }
+.screenshot-table { min-width:1100px; }
+.alerts-table { min-width:760px; }
+
+.table-text { display:block; min-width:0; max-width:100%; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; line-height:inherit; }
+.table-text.can-expand { cursor:help; border-radius:3px; }
+.table-text.can-expand:hover { text-decoration:underline dotted; text-underline-offset:4px; }
+.table-text.can-expand:focus-visible { outline:2px solid rgba(23,109,134,.5); outline-offset:2px; }
+.table-text-detail { position:fixed; z-index:10030; box-sizing:border-box; padding:12px 14px;
+  border:1px solid #dbe5ea; border-radius:8px; background:#fff; color:#334e5e;
+  box-shadow:0 8px 28px rgba(24,52,67,.15); font-size:12px; line-height:1.7;
+  white-space:pre-wrap; overflow-wrap:anywhere; overflow:auto; overscroll-behavior:contain; user-select:text; }
+.manual-cleanup-preview-row { align-items:center; }
+.manual-cleanup-preview-name { min-width:0; }
+.manual-cleanup-preview-name .table-name-strong { font-weight:600; }
+.manual-cleanup-preview-name .table-path { font-size:11px; color:#81939f; margin-top:3px; }
+.manual-cleanup-preview-size { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+
+@media (max-width:680px) {
+  /* Only short action columns are pinned, never a long message column. */
+  .data-table .table-col-actions { position:sticky; right:0; z-index:1;
+    background:#fff; box-shadow:-6px 0 10px -10px rgba(24,52,67,.4); }
+  .data-table th.table-col-actions { z-index:2; background:#f7f9fb; }
+  .data-table tr:hover td.table-col-actions { background:#f7f9fb; }
+}

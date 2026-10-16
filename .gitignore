@@ -14,4 +14,7 @@ dist/
 build/
 *.tar
 run.sh
-
+docker-run.sh
+frontend/node_modules/
+app/static/vue/
+output/

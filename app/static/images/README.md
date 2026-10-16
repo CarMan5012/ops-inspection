@@ -4,4 +4,5 @@
 
 | 文件名 | 来源 | 版本/集合 | 用途 | 许可证 |
 | --- | --- | --- | --- | --- |
-| `login-logo.svg` | Iconify API，Material Symbols `admin-panel-settings-rounded` | Material Symbols | 登录页管理后台图标 | Apache License 2.0 |
+| `logo.svg` | 用户选定的标志，按原图重绘 | 本项目 | 导航栏和登录页标志 | 本项目资产 |
+| `windows-taskbar-template.png`、`1.png`、`2.png`、`3.png` | 本项目 | 本项目 | 真实窗口截图中的任务栏模板 | 本项目资产 |

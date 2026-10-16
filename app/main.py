@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 from app.auth import COOKIE_NAME, check_password, create_token, get_session_ttl_seconds, require_login, verify_token
 from app.db import init_db
 from app.repository import (
+    dashboard_data,
     create_run,
     delete_auth_profile,
     delete_job,
@@ -24,6 +25,10 @@ from app.repository import (
     get_screenshot_item,
     list_auth_profiles,
     list_jobs,
+    list_dingtalk_profiles,
+    get_dingtalk_profile,
+    save_dingtalk_profile,
+    delete_dingtalk_profile,
     list_mail_profiles,
     list_runs,
     list_runs_page,
@@ -33,20 +38,33 @@ from app.repository import (
     save_job,
     save_mail_profile,
     save_screenshot_item,
+    save_screenshot_items_batch,
     get_system_setting,
     set_system_setting,
 )
 from app.runner import run_job, test_capture_item
+from app.job_execution import JobAlreadyRunning, acquire_job_lease
 from app.scheduler import reload_jobs, shutdown_scheduler, start_scheduler
 from app.settings import settings
-from app.storage_paths import get_run_date, resolve_artifact_path
+from app.storage_paths import resolve_artifact_path
+from app.watermark import DEFAULT_TIME_FORMAT, WATERMARK_DEFAULTS, validate_time_format, watermark_options
 from app.report import list_template_sections
+from app.report_templates import (
+    MAX_TEMPLATE_BYTES, create_template, delete_template, get_template,
+    inspect_template, list_templates, template_path,
+)
+from app.taskbar_templates import (
+    MAX_IMAGE_BYTES as MAX_TASKBAR_BYTES, all_templates as all_taskbar_templates,
+    create_uploaded as create_taskbar_template, delete_uploaded as delete_taskbar_template,
+    selected_path as selected_taskbar_path,
+)
 from app.openapi import configure_openapi
 from app.login_crypto import LoginPayloadError, decrypt_login_payload, get_login_public_jwk
 import os
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
+from app.logging_config import AppLogFormatter, is_color_supported
 
 
 # 获取并规范化 LOG_LEVEL
@@ -57,14 +75,14 @@ app_logger = logging.getLogger("app")
 app_logger.setLevel(log_level)
 
 if not app_logger.handlers:
-    formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
+    # 控制台支持彩色高亮，文件保持纯净对齐
+    console_color = is_color_supported(sys.stdout)
+    console_formatter = AppLogFormatter(use_color=console_color, timezone=settings.default_timezone)
+    file_formatter = AppLogFormatter(use_color=False, timezone=settings.default_timezone)
 
     # 控制台标准输出
     stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(formatter)
+    stream_handler.setFormatter(console_formatter)
     app_logger.addHandler(stream_handler)
 
     # 文件持久化滚动日志
@@ -77,15 +95,14 @@ if not app_logger.handlers:
             backupCount=3,
             encoding="utf-8"
         )
-        file_handler.setFormatter(formatter)
+        file_handler.setFormatter(file_formatter)
         app_logger.addHandler(file_handler)
-        app_logger.info(f"日志滚动文件处理器初始化成功. 文件路径: {log_file}")
     except Exception as e:
         # 避免写文件失败导致应用无法启动，做降级处理
         stream_handler.stream.write(f"警告: 初始化文件日志失败: {e}\n")
 
     app_logger.propagate = False
-    app_logger.info(f"应用日志系统初始化完成. 日志级别: {log_level_str}")
+    app_logger.info(f"应用日志系统初始化完成 (级别: {log_level_str}, 控制台高亮: {'已启用' if console_color else '未启用'})")
 
 app = FastAPI(
     title=settings.app_name,
@@ -200,7 +217,7 @@ async def csrf_protect_middleware(request: Request, call_next):
 
 api_router = APIRouter(prefix=settings.api_prefix)
 
-templates = Jinja2Templates(directory=["app/templates", "app/static/frontend"])
+templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 if settings.frontend_base_path != "/":
     app.mount(f"{settings.frontend_base_path}/static", StaticFiles(directory="app/static"), name="static_prefix")
@@ -410,6 +427,7 @@ def item_form(
     wait_selector: str = Form(""),
     wait_seconds: float = Form(3),
     timeout_seconds: int = Form(60),
+    total_timeout_seconds: int = Form(240),
     retry_count: int = Form(2),
     browser_width: str | None = Form(None),
     browser_height: str | None = Form(None),
@@ -417,6 +435,8 @@ def item_form(
     enabled: str | None = Form(None),
     real_browser_capture: str | None = Form(None),
     watermark_enabled: str | None = Form(None),
+    watermark_time_enabled: str | None = Form(None),
+    watermark_time_format: str = Form(DEFAULT_TIME_FORMAT),
     watermark_text: str = Form(""),
     watermark_opacity: int = Form(65),
     watermark_font_size: int = Form(24),
@@ -431,6 +451,12 @@ def item_form(
     if real_capture_enabled:
         normalized_capture_mode = "viewport"
         normalized_css_selector = ""
+    try:
+        validated_time_format = validate_time_format(watermark_time_format)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if watermark_enabled and not watermark_time_enabled and not watermark_text.strip():
+        raise HTTPException(status_code=400, detail="请启用时间水印或填写自定义水印内容")
 
     return {
         "job_id": None,
@@ -444,6 +470,7 @@ def item_form(
         "wait_selector": wait_selector,
         "wait_seconds": wait_seconds,
         "timeout_seconds": timeout_seconds,
+        "total_timeout_seconds": max(1, total_timeout_seconds),
         "retry_count": retry_count,
         "browser_width": parse_optional_int(browser_width),
         "browser_height": parse_optional_int(browser_height),
@@ -451,6 +478,8 @@ def item_form(
         "enabled": 1 if enabled else 0,
         "real_browser_capture": real_capture_enabled,
         "watermark_enabled": 1 if watermark_enabled else 0,
+        "watermark_time_enabled": 1 if watermark_time_enabled else 0,
+        "watermark_time_format": validated_time_format,
         "watermark_text": watermark_text,
         "watermark_opacity": max(0, min(255, int(watermark_opacity))),
         "watermark_font_size": max(10, min(72, int(watermark_font_size))),
@@ -524,8 +553,23 @@ def mail_form(
     }
 
 
+
+def _ensure_chrome_policies() -> None:
+    import platform
+    if platform.system().lower() == "linux":
+        try:
+            for p in ["/etc/opt/chrome/policies/managed", "/etc/chromium/policies/managed"]:
+                os.makedirs(p, exist_ok=True)
+                fpath = os.path.join(p, "managed_policies.json")
+                if not os.path.exists(fpath):
+                    with open(fpath, "w", encoding="utf-8") as f:
+                        f.write('{"TranslateEnabled": false, "PasswordManagerEnabled": false}\n')
+        except Exception:
+            pass
+
 @app.on_event("startup")
 def on_startup() -> None:
+    _ensure_chrome_policies()
     init_db()
     start_scheduler()
 
@@ -662,6 +706,8 @@ def get_app_config() -> dict[str, str]:
 SWAGGER_SETTING_KEY = "swagger_enabled"
 MFA_ENABLED_KEY = "mfa_enabled"
 MFA_SECRET_KEY = "mfa_totp_secret"
+MFA_PENDING_SECRET_KEY = "mfa_totp_pending_secret"
+MFA_PENDING_LAST_SLICE_KEY = "last_used_pending_totp_slice"
 SESSION_TTL_MINUTES_KEY = "session_ttl_minutes"
 DINGTALK_EMOJI_ENABLED_KEY = "dingtalk_emoji_enabled"
 
@@ -692,6 +738,7 @@ def security_settings() -> dict[str, Any]:
         "dingtalk_emoji_enabled": get_system_setting(DINGTALK_EMOJI_ENABLED_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"},
         "dingtalk_webhook": db_webhook,
         "dingtalk_secret": db_secret,
+        "has_dingtalk_secret": bool(db_secret),
         "dingtalk_keyword": db_keyword,
     }
 
@@ -802,6 +849,31 @@ def public_auth_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def public_dingtalk_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    from app.utils import decrypt_secret
+    data = dict(profile)
+    raw_webhook = data.get("webhook", "")
+    if raw_webhook:
+        try:
+            raw_webhook = decrypt_secret(raw_webhook)
+        except Exception:
+            pass
+    data["webhook"] = raw_webhook
+    data["has_secret"] = bool(profile.get("secret"))
+    data["secret"] = ""
+    return data
+
+
+def api_dingtalk_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": text_value(payload, "name", "未命名机器人").strip(),
+        "webhook": text_value(payload, "webhook", "").strip(),
+        "secret": text_value(payload, "secret", "").strip(),
+        "keyword": text_value(payload, "keyword", "").strip(),
+        "emoji_enabled": int(bool_value(payload.get("emoji_enabled"), True)),
+    }
+
+
 def public_mail_profile(profile: dict[str, Any]) -> dict[str, Any]:
     data = dict(profile)
     for key in ("password", "password_secret"):
@@ -846,26 +918,39 @@ def api_get_security_settings() -> dict[str, Any]:
 
 @api_router.put("/security-settings", dependencies=[Depends(require_api_login)])
 def api_update_security_settings(payload: dict[str, Any]) -> dict[str, Any]:
-    session_minutes = max(5, min(int_value(payload, "session_ttl_minutes", 30), 7 * 24 * 60))
-    was_mfa_enabled = security_settings()["mfa_enabled"]
-    mfa_enabled = bool_value(payload.get("mfa_enabled"), False)
+    current_settings = security_settings()
+    session_minutes = max(5, min(int_value(payload, "session_ttl_minutes", current_settings["session_ttl_minutes"]), 7 * 24 * 60))
+    was_mfa_enabled = current_settings["mfa_enabled"]
+    mfa_enabled = bool_value(payload.get("mfa_enabled"), was_mfa_enabled)
     verify_code = text_value(payload, "mfa_code", "")
     if verify_code:
         mfa_enabled = True
     current_secret = current_mfa_secret()
+    pending_secret = decrypt_secret(get_system_setting(MFA_PENDING_SECRET_KEY, ""))
+    secret_to_verify = pending_secret if verify_code and pending_secret else current_secret
 
-    if mfa_enabled and not current_secret:
+    if mfa_enabled and not secret_to_verify:
         raise HTTPException(status_code=400, detail="请先生成并绑定 MFA 认证")
 
     if mfa_enabled and (verify_code or not was_mfa_enabled):
-        if not verify_totp_code(current_secret, verify_code):
+        replay_key = MFA_PENDING_LAST_SLICE_KEY if verify_code and pending_secret else "last_used_totp_slice"
+        if not verify_totp_code(secret_to_verify, verify_code, replay_key=replay_key):
             raise HTTPException(status_code=400, detail="MFA 验证码不正确")
+
+    if mfa_enabled and verify_code and pending_secret:
+        from app.utils import encrypt_secret
+        set_system_setting(MFA_SECRET_KEY, encrypt_secret(pending_secret))
+        set_system_setting(MFA_PENDING_SECRET_KEY, "")
+        used_slice = get_system_setting(MFA_PENDING_LAST_SLICE_KEY, "")
+        if used_slice:
+            set_system_setting("last_used_totp_slice", used_slice)
+        set_system_setting(MFA_PENDING_LAST_SLICE_KEY, "")
 
     set_system_setting(SESSION_TTL_MINUTES_KEY, str(session_minutes))
     set_system_setting(MFA_ENABLED_KEY, "1" if mfa_enabled else "0")
 
     # 更新全局钉钉消息表情开关
-    dingtalk_emoji_enabled = bool_value(payload.get("dingtalk_emoji_enabled"), False)
+    dingtalk_emoji_enabled = bool_value(payload.get("dingtalk_emoji_enabled"), current_settings["dingtalk_emoji_enabled"])
     set_system_setting(DINGTALK_EMOJI_ENABLED_KEY, "1" if dingtalk_emoji_enabled else "0")
 
     # 更新全局钉钉机器人配置（并进行加密保护）
@@ -888,10 +973,26 @@ def api_update_security_settings(payload: dict[str, Any]) -> dict[str, Any]:
     elif payload.get("dingtalk_secret_clear"):
         set_system_setting("dingtalk_secret", "")
 
-    global_keyword = text_value(payload, "dingtalk_keyword", "").strip()
-    set_system_setting("dingtalk_keyword", global_keyword)
+    if "dingtalk_keyword" in payload:
+        global_keyword = text_value(payload, "dingtalk_keyword", "").strip()
+        set_system_setting("dingtalk_keyword", global_keyword)
 
     return {"ok": True, **security_settings()}
+
+
+@api_router.get("/security-settings/mfa-qr", dependencies=[Depends(require_api_login)])
+def api_get_current_mfa_qr() -> dict[str, Any]:
+    secret = current_mfa_secret()
+    if not secret:
+        raise HTTPException(status_code=400, detail="未配置两步验证密钥")
+    otpauth_url = build_totp_uri(secret, settings.admin_username, settings.app_name)
+    return {
+        "ok": True,
+        "mfa_secret": secret,
+        "mfa_otpauth_url": otpauth_url,
+        "secret": secret,
+        "qr_uri": otpauth_url,
+    }
 
 
 @api_router.post("/security-settings/mfa-secret", dependencies=[Depends(require_api_login)])
@@ -899,13 +1000,13 @@ def api_generate_mfa_secret() -> dict[str, Any]:
     from app.utils import encrypt_secret
 
     secret = generate_totp_secret()
-    set_system_setting(MFA_SECRET_KEY, encrypt_secret(secret))
-    set_system_setting(MFA_ENABLED_KEY, "0")
+    set_system_setting(MFA_PENDING_SECRET_KEY, encrypt_secret(secret))
+    set_system_setting(MFA_PENDING_LAST_SLICE_KEY, "")
     otpauth_url = build_totp_uri(secret, settings.admin_username, settings.app_name)
     return {
         "ok": True,
-        "mfa_enabled": False,
-        "mfa_configured": True,
+        "mfa_enabled": security_settings()["mfa_enabled"],
+        "mfa_configured": bool(current_mfa_secret()),
         "mfa_secret": secret,
         "mfa_otpauth_url": otpauth_url,
         "secret": secret,
@@ -945,7 +1046,7 @@ def api_reset_all_jobs(payload: dict[str, Any]) -> dict[str, Any]:
         conn.execute("PRAGMA foreign_keys = ON")
 
     # 4. 物理清理截图、Word 报告、周期归档包目录下的历史文件
-    for directory in (settings.screenshot_dir, settings.report_dir):
+    for directory in (settings.screenshot_dir, settings.report_dir, settings.data_dir / "periodic-reports"):
         if directory.exists():
             for item in directory.iterdir():
                 try:
@@ -956,6 +1057,31 @@ def api_reset_all_jobs(payload: dict[str, Any]) -> dict[str, Any]:
                 except Exception as e:
                     app_logger.error(f"物理删除 {item} 失败: {e}", exc_info=True)
 
+    # 新版日期目录中的截图、报告及月份目录的周期 ZIP 也属于运行历史。
+    from datetime import date
+    for directory in settings.data_dir.glob("????/??"):
+        if not directory.is_dir():
+            continue
+        try:
+            date(int(directory.parent.name), int(directory.name), 1)
+        except ValueError:
+            continue
+        for file_path in directory.glob("*.zip"):
+            if file_path.is_file():
+                file_path.unlink()
+        for day_dir in directory.glob("??"):
+            if not day_dir.is_dir():
+                continue
+            for file_path in day_dir.iterdir():
+                if file_path.is_file() and file_path.suffix.lower() in {".png", ".docx"}:
+                    file_path.unlink()
+            if not any(day_dir.iterdir()):
+                day_dir.rmdir()
+        if not any(directory.iterdir()):
+            directory.rmdir()
+            if not any(directory.parent.iterdir()):
+                directory.parent.rmdir()
+
     # 5. 刷新后台任务调度
     reload_jobs()
 
@@ -963,25 +1089,65 @@ def api_reset_all_jobs(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "message": "所有运行历史记录和截图文件已彻底清空。巡检任务配置保留，自增 ID 从 #1 重新开始。"}
 
 
+def template_id_from_payload(value: Any) -> int | None:
+    if value in (None, "", 0, "0"):
+        return None
+    try:
+        template_id = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="报告模板无效") from exc
+    if template_id <= 0 or get_template(template_id) is None:
+        raise HTTPException(status_code=400, detail="所选报告模板不存在")
+    return template_id
+
+
+def job_template_sections(job: dict[str, Any]) -> list[str]:
+    if not job.get("template_id"):
+        return []
+    template = get_template(int(job["template_id"]))
+    if not template:
+        return []
+    return list_template_sections(template_path(template))
+
+
 def api_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
     from app.schedule_utils import parse_simple_inspection_schedule
+    from app.date_schedule import label as calendar_label, normalize_schedule
+    from app.schedule_migration import _job_config
+    import json
 
     schedule_mode = text_value(payload, "schedule_mode", "simple")
-    cron_expr = text_value(payload, "cron_expression", "0 9 * * *")
-    schedule_label = text_value(payload, "schedule_label", "高级 Cron")
-    schedule_config = text_value(payload, "schedule_config", "")
+    cron_expr = ""
+    schedule_label = ""
+    schedule_config = ""
 
     if schedule_mode == "simple":
         try:
-            cron_expr, schedule_label, schedule_config = parse_simple_inspection_schedule(payload)
+            _, _, old_config = parse_simple_inspection_schedule(payload)
+            config = _job_config(old_config)
+            schedule_mode = "calendar"
+            schedule_label = calendar_label(config)
+            schedule_config = json.dumps(config, ensure_ascii=False)
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
+    elif schedule_mode == "calendar":
+        try:
+            config = normalize_schedule(payload)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        cron_expr = ""
+        schedule_label = calendar_label(config)
+        schedule_config = json.dumps(config, ensure_ascii=False)
+    else:
+        raise HTTPException(status_code=400, detail="旧定时方式已停用，请选择日期计划")
 
     send_mail_on_complete = bool_value(payload.get("send_mail_on_complete"), True)
     send_mail_on_error = bool_value(payload.get("send_mail_on_error"), True)
     send_mail = bool_value(payload.get("send_mail"), False)
     if "send_mail" in payload and "send_mail_on_complete" not in payload:
         send_mail_on_complete = send_mail
+    send_dingtalk_on_complete = bool_value(payload.get("send_dingtalk_on_complete"), True)
+    send_dingtalk_on_error = bool_value(payload.get("send_dingtalk_on_error"), True)
 
     return {
         "name": text_value(payload, "name", "未命名巡检任务"),
@@ -990,6 +1156,7 @@ def api_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "cron_expression": cron_expr,
         "time_range_label": text_value(payload, "time_range_label", "最近24小时"),
         "report_title": text_value(payload, "report_title", "自动化巡检报告"),
+        "template_id": template_id_from_payload(payload.get("template_id")),
         "mail_profile_id": parse_optional_int(str(payload.get("mail_profile_id") or "")),
         "send_mail": 1 if send_mail_on_complete else 0,
         "send_mail_on_complete": 1 if send_mail_on_complete else 0,
@@ -1002,19 +1169,45 @@ def api_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "schedule_label": schedule_label,
         "schedule_config": schedule_config,
         "dingtalk_enabled": bool_value(payload.get("dingtalk_enabled"), False),
+        "dingtalk_profile_id": int_value(payload, "dingtalk_profile_id", None) if payload.get("dingtalk_profile_id") else None,
+        "send_dingtalk_on_complete": 1 if send_dingtalk_on_complete else 0,
+        "send_dingtalk_on_error": 1 if send_dingtalk_on_error else 0,
         "dingtalk_webhook": text_value(payload, "dingtalk_webhook", ""),
         "dingtalk_secret": text_value(payload, "dingtalk_secret", ""),
         "dingtalk_keyword": text_value(payload, "dingtalk_keyword", ""),
     }
 
 
+def taskbar_key_from_payload(value: Any) -> str:
+    key = str(value or "").strip()
+    if not key:
+        return ""
+    try:
+        selected_taskbar_path(key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return key
+
+
 def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
-    real_browser_capture = bool_value(payload.get("real_browser_capture"), True)
+    real_browser_capture = bool_value(payload.get("real_browser_capture"), False)
     capture_mode = text_value(payload, "capture_mode", "viewport")
     css_selector = text_value(payload, "css_selector", "")
     if real_browser_capture:
         capture_mode = "viewport"
         css_selector = ""
+
+    watermark_text = text_value(payload, "watermark_text", WATERMARK_DEFAULTS["watermark_text"])
+    legacy_time = "watermark_time_enabled" not in payload and "{time}" in watermark_text
+    if legacy_time:
+        watermark_text = watermark_text.replace("{time}", "").strip()
+    try:
+        time_format = validate_time_format(text_value(payload, "watermark_time_format", DEFAULT_TIME_FORMAT))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    watermark_time_enabled = bool_value(payload.get("watermark_time_enabled"), legacy_time or "watermark_text" not in payload)
+    if bool_value(payload.get("watermark_enabled"), False) and not watermark_time_enabled and not watermark_text:
+        raise HTTPException(status_code=400, detail="请启用时间水印或填写自定义水印内容")
 
     return {
         "job_id": job_id,
@@ -1028,6 +1221,7 @@ def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
         "wait_selector": text_value(payload, "wait_selector", ""),
         "wait_seconds": float_value(payload, "wait_seconds", 3.0),
         "timeout_seconds": int_value(payload, "timeout_seconds", 60),
+        "total_timeout_seconds": max(1, int_value(payload, "total_timeout_seconds", 240)),
         "retry_count": int_value(payload, "retry_count", 2),
         "browser_width": parse_optional_int(str(payload.get("browser_width") or "")),
         "browser_height": parse_optional_int(str(payload.get("browser_height") or "")),
@@ -1035,17 +1229,16 @@ def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
         "enabled": bool_value(payload.get("enabled"), True),
         "real_browser_capture": 1 if real_browser_capture else 0,
         "watermark_enabled": bool_value(payload.get("watermark_enabled"), False),
-        "watermark_text": text_value(
-            payload,
-            "watermark_text",
-            "{time}\n省客户服务中心\ndwangchengyi7(王诚毅)",
-        ),
+        "watermark_time_enabled": 1 if watermark_time_enabled else 0,
+        "watermark_time_format": time_format,
+        "watermark_text": watermark_text,
         "watermark_opacity": clamp_int(payload.get("watermark_opacity"), 65, 0, 255),
         "watermark_font_size": clamp_int(payload.get("watermark_font_size"), 24, 10, 72),
         "watermark_gap_x": clamp_int(payload.get("watermark_gap_x"), 140, 20, 800),
         "watermark_gap_y": clamp_int(payload.get("watermark_gap_y"), 140, 20, 800),
         "watermark_angle": clamp_int(payload.get("watermark_angle"), -45, -90, 90),
         "taskbar_enabled": 1 if bool_value(payload.get("taskbar_enabled"), True) else 0,
+        "taskbar_template_key": taskbar_key_from_payload(payload.get("taskbar_template_key")),
     }
 
 
@@ -1129,21 +1322,27 @@ def enrich_run(run: dict[str, Any]) -> dict[str, Any]:
 
 @api_router.get("/session", dependencies=[Depends(require_api_login)])
 def api_session() -> dict[str, Any]:
-    return {"authenticated": True, "app_name": "自动化巡检控制台"}
+    return {"authenticated": True, "app_name": settings.app_name}
 
 
 @api_router.get("/dashboard", dependencies=[Depends(require_api_login)])
 def api_dashboard() -> dict[str, Any]:
-    jobs = list_jobs()
-    runs = [enrich_run(run) for run in list_runs(12)]
+    jobs, raw_runs, auth_profiles, mail_profiles = dashboard_data()
+    runs = [enrich_run(run) for run in raw_runs]
     return {
-        "app_name": "自动化巡检控制台",
+        "app_name": settings.app_name,
         "jobs": public_jobs(jobs),
         "runs": runs,
         "metrics": dashboard_metrics(jobs, runs),
-        "auth_profiles": [public_auth_profile(profile) for profile in list_auth_profiles()],
-        "mail_profiles": [public_mail_profile(profile) for profile in list_mail_profiles()],
+        "auth_profiles": [public_auth_profile(profile) for profile in auth_profiles],
+        "mail_profiles": [public_mail_profile(profile) for profile in mail_profiles],
     }
+
+
+@api_router.get("/calendar-status", dependencies=[Depends(require_api_login)])
+def api_calendar_status() -> dict[str, Any]:
+    from app.holiday_calendar import status
+    return status()
 
 
 @api_router.get("/jobs", dependencies=[Depends(require_api_login)])
@@ -1152,13 +1351,93 @@ def api_list_jobs() -> dict[str, Any]:
     return {"jobs": public_jobs(jobs), "metrics": dashboard_metrics(jobs, list_runs(20))}
 
 
+@api_router.get("/report-templates", dependencies=[Depends(require_api_login)])
+def api_list_report_templates() -> dict[str, Any]:
+    return {"templates": [
+        {**template, "sections": list_template_sections(template_path(template))}
+        for template in list_templates()
+    ]}
+
+
+@api_router.post("/report-templates", dependencies=[Depends(require_api_login)])
+async def api_upload_report_template(name: str = Form(...), file: UploadFile = File(...)) -> dict[str, Any]:
+    import sqlite3
+
+    content = await file.read(MAX_TEMPLATE_BYTES + 1)
+    try:
+        template = create_template(name, file.filename or "", content)
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=400, detail="模板名称已存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "template": {**template, "sections": inspect_template(content)}}
+
+
+@api_router.get("/report-templates/{template_id}/download", dependencies=[Depends(require_api_login)])
+def api_download_report_template(template_id: int) -> FileResponse:
+    template = get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    path = template_path(template)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="模板文件不存在")
+    return FileResponse(path, filename=template["original_name"], media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+
+@api_router.delete("/report-templates/{template_id}", dependencies=[Depends(require_api_login)])
+def api_delete_report_template(template_id: int) -> dict[str, Any]:
+    try:
+        delete_template(template_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@api_router.get("/taskbar-templates", dependencies=[Depends(require_api_login)])
+def api_list_taskbar_templates() -> dict[str, Any]:
+    return {"templates": [
+        {**template, "image_url": f"{settings.api_prefix}/taskbar-templates/{template['key']}/image"}
+        for template in all_taskbar_templates()
+    ]}
+
+
+@api_router.post("/taskbar-templates", dependencies=[Depends(require_api_login)])
+async def api_upload_taskbar_template(name: str = Form(...), file: UploadFile = File(...)) -> dict[str, Any]:
+    import sqlite3
+
+    content = await file.read(MAX_TASKBAR_BYTES + 1)
+    try:
+        template = create_taskbar_template(name, file.filename or "", content)
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=400, detail="底栏名称已存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "template": template}
+
+
+@api_router.get("/taskbar-templates/{key}/image", dependencies=[Depends(require_api_login)])
+def api_taskbar_template_image(key: str) -> FileResponse:
+    try:
+        path = selected_taskbar_path(key)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path, media_type="image/png")
+
+
+@api_router.delete("/taskbar-templates/{template_id}", dependencies=[Depends(require_api_login)])
+def api_delete_taskbar_template(template_id: int) -> dict[str, Any]:
+    try:
+        delete_taskbar_template(template_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
 @api_router.post("/jobs", dependencies=[Depends(require_api_login)])
 def api_create_job(payload: dict[str, Any]) -> dict[str, Any]:
-    from app.utils import validate_cron_expression
     import sqlite3
 
     data = api_job_payload(payload)
-    validate_cron_expression(data["cron_expression"])
     try:
         job_id = save_job(data)
     except sqlite3.IntegrityError as e:
@@ -1169,15 +1448,53 @@ def api_create_job(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "job": public_job(require_value(get_job(job_id), "任务不存在"))}
 
 
+def calculate_job_next_runs(job: dict[str, Any], limit: int = 3) -> list[str]:
+    """精确计算任务未来指定次数的真实执行时间（格式: YYYY-MM-DD HH:MM:SS）"""
+    job_id = int(job.get("id") or 0)
+    schedule_mode = job.get("schedule_mode") or "calendar"
+    tz_str = settings.default_timezone
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(tz_str)
+    now_dt = datetime.now(tz)
+
+    # 1. 日历计划模式 (包含每天、工作日、周、月、随机分钟等)
+    if schedule_mode == "calendar":
+        try:
+            from app.date_schedule import from_job, upcoming
+            config = from_job(job)
+            if config:
+                times = upcoming(config, now_dt, limit=limit, job_id=job_id)
+                return [t.strftime("%Y-%m-%d %H:%M") for t in times]
+        except Exception as e:
+            logger.warning("计算任务 %s 日历未来执行时间失败: %s", job_id, e)
+
+    # 2. Cron 表达式模式
+    cron_expr = job.get("cron_expression")
+    if cron_expr:
+        try:
+            from apscheduler.triggers.cron import CronTrigger
+            trigger = CronTrigger.from_crontab(str(cron_expr).strip(), timezone=tz)
+            times = []
+            curr = now_dt
+            for _ in range(limit):
+                nxt = trigger.get_next_fire_time(curr if curr != now_dt else None, curr)
+                if not nxt:
+                    break
+                times.append(nxt)
+                curr = nxt
+            return [t.strftime("%Y-%m-%d %H:%M") for t in times]
+        except Exception as e:
+            logger.warning("计算任务 %s Cron 未来执行时间失败: %s", job_id, e)
+
+    return []
+
+
 @api_router.get("/jobs/{job_id}", dependencies=[Depends(require_api_login)])
 def api_get_job(job_id: int) -> dict[str, Any]:
-    from app.utils import get_next_run_times
-
     job = require_value(get_job(job_id), "任务不存在")
     items = list_screenshot_items(job_id)
-    next_runs = []
-    if int(job.get("enabled") or 0):
-        next_runs = get_next_run_times(job.get("cron_expression") or "", limit=3)
+    next_runs = calculate_job_next_runs(job, limit=3)
     latest = next((run for run in list_runs(50) if run.get("job_id") == job_id), None)
     return {
         "job": public_job(job),
@@ -1186,13 +1503,14 @@ def api_get_job(job_id: int) -> dict[str, Any]:
         "last_status": api_status_label(latest.get("status") if latest else ""),
         "mail_profiles": [public_mail_profile(profile) for profile in list_mail_profiles()],
         "auth_profiles": [public_auth_profile(profile) for profile in list_auth_profiles()],
-        "template_sections": list_template_sections(),
+        "template_sections": job_template_sections(job),
+        "item_defaults": WATERMARK_DEFAULTS,
+        "watermark_time_formats": watermark_options(),
     }
 
 
 @api_router.put("/jobs/{job_id}", dependencies=[Depends(require_api_login)])
 def api_update_job(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-    from app.utils import validate_cron_expression
     import sqlite3
 
     old = require_value(get_job(job_id), "任务不存在")
@@ -1201,7 +1519,6 @@ def api_update_job(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         data["dingtalk_webhook"] = old.get("dingtalk_webhook") or ""
     if not data.get("dingtalk_secret"):
         data["dingtalk_secret"] = old.get("dingtalk_secret") or ""
-    validate_cron_expression(data["cron_expression"])
     try:
         save_job(data, job_id)
     except sqlite3.IntegrityError as e:
@@ -1223,23 +1540,97 @@ def api_delete_job(job_id: int) -> dict[str, Any]:
 @api_router.post("/jobs/{job_id}/run", dependencies=[Depends(require_api_login)])
 def api_run_job(job_id: int, background_tasks: BackgroundTasks) -> dict[str, Any]:
     job = require_value(get_job(job_id), "任务不存在")
-    run_id = create_run(job_id, str(job["name"]))
-    background_tasks.add_task(run_job, job_id, run_id)
+    run_id = queue_inspection_job(job, background_tasks)
     return {"ok": True, "run_id": run_id}
+
+
+def queue_inspection_job(job: dict[str, Any], background_tasks: BackgroundTasks) -> int:
+    try:
+        lease = acquire_job_lease(int(job["id"]))
+    except JobAlreadyRunning as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        run_id = create_run(int(job["id"]), str(job["name"]))
+        background_tasks.add_task(run_job, int(job["id"]), run_id, execution_lease=lease)
+        return run_id
+    except Exception:
+        lease.close()
+        raise
 
 
 @api_router.post("/jobs/{job_id}/items", dependencies=[Depends(require_api_login)])
 def api_create_item(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     require_value(get_job(job_id), "任务不存在")
     data = api_item_payload(payload, job_id)
+    validate_item_connection(data)
     item_id = save_screenshot_item(data)
     return {"ok": True, "item": get_screenshot_item(item_id)}
+
+
+@api_router.post("/jobs/{job_id}/items/batch", dependencies=[Depends(require_api_login)])
+def api_create_items_batch(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    from urllib.parse import urlsplit
+
+    require_value(get_job(job_id), "任务不存在")
+    rows = payload.get("items")
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 100:
+        raise HTTPException(status_code=400, detail="请添加 1 到 100 个页面")
+    existing = {
+        (str(row.get("url") or "").strip(), row.get("auth_profile_id"))
+        for row in list_screenshot_items(job_id)
+    }
+    validated: list[dict[str, Any]] = []
+    for index, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            raise HTTPException(status_code=400, detail=f"第 {index} 行格式错误")
+        url = str(row.get("url") or "").strip()
+        parts = urlsplit(url)
+        if parts.scheme not in {"http", "https"} or not parts.netloc or parts.username or parts.password:
+            raise HTTPException(status_code=400, detail=f"第 {index} 行页面地址无效")
+        auth_id = parse_optional_int(str(row.get("auth_profile_id") or ""))
+        if auth_id and not get_auth_profile(auth_id):
+            raise HTTPException(status_code=400, detail=f"第 {index} 行认证配置不存在")
+        key = (url, auth_id)
+        if key in existing:
+            raise HTTPException(status_code=400, detail=f"第 {index} 行页面已在任务中或重复添加")
+        existing.add(key)
+        name = str(row.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail=f"第 {index} 行请填写截图名称")
+        data = api_item_payload({
+            "name": name, "url": url, "auth_profile_id": auth_id,
+            "item_type": "grafana" if "/d/" in parts.path or "/d-solo/" in parts.path else "web",
+            "section": str(row.get("section") or "巡检截图").strip() or "巡检截图",
+            "real_browser_capture": bool_value(row.get("real_browser_capture"), True),
+            "taskbar_enabled": True,
+            "timeout_seconds": 120,
+            "total_timeout_seconds": 240,
+            "retry_count": 2,
+            "wait_seconds": 3,
+            "sort_order": 100 + index,
+        }, job_id)
+        validated.append(data)
+    ids = save_screenshot_items_batch(validated)
+    return {"ok": True, "count": len(ids), "item_ids": ids}
+
+
+def validate_item_connection(data: dict[str, Any]) -> None:
+    from urllib.parse import urlsplit
+
+    url = str(data.get("url") or "").strip()
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.netloc or parts.username or parts.password:
+        raise HTTPException(status_code=400, detail="请填写有效的页面地址")
+    auth_id = data.get("auth_profile_id")
+    if auth_id and not get_auth_profile(int(auth_id)):
+        raise HTTPException(status_code=400, detail="所选网站连接不存在")
 
 
 @api_router.put("/items/{item_id}", dependencies=[Depends(require_api_login)])
 def api_update_item(item_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     current = require_value(get_screenshot_item(item_id), "截图项不存在")
     data = api_item_payload(payload, int(current["job_id"]))
+    validate_item_connection(data)
     save_screenshot_item(data, item_id)
     return {"ok": True, "item": get_screenshot_item(item_id)}
 
@@ -1280,9 +1671,105 @@ def api_get_run(run_id: int) -> dict[str, Any]:
     return {"run": run, "results": results}
 
 
+@api_router.get("/runs/{run_id}/prometheus/{result_id}/{source_uid}", dependencies=[Depends(require_api_login)])
+def api_open_prometheus_alerts(run_id: int, result_id: int, source_uid: str) -> RedirectResponse:
+    """Open the native Prometheus UI, including for records made before URLs were saved."""
+    import json
+    from urllib.parse import quote, urlsplit
+    from app.monitoring import _dashboard_api_base, prometheus_alert_url
+
+    result = next(
+        (row for row in list_screenshot_results(run_id) if row["id"] == result_id), None
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="巡检结果不存在")
+    try:
+        monitoring = json.loads(result.get("monitor_data") or "{}")
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=404, detail="该记录没有 Prometheus 数据") from None
+    if not isinstance(monitoring, dict) or not isinstance(monitoring.get("sources"), list):
+        raise HTTPException(status_code=404, detail="该记录没有 Prometheus 数据")
+    source = next(
+        (entry for entry in monitoring.get("sources", [])
+         if isinstance(entry, dict) and str(entry.get("uid")) == source_uid), None
+    )
+    if source is None:
+        raise HTTPException(status_code=404, detail="该记录没有对应的 Prometheus 数据源")
+
+    saved_link = str(source.get("alert_url") or "")
+    if saved_link:
+        parts = urlsplit(saved_link)
+        if parts.scheme in {"http", "https"} and parts.hostname and not parts.username and not parts.password:
+            return RedirectResponse(saved_link, status_code=302)
+
+    item = get_screenshot_item(result.get("item_id"))
+    if item is None:
+        raise HTTPException(status_code=404, detail="原截图项已删除，无法查找 Prometheus 地址")
+
+    from app.grafana_connections import ConnectionError, _with_login
+    from app.screenshot import resolve_env_placeholders
+
+    location = _dashboard_api_base(resolve_env_placeholders(str(item.get("url") or "")))
+    if location is None:
+        raise HTTPException(status_code=404, detail="原截图项不是 Grafana 看板")
+    base, _ = location
+    profile = get_auth_profile(item.get("auth_profile_id")) if item.get("auth_profile_id") else None
+
+    def read_source(context: Any, _page: Any) -> str:
+        response = context.request.get(
+            f"{base}/api/datasources/uid/{quote(source_uid, safe='')}", timeout=10_000
+        )
+        if not response.ok:
+            raise ConnectionError(f"读取 Prometheus 地址失败：Grafana 返回 HTTP {response.status}")
+        source_data = response.json()
+        if not isinstance(source_data, dict) or str(source_data.get("uid")) != source_uid:
+            raise ConnectionError("Grafana 返回的数据源不匹配")
+        link = prometheus_alert_url(source_data.get("url"))
+        if not link:
+            raise ConnectionError("Grafana 数据源没有可供浏览器打开的 Prometheus 地址")
+        return link
+
+    try:
+        link = _with_login(profile, read_source)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"无法打开 Prometheus：{exc}") from exc
+    return RedirectResponse(link, status_code=302)
+
+
 @api_router.get("/auth-profiles", dependencies=[Depends(require_api_login)])
 def api_list_auth_profiles() -> dict[str, Any]:
     return {"profiles": [public_auth_profile(profile) for profile in list_auth_profiles()]}
+
+
+@api_router.get("/auth-profiles/{auth_id}/dashboards", dependencies=[Depends(require_api_login)])
+def api_search_grafana_dashboards(auth_id: int, query: str = "") -> dict[str, Any]:
+    from app.grafana_connections import ConnectionError, search_dashboards
+
+    profile = require_value(get_auth_profile(auth_id), "认证配置不存在")
+    try:
+        return search_dashboards(profile, query)
+    except ConnectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api_router.get("/auth-profiles/{auth_id}/dashboards/{uid}/settings", dependencies=[Depends(require_api_login)])
+def api_grafana_dashboard_settings(auth_id: int, uid: str, params: str = "") -> dict[str, Any]:
+    from app.grafana_connections import ConnectionError, dashboard_settings
+
+    profile = require_value(get_auth_profile(auth_id), "认证配置不存在")
+    try:
+        return dashboard_settings(profile, uid, params)
+    except ConnectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api_router.post("/connections/check-target", dependencies=[Depends(require_api_login)])
+def api_check_connection_target(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.grafana_connections import check_target
+
+    auth_id = parse_optional_int(str(payload.get("auth_profile_id") or ""))
+    profile = require_value(get_auth_profile(auth_id), "认证配置不存在") if auth_id else None
+    return check_target(str(payload.get("url") or ""), profile)
 
 
 @api_router.post("/auth-profiles", dependencies=[Depends(require_api_login)])
@@ -1335,6 +1822,98 @@ def api_test_auth_profile(auth_id: int) -> dict[str, Any]:
     return result
 
 
+@api_router.get("/dingtalk-profiles", dependencies=[Depends(require_api_login)])
+def api_list_dingtalk_profiles() -> dict[str, Any]:
+    return {"profiles": [public_dingtalk_profile(profile) for profile in list_dingtalk_profiles()]}
+
+
+@api_router.post("/dingtalk-profiles", dependencies=[Depends(require_api_login)])
+def api_create_dingtalk_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    data = api_dingtalk_payload(payload)
+    if not data["webhook"]:
+        raise HTTPException(status_code=400, detail="Webhook 不能为空")
+    bot_id = save_dingtalk_profile(data)
+    return {"ok": True, "profile": public_dingtalk_profile(require_value(get_dingtalk_profile(bot_id), "钉钉机器人不存在"))}
+
+
+@api_router.put("/dingtalk-profiles/{profile_id}", dependencies=[Depends(require_api_login)])
+def api_update_dingtalk_profile(profile_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    old = require_value(get_dingtalk_profile(profile_id), "钉钉机器人不存在")
+    data = api_dingtalk_payload(payload)
+    if not data["webhook"]:
+        data["webhook"] = old.get("webhook") or ""
+    if not data["secret"]:
+        data["secret"] = old.get("secret") or ""
+    save_dingtalk_profile(data, profile_id)
+    return {"ok": True, "profile": public_dingtalk_profile(require_value(get_dingtalk_profile(profile_id), "钉钉机器人不存在"))}
+
+
+@api_router.delete("/dingtalk-profiles/{profile_id}", dependencies=[Depends(require_api_login)])
+def api_delete_dingtalk_profile(profile_id: int) -> dict[str, Any]:
+    require_value(get_dingtalk_profile(profile_id), "钉钉机器人不存在")
+    delete_dingtalk_profile(profile_id)
+    return {"ok": True}
+
+
+@api_router.post("/dingtalk-profiles/{profile_id}/test", dependencies=[Depends(require_api_login)])
+def api_test_dingtalk_profile(profile_id: int) -> dict[str, Any]:
+    profile = require_value(get_dingtalk_profile(profile_id), "钉钉机器人不存在")
+    from app.utils import decrypt_secret
+    from app.dingtalk import send_dingtalk_msg
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.settings import settings
+    local_tz = ZoneInfo(settings.default_timezone)
+    now_str = datetime.now(local_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+    webhook = decrypt_secret(profile.get("webhook", "")) if profile.get("webhook") else ""
+    secret = decrypt_secret(profile.get("secret", "")) if profile.get("secret") else ""
+    keyword = profile.get("keyword", "") or ""
+
+    title = "巡检系统钉钉机器人测试"
+    emoji = "🔔 " if profile.get("emoji_enabled") == 1 else ""
+    text = f"### {emoji}钉钉通知连通性测试\n\n- **机器人**: {profile.get('name')}\n- **测试时间**: {now_str}\n- **状态**: 消息通道连接正常\n\n> 自动化巡检系统测试消息"
+    result = send_dingtalk_msg(webhook, secret, keyword, title, text)
+    if result == "sent":
+        return {"ok": True, "message": "测试消息已成功发送至钉钉群！"}
+    return {"ok": False, "error": f"钉钉发送失败: {result}"}
+
+
+@api_router.post("/mail-profiles/{mail_id}/test", dependencies=[Depends(require_api_login)])
+def api_test_mail_profile_json(mail_id: int, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    profile = require_value(get_mail_profile(mail_id), "邮件配置不存在")
+    from app.mail import send_inspection_mail
+    from app.utils import decrypt_secret
+    recipient = text_value(payload, "to", "").strip() or profile.get("recipients", "").split(",")[0].strip() or profile.get("sender", "").strip()
+    if not recipient:
+        raise HTTPException(status_code=400, detail="收件人为空且无法提取默认收件人")
+
+    password = ""
+    if profile.get("password_secret"):
+        try:
+            password = decrypt_secret(profile.get("password_secret"))
+        except Exception:
+            pass
+    elif profile.get("password_env"):
+        password = os.getenv(profile.get("password_env"), "")
+
+    success, err = send_inspection_mail(
+        smtp_host=profile.get("smtp_host", ""),
+        smtp_port=int(profile.get("smtp_port") or 465),
+        use_ssl=bool(profile.get("use_ssl", 1)),
+        use_starttls=bool(profile.get("use_starttls", 0)),
+        username=profile.get("username", ""),
+        password=password,
+        sender=profile.get("sender", ""),
+        recipients=recipient,
+        subject="自动化巡检系统 - 邮件连通性测试",
+        body_text="这是一封来自自动化巡检系统的测试邮件，说明邮件服务器连接及认证配置正常。",
+    )
+    if success:
+        return {"ok": True, "message": f"测试邮件已成功发送至 {recipient}！"}
+    return {"ok": False, "error": f"邮件发送失败: {err}"}
+
+
 @api_router.get("/mail-profiles", dependencies=[Depends(require_api_login)])
 def api_list_mail_profiles() -> dict[str, Any]:
     return {"profiles": [public_mail_profile(profile) for profile in list_mail_profiles()]}
@@ -1366,7 +1945,33 @@ def api_delete_mail_profile(mail_id: int) -> dict[str, Any]:
 
 @api_router.get("/periodic-reports", dependencies=[Depends(require_api_login)])
 def api_periodic_reports() -> dict[str, Any]:
-    from app.repository import list_periodic_report_runs, list_periodic_report_settings
+    from app.repository import list_periodic_report_runs, list_periodic_report_settings, list_mail_profiles, list_dingtalk_profiles
+    from app.scheduler import _periodic_next
+    from zoneinfo import ZoneInfo
+    from datetime import datetime
+    import json
+
+    now_tz = datetime.now(ZoneInfo(settings.default_timezone))
+    settings_list = []
+    for item in list_periodic_report_settings():
+        s = dict(item)
+        next_run_str = ""
+        if s.get("enabled"):
+            try:
+                cfg = json.loads(s.get("schedule_config") or "{}")
+                times = cfg.get("times") or []
+                candidates = []
+                for slot in times:
+                    nxt = _periodic_next(s, slot, now_tz)
+                    if nxt:
+                        candidates.append(nxt)
+                if candidates:
+                    candidates.sort()
+                    next_run_str = candidates[0].strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+        s["next_run"] = next_run_str
+        settings_list.append(s)
 
     runs = []
     for item in list_periodic_report_runs(50):
@@ -1381,28 +1986,150 @@ def api_periodic_reports() -> dict[str, Any]:
             run["size_str"] = "-"
             run["filename"] = ""
         runs.append(run)
-    return {"settings": list_periodic_report_settings(), "runs": runs}
+
+    return {
+        "settings": settings_list,
+        "runs": runs,
+        "mail_profiles": [public_mail_profile(p) for p in list_mail_profiles()],
+        "dingtalk_profiles": [public_dingtalk_profile(p) for p in list_dingtalk_profiles()],
+    }
 
 
 @api_router.post("/periodic-reports/{report_type}/run", dependencies=[Depends(require_api_login)])
 def api_run_periodic_report(report_type: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
     from app.periodic_reporter import trigger_periodic_report
+    from app.repository import get_periodic_report_setting
 
+    if report_type not in ("weekly", "monthly") or not get_periodic_report_setting(report_type):
+        raise HTTPException(status_code=404, detail="周期报告配置不存在")
     background_tasks.add_task(trigger_periodic_report, report_type, True)
+    return {"ok": True}
+
+
+@api_router.delete("/periodic-reports/runs/{run_id}", dependencies=[Depends(require_api_login)])
+def api_delete_periodic_report_run(run_id: int) -> dict[str, Any]:
+    _remove_periodic_report_run(run_id)
+    return {"ok": True}
+
+
+def _remove_periodic_report_run(run_id: int) -> None:
+    from app.repository import get_periodic_report_run, delete_periodic_report_run
+    from app.storage_paths import is_safe_path, resolve_artifact_path
+    run = get_periodic_report_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="周期报告记录不存在")
+    if run.get("status") in {"running", "waiting"}:
+        raise HTTPException(status_code=409, detail="报告仍在生成，完成后才能删除")
+    z_path = run.get("zip_path")
+    if z_path:
+        archive = resolve_artifact_path(z_path)
+        if not is_safe_path(archive):
+            raise HTTPException(status_code=403, detail="报告文件路径无效，记录已保留")
+        try:
+            archive.unlink(missing_ok=True)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="报告文件删除失败，记录已保留") from exc
+    delete_periodic_report_run(run_id)
+
+
+
+@api_router.put("/periodic-reports/{report_type}", dependencies=[Depends(require_api_login)])
+def api_update_periodic_report(report_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    import json
+
+    from app.repository import get_periodic_report_setting, save_periodic_report_setting
+    from app.scheduler import reload_jobs
+
+    if report_type not in ("weekly", "monthly"):
+        raise HTTPException(status_code=404, detail="周期报告配置不存在")
+    current = get_periodic_report_setting(report_type)
+    if not current:
+        raise HTTPException(status_code=404, detail="周期报告配置不存在")
+    if not bool_value(payload.get("include_docx"), True) and not bool_value(payload.get("include_screenshots"), False):
+        raise HTTPException(status_code=400, detail="请至少选择 Word 报告或截图")
+
+    schedule_mode = text_value(payload, "schedule_mode", "calendar")
+    if schedule_mode not in ("simple", "calendar"):
+        raise HTTPException(status_code=400, detail="旧定时方式已停用，请选择日期计划")
+    schedule_mode = "calendar"
+    cron_expr = ""
+    raw_times = payload.get("times")
+    if not isinstance(raw_times, list) or not 1 <= len(raw_times) <= 4:
+        raise HTTPException(status_code=400, detail="请设置 1 到 4 个生成时间")
+    times = []
+    for entry in raw_times:
+        try:
+            hour = int(entry["hour"])
+            minute = int(entry["minute"])
+            ampm = str(entry["ampm"])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise HTTPException(status_code=400, detail="生成时间格式错误") from exc
+        if not 1 <= hour <= 12 or not 0 <= minute <= 59 or ampm not in ("am", "pm"):
+            raise HTTPException(status_code=400, detail="生成时间超出范围")
+        times.append({"ampm": ampm, "hour": hour, "minute": minute})
+
+    if report_type == "monthly":
+        labels = []
+        for entry in times:
+            labels.append(f"{'上午' if entry['ampm'] == 'am' else '下午'}{entry['hour']}点{entry['minute']:02d}分")
+        schedule_label = f"每月最后一天 {', '.join(labels)}"
+        schedule_config = json.dumps({"frequency": "monthly_last", "times": times}, ensure_ascii=False)
+    else:
+        day_of_week = text_value(payload, "day_of_week", "1")
+        if day_of_week not in {str(day) for day in range(1, 8)}:
+            raise HTTPException(status_code=400, detail="执行星期无效")
+        schedule_label = f"每周{'一二三四五六日'[int(day_of_week) - 1]} " + "、".join(f"{'上午' if entry['ampm'] == 'am' else '下午'}{entry['hour']}点{entry['minute']:02d}分" for entry in times)
+        schedule_config = json.dumps({"frequency": "weekly", "day_of_week": day_of_week, "times": times}, ensure_ascii=False)
+
+    data = dict(current)
+    data.update({
+        "enabled": int(bool_value(payload.get("enabled"), bool(current.get("enabled")))),
+        "name": text_value(payload, "name", str(current.get("name") or "")),
+        "schedule_mode": schedule_mode,
+        "schedule_label": schedule_label,
+        "cron_expression": cron_expr,
+        "schedule_config": schedule_config,
+        "mail_profile_id": parse_optional_int(str(payload.get("mail_profile_id") or "")),
+        "enable_email": int(bool_value(payload.get("enable_email"), False)),
+        "recipients_override": text_value(payload, "recipients_override", ""),
+        "dingtalk_enabled": int(bool_value(payload.get("dingtalk_enabled"), False)),
+        "dingtalk_profile_id": parse_optional_int(str(payload.get("dingtalk_profile_id") or "")),
+        "include_docx": int(bool_value(payload.get("include_docx"), True)),
+        "include_screenshots": int(bool_value(payload.get("include_screenshots"), False)),
+        "send_empty_report": int(bool_value(payload.get("send_empty_report"), False)),
+        "wait_for_daily_jobs": int(bool_value(payload.get("wait_for_daily_jobs"), False)),
+        "retry_until_time": text_value(payload, "retry_until_time", "23:50"),
+        "retry_interval_minutes": int_value(payload, "retry_interval_minutes", 10),
+        "send_on_timeout": int(bool_value(payload.get("send_on_timeout"), True)),
+    })
+    save_periodic_report_setting(report_type, data)
+    reload_jobs()
     return {"ok": True}
 
 
 @frontend_router.get("/", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def index(request: Request) -> HTMLResponse:
+    import json
+
+    manifest_path = Path("app/static/vue/.vite/manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entry = manifest["index.html"]
     return templates.TemplateResponse(
-        "index.html",
+        "vue.html",
         {
             "request": request,
             "url_for_frontend": url_for_frontend,
             "api_prefix": settings.api_prefix,
             "frontend_base_path": settings.frontend_base_path,
+            "vue_js": entry["file"],
+            "vue_css": entry["css"][0],
         },
     )
+
+
+@frontend_router.get("/legacy", dependencies=[Depends(require_login)])
+def legacy_index() -> RedirectResponse:
+    return frontend_redirect("/")
 
 
 @frontend_router.get("/jobs/new", response_class=HTMLResponse, dependencies=[Depends(require_login)])
@@ -1421,11 +2148,16 @@ def new_job(request: Request) -> HTMLResponse:
 
 @frontend_router.post("/jobs/new", dependencies=[Depends(require_login)])
 def create_job(form: dict[str, Any] = Depends(job_form)) -> RedirectResponse:
-    from app.utils import validate_cron_expression
+    from app.schedule_migration import _job_config
+    from app.date_schedule import label
     from urllib.parse import quote
     import sqlite3
     try:
-        validate_cron_expression(form["cron_expression"])
+        if form.get("schedule_mode") != "simple":
+            raise ValueError("旧定时方式已停用，请在新页面设置日期计划")
+        config = _job_config(form["schedule_config"])
+        import json
+        form.update(schedule_mode="calendar", schedule_config=json.dumps(config, ensure_ascii=False), schedule_label=label(config), cron_expression="")
     except ValueError as e:
         return frontend_redirect(f"/jobs/new?error={quote(str(e))}")
 
@@ -1447,10 +2179,7 @@ def job_detail(request: Request, job_id: int) -> HTMLResponse:
     if not job:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    next_runs = []
-    if int(job.get("enabled") or 0):
-        from app.utils import get_next_run_times
-        next_runs = get_next_run_times(job.get("cron_expression") or "", limit=3)
+    next_runs = calculate_job_next_runs(job, limit=3)
 
     items = list_screenshot_items(job_id)
 
@@ -1493,12 +2222,17 @@ def edit_job(request: Request, job_id: int) -> HTMLResponse:
 
 @frontend_router.post("/jobs/{job_id}/edit", dependencies=[Depends(require_login)])
 def update_job(job_id: int, form: dict[str, Any] = Depends(job_form)) -> RedirectResponse:
-    from app.utils import validate_cron_expression
+    from app.schedule_migration import _job_config
+    from app.date_schedule import label
     from urllib.parse import quote
     import sqlite3
     old = require_value(get_job(job_id), "任务不存在")
     try:
-        validate_cron_expression(form["cron_expression"])
+        if form.get("schedule_mode") != "simple":
+            raise ValueError("旧定时方式已停用，请在新页面设置日期计划")
+        config = _job_config(form["schedule_config"])
+        import json
+        form.update(schedule_mode="calendar", schedule_config=json.dumps(config, ensure_ascii=False), schedule_label=label(config), cron_expression="")
     except ValueError as e:
         return frontend_redirect(f"/jobs/{job_id}/edit?error={quote(str(e))}")
 
@@ -1506,6 +2240,7 @@ def update_job(job_id: int, form: dict[str, Any] = Depends(job_form)) -> Redirec
         form["dingtalk_webhook"] = old.get("dingtalk_webhook") or ""
     if not form.get("dingtalk_secret"):
         form["dingtalk_secret"] = old.get("dingtalk_secret") or ""
+    form["template_id"] = old.get("template_id")
     try:
         save_job(form, job_id)
     except sqlite3.IntegrityError as e:
@@ -1526,14 +2261,13 @@ def remove_job(job_id: int) -> RedirectResponse:
 @frontend_router.post("/jobs/{job_id}/run", dependencies=[Depends(require_login)])
 def run_job_now(job_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
     job = require_value(get_job(job_id), "任务不存在")
-    run_id = create_run(job_id, str(job["name"]))
-    background_tasks.add_task(run_job, job_id, run_id)
+    run_id = queue_inspection_job(job, background_tasks)
     return frontend_redirect(f"/runs/{run_id}?watch=1")
 
 
 @frontend_router.get("/jobs/{job_id}/items/new", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def new_item(request: Request, job_id: int) -> HTMLResponse:
-    require_value(get_job(job_id), "任务不存在")
+    job = require_value(get_job(job_id), "任务不存在")
     return templates.TemplateResponse(
         "item_form.html",
         {
@@ -1544,17 +2278,12 @@ def new_item(request: Request, job_id: int) -> HTMLResponse:
                 "capture_mode": "viewport",
                 "item_type": "web",
                 "section": "巡检截图",
-                "watermark_enabled": 0,
-                "watermark_text": "{time}\n省客户服务中心\ndwangchengyi7(王诚毅)",
-                "watermark_opacity": 65,
-                "watermark_font_size": 24,
-                "watermark_gap_x": 140,
-                "watermark_gap_y": 140,
-                "watermark_angle": -45,
+                **WATERMARK_DEFAULTS,
             },
             "job_id": job_id,
             "auth_profiles": list_auth_profiles(),
-            "template_sections": list_template_sections(),
+            "template_sections": job_template_sections(job),
+            "watermark_time_formats": watermark_options(),
             "action": url_for_frontend(f"/jobs/{job_id}/items/new"),
         },
     )
@@ -1575,9 +2304,10 @@ def edit_item(request: Request, item_id: int) -> HTMLResponse:
         {
             "request": request,
             "item": item,
+            "watermark_time_formats": watermark_options(),
             "job_id": item["job_id"],
             "auth_profiles": list_auth_profiles(),
-            "template_sections": list_template_sections(),
+            "template_sections": job_template_sections(require_value(get_job(item["job_id"]), "任务不存在")),
             "action": url_for_frontend(f"/items/{item_id}/edit"),
         },
     )
@@ -1587,6 +2317,7 @@ def edit_item(request: Request, item_id: int) -> HTMLResponse:
 def update_item(item_id: int, form: dict[str, Any] = Depends(item_form)) -> RedirectResponse:
     current = require_value(get_screenshot_item(item_id), "截图项不存在")
     form["job_id"] = current["job_id"]
+    form["taskbar_template_key"] = current.get("taskbar_template_key") or ""
     save_screenshot_item(form, item_id)
     return frontend_redirect(f"/jobs/{current['job_id']}")
 
@@ -1881,20 +2612,23 @@ def run_detail(request: Request, run_id: int) -> HTMLResponse:
 
 @frontend_router.get("/artifact/{kind}/{run_id}/{filename}", dependencies=[Depends(require_login)])
 def artifact(request: Request, kind: str, run_id: int, filename: str):
-    base = {"screenshots": settings.screenshot_dir, "reports": settings.report_dir}.get(kind)
-    if base is None:
+    if kind not in {"screenshots", "reports"}:
         raise HTTPException(status_code=404, detail="未知文件类型")
 
-    yyyy, mm, dd = get_run_date(run_id)
-    new_path = (base / yyyy / mm / dd / f"run-{run_id}" / filename).resolve()
-    legacy_path = (base / str(run_id) / filename).resolve()
-
-    # 提前校验文件安全性与物理存在性
-    target_path = None
-    if new_path.exists() and is_under(new_path, base.resolve()):
-        target_path = new_path
-    elif legacy_path.exists() and is_under(legacy_path, base.resolve()):
-        target_path = legacy_path
+    # 日期目录由多次运行共享，只允许下载该运行记录实际关联的文件。
+    if kind == "reports":
+        run = get_run(run_id)
+        stored_paths = [run.get("report_path")] if run else []
+    else:
+        stored_paths = [item.get("file_path") for item in list_screenshot_results(run_id)]
+    target_path = next(
+        (
+            path for stored in stored_paths if stored
+            for path in [resolve_artifact_path(stored)]
+            if path.name == filename and path.is_file() and is_under(path.resolve(), settings.data_dir.resolve())
+        ),
+        None,
+    )
 
     if target_path is None:
         raise HTTPException(status_code=404, detail="文件不存在")
@@ -2003,6 +2737,25 @@ def with_file_url(item: dict[str, Any]) -> dict[str, Any]:
         local_path = resolve_artifact_path(file_path)
         if local_path.exists():
             item["file_url"] = get_artifact_url("screenshots", run_id, filename)
+            try:
+                size_bytes = local_path.stat().st_size
+                item["file_size_bytes"] = size_bytes
+                if size_bytes < 1024:
+                    item["file_size_human"] = f"{size_bytes} B"
+                elif size_bytes < 1024 * 1024:
+                    item["file_size_human"] = f"{size_bytes / 1024:.1f} KB"
+                else:
+                    item["file_size_human"] = f"{size_bytes / (1024 * 1024):.2f} MB"
+            except Exception:
+                pass
+            try:
+                from PIL import Image
+                with Image.open(local_path) as img:
+                    item["dimensions"] = f"{img.width}×{img.height}"
+                    item["image_width"] = img.width
+                    item["image_height"] = img.height
+            except Exception:
+                pass
     return item
 
 
@@ -2105,90 +2858,31 @@ def update_periodic_report(
     dingtalk_secret: str = Form(""),
     dingtalk_keyword: str = Form(""),
 ) -> RedirectResponse:
-    import json
-    from app.utils import times_to_cron, validate_cron_expression
-    from app.repository import save_periodic_report_setting
-    from app.scheduler import reload_jobs
     from urllib.parse import quote
-
-    times_list = []
-    for i in range(len(hour)):
-        times_list.append({
-            "ampm": ampm[i] if i < len(ampm) else "am",
-            "hour": int(hour[i]),
-            "minute": int(minute[i]) if i < len(minute) else 0
-        })
-
-    if schedule_mode == "simple":
-        if frequency == "monthly_last":
-            cron_list = []
-            label_times = []
-            for t in times_list:
-                t_ampm = t.get("ampm", "am")
-                t_hour = int(t.get("hour", 9))
-                t_minute = int(t.get("minute", 0))
-
-                if t_ampm == "pm" and t_hour < 12:
-                    h_24 = t_hour + 12
-                elif t_ampm == "am" and t_hour == 12:
-                    h_24 = 0
-                else:
-                    h_24 = t_hour
-                cron_list.append(f"0 {t_minute} {h_24} * * *")
-                t_ampm_cn = "上午" if t_ampm == "am" else "下午"
-                label_times.append(f"{t_ampm_cn}{t_hour}点{t_minute:02d}分" if t_minute else f"{t_ampm_cn}{t_hour}点")
-
-            cron_expr = ";".join(cron_list)
-            label_expr = f"每月最后一天 {', '.join(label_times)}"
-            schedule_config = json.dumps({
-                "frequency": "monthly_last",
-                "times": times_list
-            })
-        else:
-            cron_expr, label_expr = times_to_cron(frequency, day_of_week, day_of_month, times_list)
-            schedule_config = json.dumps({
-                "frequency": frequency,
-                "day_of_week": day_of_week,
-                "day_of_month": day_of_month,
-                "times": times_list
-            })
-    else:
-        cron_expr = cron_expression
-        label_expr = "高级 Cron"
-        schedule_config = ""
-
+    if schedule_mode != "simple":
+        return frontend_redirect(f"/#/periodic/{report_type}/edit?error={quote('旧定时方式已停用，请重新设置生成时间')}")
+    times = [
+        {"ampm": ampm[i] if i < len(ampm) else "am", "hour": value,
+         "minute": minute[i] if i < len(minute) else 0}
+        for i, value in enumerate(hour)
+    ]
     try:
-        validate_cron_expression(cron_expr)
-    except ValueError as e:
-        return frontend_redirect(f"/periodic-reports/{report_type}/edit?error={quote(str(e))}")
-
-    update_data = {
-        "enabled": 1 if enabled else 0,
-        "name": name,
-        "schedule_mode": schedule_mode,
-        "schedule_label": label_expr,
-        "cron_expression": cron_expr,
-        "mail_profile_id": parse_optional_int(mail_profile_id),
-        "include_screenshots": 1 if include_screenshots else 0,
-        "include_docx": 1 if include_docx else 0,
-        "send_empty_report": 1 if send_empty_report else 0,
-        "wait_for_daily_jobs": 1 if wait_for_daily_jobs else 0,
-        "retry_until_time": retry_until_time,
-        "retry_interval_minutes": retry_interval_minutes,
-        "recipients_override": recipients_override,
-        "schedule_config": schedule_config,
-        "send_on_timeout": send_on_timeout,
-        "enable_email": 1 if enable_email else 0,
-        "dingtalk_enabled": 1 if dingtalk_enabled else 0,
-        "dingtalk_webhook": dingtalk_webhook.strip(),
-        "dingtalk_secret": dingtalk_secret.strip(),
-        "dingtalk_keyword": dingtalk_keyword.strip(),
-    }
-
-    save_periodic_report_setting(report_type, update_data)
-    reload_jobs()
-    return frontend_redirect(f"/periodic-reports?success={quote('周期汇总配置保存成功！')}")
-
+        api_update_periodic_report(report_type, {
+            "name": name, "enabled": bool(enabled), "schedule_mode": "calendar",
+            "day_of_week": day_of_week or "1", "times": times,
+            "mail_profile_id": mail_profile_id, "include_docx": bool(include_docx),
+            "include_screenshots": bool(include_screenshots),
+            "send_empty_report": bool(send_empty_report),
+            "wait_for_daily_jobs": bool(wait_for_daily_jobs),
+            "retry_until_time": retry_until_time,
+            "retry_interval_minutes": retry_interval_minutes,
+            "recipients_override": recipients_override,
+            "send_on_timeout": bool(send_on_timeout), "enable_email": bool(enable_email),
+            "dingtalk_enabled": bool(dingtalk_enabled),
+        })
+    except HTTPException as exc:
+        return frontend_redirect(f"/#/periodic/{report_type}/edit?error={quote(str(exc.detail))}")
+    return frontend_redirect("/#/periodic")
 
 @frontend_router.post("/periodic-reports/{report_type}/run", dependencies=[Depends(require_login)])
 def run_periodic_report_now(report_type: str, background_tasks: BackgroundTasks) -> RedirectResponse:
@@ -2215,16 +2909,11 @@ def download_periodic_report_zip(run_id: int) -> FileResponse:
 
 @frontend_router.post("/periodic-reports/delete/{run_id}", dependencies=[Depends(require_login)])
 def delete_periodic_report_run_route(run_id: int) -> RedirectResponse:
-    from app.repository import get_periodic_report_run, delete_periodic_report_run
-    run = get_periodic_report_run(run_id)
-    if run:
-        z_path = run.get("zip_path")
-        if z_path and os.path.exists(z_path):
-            try:
-                os.remove(z_path)
-            except Exception:
-                pass
-        delete_periodic_report_run(run_id)
+    from urllib.parse import quote
+    try:
+        _remove_periodic_report_run(run_id)
+    except HTTPException as exc:
+        return frontend_redirect(f"/periodic-reports?error={quote(str(exc.detail))}")
     return frontend_redirect("/periodic-reports")
 
 
@@ -2236,6 +2925,8 @@ def delete_periodic_report_run_route(run_id: int) -> RedirectResponse:
 def api_get_storage() -> dict[str, Any]:
     from app.cleanup import get_storage_usage
     from app.db import connect
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
 
     try:
         usage = get_storage_usage()
@@ -2244,21 +2935,26 @@ def api_get_storage() -> dict[str, Any]:
         usage = {
             "total_bytes": 0, "screenshots_bytes": 0, "reports_bytes": 0,
             "logs_bytes": 0, "browser_state_bytes": 0, "periodic_reports_bytes": 0,
-            "sqlite_db_bytes": 0, "estimated_cleanup_bytes": 0, "estimated_cleanup_files": 0
+            "sqlite_db_bytes": 0, "estimated_cleanup_bytes": None, "estimated_cleanup_files": None
         }
 
     with connect() as conn:
         row = conn.execute("SELECT * FROM storage_cleanup_settings ORDER BY id DESC LIMIT 1").fetchone()
         config = dict(row) if row else {}
+    for key in ("enabled", "allow_manual_cleanup", "browser_state_cleanup_enabled"):
+        if key in config:
+            config[key] = bool_value(config[key])
 
     with connect() as conn:
         row_run = conn.execute("SELECT * FROM storage_cleanup_runs ORDER BY id DESC LIMIT 1").fetchone()
         latest_run = dict(row_run) if row_run else None
 
+    current_month_start = datetime.now(ZoneInfo(settings.default_timezone)).replace(day=1)
     return {
         "usage": usage,
         "config": config,
-        "latest_run": latest_run
+        "latest_run": latest_run,
+        "latest_completed_month": (current_month_start - timedelta(days=1)).strftime("%Y-%m"),
     }
 
 
@@ -2268,41 +2964,65 @@ def api_update_storage_settings(payload: dict[str, Any]) -> dict[str, Any]:
     from app.scheduler import reload_jobs
     import json
 
-    enabled = bool_value(payload.get("enabled"), True)
-    allow_manual_cleanup = bool_value(payload.get("allow_manual_cleanup"), True)
-    cleanup_schedule_mode = text_value(payload, "cleanup_schedule_mode", "daily")
+    with connect() as conn:
+        existing_row = conn.execute("SELECT * FROM storage_cleanup_settings ORDER BY id DESC LIMIT 1").fetchone()
+        existing = dict(existing_row) if existing_row else {}
 
-    cleanup_schedule_label = text_value(payload, "cleanup_schedule_label", "")
-    cleanup_schedule_config = text_value(payload, "cleanup_schedule_config", "")
+    enabled = bool_value(payload.get("enabled"), bool(existing.get("enabled", True)))
+    # 手动清理由管理员确认操作，不再由独立开关控制；保留旧列兼容现有数据库。
+    allow_manual_cleanup = True
+    cleanup_schedule_mode = text_value(payload, "cleanup_schedule_mode", existing.get("cleanup_schedule_mode") or "daily")
+    if cleanup_schedule_mode not in {"daily", "weekly", "monthly"}:
+        raise HTTPException(status_code=400, detail="清理频率无效")
 
-    if not cleanup_schedule_label:
-        if cleanup_schedule_config:
-            try:
-                cfg = json.loads(cleanup_schedule_config)
-                time_str = cfg.get("time") or "02:30"
-                if cleanup_schedule_mode == "daily":
-                    cleanup_schedule_label = f"每天 {time_str}"
-                elif cleanup_schedule_mode == "weekly":
-                    dow_val = str(cfg.get("day_of_week") or "1")
-                    mapping = {"1": "周一", "2": "周二", "3": "周三", "4": "周四", "5": "周五", "6": "周六", "7": "周日", "0": "周日"}
-                    cleanup_schedule_label = f"每周 {mapping.get(dow_val, '周一')} {time_str}"
-                elif cleanup_schedule_mode == "monthly":
-                    day_val = str(cfg.get("day_of_month") or "1")
-                    cleanup_schedule_label = f"每月 {day_val}号 {time_str}"
-            except Exception:
-                cleanup_schedule_label = "每天 02:30"
+    try:
+        cfg = json.loads(text_value(payload, "cleanup_schedule_config", existing.get("cleanup_schedule_config") or "{}") or "{}")
+        if not isinstance(cfg, dict):
+            raise ValueError("清理计划必须是对象")
+        parts = str(cfg.get("time") or "02:30").split(":")
+        if len(parts) != 2:
+            raise ValueError("清理时间格式无效")
+        hour, minute = (int(part) for part in parts)
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ValueError("清理时间超出范围")
+        time_str = f"{hour:02d}:{minute:02d}"
+        normalized_cfg: dict[str, Any] = {"time": time_str}
+        if cleanup_schedule_mode == "weekly":
+            weekday = int(cfg.get("day_of_week") or 1)
+            if weekday == 0:
+                weekday = 7
+            if not 1 <= weekday <= 7:
+                raise ValueError("每周执行日期无效")
+            normalized_cfg["day_of_week"] = str(weekday)
+            cleanup_schedule_label = f"每周 {['周一', '周二', '周三', '周四', '周五', '周六', '周日'][weekday - 1]} {time_str}"
+        elif cleanup_schedule_mode == "monthly":
+            day = int(cfg.get("day_of_month") or 1)
+            if not 1 <= day <= 31:
+                raise ValueError("每月执行日期无效")
+            normalized_cfg["day_of_month"] = str(day)
+            cleanup_schedule_label = f"每月 {day}号 {time_str}"
         else:
-            cleanup_schedule_label = "每天 02:30"
+            cleanup_schedule_label = f"每天 {time_str}"
+        cleanup_schedule_config = json.dumps(normalized_cfg, ensure_ascii=False)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"自动清理计划无效：{exc}") from exc
 
-    periodic_sent_retention_days = int_value(payload, "periodic_sent_retention_days", 3)
-    periodic_failed_retention_days = int_value(payload, "periodic_failed_retention_days", 30)
-    screenshot_retention_days = int_value(payload, "screenshot_retention_days", 7)
-    report_retention_days = int_value(payload, "report_retention_days", 30)
-    run_record_retention_days = int_value(payload, "run_record_retention_days", 90)
-    log_retention_days = int_value(payload, "log_retention_days", 14)
-    browser_state_retention_days = int_value(payload, "browser_state_retention_days", 30)
-    browser_state_cleanup_enabled = bool_value(payload.get("browser_state_cleanup_enabled"), False)
-    protect_recent_days = int_value(payload, "protect_recent_days", 3)
+    periodic_sent_retention_days = int_value(payload, "periodic_sent_retention_days", int(existing.get("periodic_sent_retention_days") or 3))
+    periodic_failed_retention_days = int_value(payload, "periodic_failed_retention_days", int(existing.get("periodic_failed_retention_days") or 30))
+    screenshot_retention_days = int_value(payload, "screenshot_retention_days", int(existing.get("screenshot_retention_days") or 7))
+    report_retention_days = int_value(payload, "report_retention_days", int(existing.get("report_retention_days") or 30))
+    run_record_retention_days = int_value(payload, "run_record_retention_days", int(existing.get("run_record_retention_days") or 90))
+    log_retention_days = int_value(payload, "log_retention_days", int(existing.get("log_retention_days") or 14))
+    browser_state_retention_days = int_value(payload, "browser_state_retention_days", int(existing.get("browser_state_retention_days") or 30))
+    browser_state_cleanup_enabled = bool_value(payload.get("browser_state_cleanup_enabled"), bool(existing.get("browser_state_cleanup_enabled", False)))
+    protect_recent_days = int_value(payload, "protect_recent_days", int(existing.get("protect_recent_days") or 3))
+    retention_values = (
+        periodic_sent_retention_days, periodic_failed_retention_days,
+        screenshot_retention_days, report_retention_days, run_record_retention_days,
+        log_retention_days, browser_state_retention_days, protect_recent_days,
+    )
+    if any(value < 1 for value in retention_values):
+        raise HTTPException(status_code=400, detail="保留天数必须大于 0")
 
     with connect() as conn:
         row = conn.execute("SELECT id FROM storage_cleanup_settings ORDER BY id DESC LIMIT 1").fetchone()
@@ -2359,11 +3079,13 @@ def api_update_storage_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @api_router.post("/storage/estimate", dependencies=[Depends(require_api_login)])
-def api_estimate_storage() -> dict[str, Any]:
+def api_estimate_storage(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     from app.cleanup import estimate_cleanup
     try:
-        res = estimate_cleanup()
+        res = estimate_cleanup(target_month=payload.get("month") if payload else None)
         return {"ok": True, "result": res}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         app_logger.error(f"执行预估清理失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"预估清理失败: {e}")
@@ -2371,20 +3093,58 @@ def api_estimate_storage() -> dict[str, Any]:
 
 @api_router.post("/storage/cleanup", dependencies=[Depends(require_api_login)])
 def api_run_storage_cleanup(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    from app.cleanup import run_cleanup
-    target_month = None
-    if payload:
-        target_month = payload.get("month")  # 例如 "2026-05"
+    from app.cleanup import preview_cleanup, run_cleanup
+    payload = payload or {}
+    target_month = payload.get("month")
     try:
-        res = run_cleanup(mode="manual", dry_run=False, target_month=target_month)
-        if res.get("status") == "failed" and "系统策略限制" in res.get("error_summary", ""):
-            raise HTTPException(status_code=400, detail=res["error_summary"])
+        fingerprint = payload.get("preview_fingerprint")
+        if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+            raise HTTPException(status_code=400, detail="请先查看待清理数据")
+        current = preview_cleanup(
+            scopes=payload.get("scopes"), older_than_days=payload.get("older_than_days"),
+            target_month=target_month, page=1, page_size=1,
+        )
+        if current.get("status") != "success" or current.get("fingerprint") != fingerprint or not current.get("total_items"):
+            raise HTTPException(status_code=409, detail="待清理数据已变化，请重新查看")
+        res = run_cleanup(
+            mode="manual", dry_run=False, target_month=target_month,
+            scopes=payload.get("scopes"), older_than_days=payload.get("older_than_days"),
+        )
+        if res.get("status") == "failed":
+            detail = res.get("error_summary") or "清理失败"
+            status_code = 400 if "系统策略限制" in detail else 500
+            raise HTTPException(status_code=status_code, detail=detail)
         return {"ok": True, "result": res}
     except HTTPException as he:
         raise he
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         app_logger.error(f"执行物理清理失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"执行清理失败: {e}")
+
+
+@api_router.post("/storage/preview", dependencies=[Depends(require_api_login)])
+def api_preview_storage_cleanup(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    from app.cleanup import preview_cleanup
+
+    payload = payload or {}
+    try:
+        result = preview_cleanup(
+            scopes=payload.get("scopes"), older_than_days=payload.get("older_than_days"),
+            target_month=payload.get("month"), page=payload.get("page", 1),
+            page_size=payload.get("page_size", 20),
+        )
+        if result.get("status") != "success":
+            raise HTTPException(status_code=500, detail=result.get("error_summary") or "读取待清理数据失败")
+        return {"ok": True, "result": result}
+    except (HTTPException, ValueError) as exc:
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise
+    except Exception as exc:
+        app_logger.error("读取待清理数据失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="读取待清理数据失败") from exc
 
 
 @api_router.get("/storage/cleanup-runs", dependencies=[Depends(require_api_login)])

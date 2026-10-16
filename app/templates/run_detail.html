@@ -2,8 +2,8 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <h1>运行记录 #{{ run.id }}</h1>
-    <p class="muted">{{ run.job_name }} · {{ run.status | status_label }} · 开始于 {{ run.started_at | short_date }}</p>
+    <h1>巡检记录 #{{ run.id }}</h1>
+    <p class="muted">{{ run.job_name }} · {{ run.status | status_label }} · {{ run.started_at | short_date }}</p>
   </div>
   {% if run.report_url %}
   <a class="button primary" href="{{ run.report_url }}" style="font-weight: 600;">下载 Word 报告</a>
@@ -11,7 +11,7 @@
 </div>
 
 <!-- 摘要卡片区 -->
-<section class="summary-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px;">
+<section class="summary-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 16px; margin-bottom: 20px;">
   <div class="panel" style="padding: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 80px;">
     <span style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; font-weight: 600;">成功截图</span>
     <strong style="font-size: 22px; color: var(--success);">{{ run.success_count }} 张</strong>
@@ -21,11 +21,11 @@
     <strong style="font-size: 22px; color: {{ 'var(--danger)' if run.failed_count > 0 else 'var(--text-color)' }};">{{ run.failed_count }} 张</strong>
   </div>
   <div class="panel" style="padding: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 80px;">
-    <span style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; font-weight: 600;">邮件推送状态</span>
+    <span style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; font-weight: 600;">邮件状态</span>
     <strong style="font-size: 15px; color: var(--text-color); word-break: break-all;">{{ run.mail_status | mail_status_label }}</strong>
   </div>
   <div class="panel" style="padding: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 80px;">
-    <span style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; font-weight: 600;">钉钉推送状态</span>
+    <span style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; font-weight: 600;">钉钉状态</span>
     <strong style="font-size: 15px; color: var(--text-color); word-break: break-all;">{{ run.dingtalk_status | dingtalk_status_label }}</strong>
   </div>
   <div class="panel" style="padding: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 80px;">
@@ -44,15 +44,29 @@
 
 <!-- 运行截图明细 -->
 <section class="panel">
-  <h3 style="margin-bottom: 16px; font-size: 14px; border-left: 4px solid var(--primary); padding-left: 8px; font-weight: 600; color: var(--text-color);">截图结果清单</h3>
+  <h3 style="margin-bottom: 16px; font-size: 14px; border-left: 4px solid var(--primary); padding-left: 8px; font-weight: 600; color: var(--text-color);">截图结果</h3>
   <table>
-    <thead><tr><th>截图名称</th><th>所属报告章节</th><th>执行状态</th><th>本地图片</th><th>错误日志 / 诊断信息</th></tr></thead>
+    <thead><tr><th>截图名称</th><th>所属报告章节</th><th>执行状态</th><th>总耗时</th><th>图片大小 / 分辨率</th><th>本地图片</th><th>内容状态 / 错误信息</th></tr></thead>
     <tbody>
       {% for item in results %}
       <tr>
         <td><strong>{{ item.item_name }}</strong></td>
         <td>{{ item.section }}</td>
         <td><span class="badge {{ 'ok' if item.status == 'success' else 'bad' }}">{{ item.status | status_label }}</span></td>
+        <td>
+          {% if item.duration_seconds is not none %}
+          <span style="font-family: monospace; font-size: 13px; font-weight: 600; color: #475569;">{{ "%.2f"|format(item.duration_seconds) }} 秒</span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td>
+          {% if item.file_size_human %}
+          <span style="font-family: monospace; font-size: 13px; font-weight: 500; color: #1e293b; white-space: nowrap;">
+            {{ item.file_size_human }} / {{ item.dimensions or '-' }}
+          </span>
+          {% else %}
+          <span class="muted">—</span>
+          {% endif %}
+        </td>
         <td>
           {% if item.file_url %}
           <a href="{{ item.file_url }}" target="_blank" style="color: var(--primary); font-weight: 600; display: inline-flex; align-items: center; gap: 4px;">
@@ -66,13 +80,15 @@
         <td>
           {% if item.error_message %}
           <div style="max-width: 320px; font-size: 12px; color: var(--danger); word-break: break-all; white-space: pre-wrap; line-height: 1.4;">{{ item.error_message }}</div>
+          {% elif item.content_summary %}
+          <div style="max-width: 320px; font-size: 12px; color: {{ '#a16207' if item.content_status in ('no_data', 'partial_no_data') else 'var(--text-color)' }}; line-height: 1.4;">{{ item.content_summary }}</div>
           {% else %}
           <span class="muted">-</span>
           {% endif %}
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="5" class="empty" style="padding: 30px; text-align: center;">本次运行没有截图结果。请确认任务下已添加并启用截图项，然后点击任务的“立即运行”。</td></tr>
+      <tr><td colspan="6" class="empty" style="padding: 30px; text-align: center;">暂无截图结果，请检查截图项是否已启用。</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -82,7 +98,7 @@
 {% if results and results | selectattr('file_url') | list | length > 0 %}
 <section style="margin-top: 30px;">
   <h3 style="margin-bottom: 16px; font-size: 14px; border-left: 4px solid var(--primary); padding-left: 8px; font-weight: 600; color: var(--text-color);">截图结果预览</h3>
-  <div class="preview-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 20px;">
+  <div class="preview-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); gap: 20px;">
     {% for item in results %}
       {% if item.file_url %}
       <div class="panel preview" style="padding: 12px; display: flex; flex-direction: column; gap: 8px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.02);">
@@ -91,7 +107,7 @@
         </a>
         <figcaption style="font-size: 13px; font-weight: 600; text-align: center; color: var(--text-color); margin-top: 4px;">
           {{ item.item_name }}
-          <span style="font-weight: normal; font-size: 12px; color: var(--text-muted); display: block; margin-top: 2px;">所属章节：{{ item.section }}</span>
+          <span style="font-weight: normal; font-size: 12px; color: var(--text-muted); display: block; margin-top: 2px;">所属章节：{{ item.section }}{% if item.duration_seconds is not none %} · 总耗时 {{ "%.2f"|format(item.duration_seconds) }} 秒{% endif %}</span>
         </figcaption>
       </div>
       {% endif %}
@@ -175,7 +191,7 @@
         const tbody = document.querySelector('tbody');
         if (tbody) {
           if (!results.length) {
-            tbody.innerHTML = '<tr><td colspan="5" class="empty" style="padding: 30px; text-align: center;">本次运行没有截图结果。请确认任务下已添加并启用截图项，然后点击任务的“立即运行”。</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" class="empty" style="padding: 30px; text-align: center;">暂无截图结果，请检查截图项是否已启用。</td></tr>';
           } else {
             let html = '';
             results.forEach(item => {
@@ -190,6 +206,8 @@
               
               const errMsgHtml = item.error_message ? `
                 <div style="max-width: 320px; font-size: 12px; color: var(--danger); word-break: break-all; white-space: pre-wrap; line-height: 1.4;">${escapeHtml(item.error_message)}</div>
+              ` : item.content_summary ? `
+                <div style="max-width: 320px; font-size: 12px; color: ${['no_data', 'partial_no_data'].includes(item.content_status) ? '#a16207' : 'var(--text-color)'}; line-height: 1.4;">${escapeHtml(item.content_summary)}</div>
               ` : '<span class="muted">-</span>';
               
               html += `
@@ -197,6 +215,7 @@
                   <td><strong>${escapeHtml(item.item_name)}</strong></td>
                   <td>${escapeHtml(item.section)}</td>
                   <td><span class="badge ${badgeClass}">${escapeHtml(statusLabel)}</span></td>
+                  <td><span style="font-family: monospace; font-size: 13px; font-weight: 600; color: #475569;">${item.duration_seconds == null ? '—' : `${Number(item.duration_seconds).toFixed(2)} 秒`}</span></td>
                   <td>${fileUrlHtml}</td>
                   <td>${errMsgHtml}</td>
                 </tr>
@@ -241,7 +260,7 @@
           }
           let innerHTML = `
             <h3 style="margin-bottom: 16px; font-size: 14px; border-left: 4px solid var(--primary); padding-left: 8px; font-weight: 600; color: var(--text-color);">截图结果预览</h3>
-            <div class="preview-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 20px;">
+            <div class="preview-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); gap: 20px;">
           `;
           validResults.forEach(item => {
             innerHTML += `

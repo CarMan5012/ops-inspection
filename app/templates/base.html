@@ -4,15 +4,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ title or "运维管理后台" }}</title>
+  <title>{{ title or "自动化运维平台" }}</title>
   <link rel="shortcut icon" href="{{ url_for_frontend('static/favicon.ico') }}" type="image/x-icon">
-  <link rel="stylesheet" href="{{ url_for_frontend('static/app.css') }}">
+  <link rel="stylesheet" href="{{ url_for_frontend('static/app.css?v=20261008-notices') }}">
   <script src="{{ url_for_frontend('static/vendor/lucide.min.js') }}" defer></script>
 </head>
 
 <body>
   <header class="topbar">
-    <a class="brand" href="{{ url_for_frontend('/') }}"><span class="brand-mark"><img src="{{ url_for_frontend('static/images/logo.svg') }}" alt=""></span><span>运维管理后台</span></a>
+    <a class="brand" href="{{ url_for_frontend('/') }}"><span class="brand-mark"><img src="{{ url_for_frontend('static/images/logo.svg') }}" alt=""></span><span>自动化运维平台</span></a>
     <nav class="nav">
       <a href="{{ url_for_frontend('/') }}#/jobs"><span data-lucide="clipboard-list"></span>巡检任务</a>
       <a href="{{ url_for_frontend('/') }}#/runs"><span data-lucide="history"></span>巡检记录</a>
@@ -39,12 +39,18 @@
 
       const toast = document.createElement('div');
       toast.className = `toast toast-${type}`;
-
-      if (type === 'error') {
-        toast.innerHTML = `<span style="flex: 1;">${message}</span><button onclick="this.parentElement.remove()" style="background:none;border:none;color:#fee2e2;cursor:pointer;font-weight:bold;margin-left:12px;font-size:16px;line-height:1;">×</button>`;
-      } else {
-        toast.innerHTML = `<span>${message}</span>`;
-      }
+      toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+      const content = document.createElement('span');
+      content.className = 'toast-message';
+      content.textContent = String(message);
+      toast.appendChild(content);
+      const close = document.createElement('button');
+      close.type = 'button';
+      close.className = 'toast-dismiss';
+      close.setAttribute('aria-label', '关闭提示');
+      close.textContent = '×';
+      close.addEventListener('click', () => toast.remove());
+      toast.appendChild(close);
 
       container.appendChild(toast);
 
@@ -60,6 +66,42 @@
         }
       }, duration);
     };
+
+    function showPageConfirm(message) {
+      return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'page-confirm-overlay';
+        overlay.innerHTML = '<section class="page-confirm" role="dialog" aria-modal="true" aria-labelledby="page-confirm-title"><h2 id="page-confirm-title">确认删除</h2><p></p><div class="page-confirm-actions"><button type="button" data-choice="cancel">取消</button><button type="button" class="danger" data-choice="confirm">确认删除</button></div></section>';
+        overlay.querySelector('p').textContent = message;
+        document.body.appendChild(overlay);
+        const cancel = overlay.querySelector('[data-choice="cancel"]');
+        const confirm = overlay.querySelector('[data-choice="confirm"]');
+        cancel.focus();
+        function finish(value) {
+          document.removeEventListener('keydown', onKeyDown);
+          overlay.remove();
+          resolve(value);
+        }
+        function onKeyDown(event) {
+          if (event.key === 'Escape') finish(false);
+        }
+        cancel.addEventListener('click', () => finish(false));
+        confirm.addEventListener('click', () => finish(true));
+        overlay.addEventListener('click', (event) => { if (event.target === overlay) finish(false); });
+        document.addEventListener('keydown', onKeyDown);
+      });
+    }
+
+    document.addEventListener('submit', async (event) => {
+      const form = event.target;
+      if (!form.matches('form[data-confirm]') || form.dataset.confirmed === 'true') return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!await showPageConfirm(form.dataset.confirm)) return;
+      form.dataset.confirmed = 'true';
+      form.requestSubmit(event.submitter || undefined);
+      delete form.dataset.confirmed;
+    }, true);
 
     function getValidationLabel(field) {
       const label = field.closest('label');
@@ -117,7 +159,7 @@
         }
       });
       if (firstInvalid) {
-        window.showToast('请先完善表单中的必填信息', 'error');
+        window.showToast('请填写必填项', 'error');
         try {
           firstInvalid.scrollIntoView({ block: 'center', behavior: 'smooth' });
           firstInvalid.focus({ preventScroll: true });
@@ -153,27 +195,27 @@
         if (action.includes('/run') && !action.includes('/periodic-reports')) {
           e.preventDefault();
           submitBtn.classList.add('btn-loading');
-          window.showToast('巡检任务已启动，正在后台截图，请稍候...', 'info');
+          window.showToast('巡检已启动', 'info');
           setTimeout(() => form.submit(), 600);
         } else if (action.includes('/items/') && action.includes('/test')) {
           e.preventDefault();
           submitBtn.classList.add('btn-loading');
-          window.showToast('开始单项测试截图，正在执行，请稍候...', 'info');
+          window.showToast('测试截图已启动', 'info');
           setTimeout(() => form.submit(), 600);
         } else if (action.includes('/auth-profiles/') && action.includes('/test')) {
           e.preventDefault();
           submitBtn.classList.add('btn-loading');
-          window.showToast('正在测试登录认证配置，请稍候...', 'info');
+          window.showToast('正在测试登录', 'info');
           setTimeout(() => form.submit(), 600);
         } else if (action.includes('/mail-profiles/') && action.includes('/test')) {
           e.preventDefault();
           submitBtn.classList.add('btn-loading');
-          window.showToast('正在发送测试邮件，请稍候...', 'info');
+          window.showToast('正在发送测试邮件', 'info');
           setTimeout(() => form.submit(), 600);
         } else if (action.includes('/periodic-reports/') && action.includes('/run')) {
           e.preventDefault();
           submitBtn.classList.add('btn-loading');
-          window.showToast('周期汇总报告生成任务已启动，请稍候...', 'info');
+          window.showToast('周期报告已开始生成', 'info');
           setTimeout(() => form.submit(), 600);
         }
       }

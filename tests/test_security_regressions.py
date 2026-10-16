@@ -17,9 +17,9 @@ def test_referer_origin_check_does_not_use_prefix_match() -> None:
 
 
 def test_spa_logout_is_not_get_link() -> None:
-    source = read_text("app/static/frontend/index.html")
-    assert 'href="{{ url_for_frontend(\'logout\') }}"' not in source
-    assert 'data-action="logout"' in source
+    source = read_text("frontend/src/App.vue")
+    assert '@click="logout"' in source
+    assert 'href="/logout"' not in source
 
 
 def test_taskbar_template_selection_is_run_scoped() -> None:
@@ -37,6 +37,7 @@ def test_taskbar_template_selection_is_run_scoped() -> None:
     sys.modules.setdefault("app.repository", repository)
     storage_paths = types.ModuleType("app.storage_paths")
     storage_paths.get_screenshot_dir = lambda run_id: ROOT / "data" / "screenshots" / str(run_id)
+    storage_paths.unique_artifact_path = lambda directory, stem, suffix: directory / f"{stem}{suffix}"
     sys.modules.setdefault("app.storage_paths", storage_paths)
 
     from app import screenshot

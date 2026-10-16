@@ -2,33 +2,31 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <h1>{{ "修改周期报告配置 - " ~ setting.name }}</h1>
-    <p class="muted">自定义自动打包发信的执行定时计划、包含内容以及重试等待策略。</p>
+    <h1>编辑{{ "周报" if setting.report_type == 'weekly' else "月报" }}</h1>
   </div>
 </div>
 
-<form method="post" action="{{ action }}" class="panel">
+<form method="post" action="{{ action }}" class="panel form-page">
   <!-- 第一部分：基本配置 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 报告基本信息
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">基本信息
   </h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label class="span-2">
-      报告配置名称 <span style="color: var(--danger);">* (必填)</span>
+      名称 <span style="color: var(--danger);">*</span>
       <input name="name" value="{{ setting.name or '' }}" required placeholder="例如：每周一早8点周报打包">
-      <span class="form-tip">给这个周期报告配置起一个易于识别的名称。</span>
     </label>
   </div>
 
   <!-- 第二部分：执行计划 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 周期执行计划
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">生成时间
   </h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label class="span-2">
-      计划执行模式 <span style="color: var(--danger);">*</span>
+      时间设置 <span style="color: var(--danger);">*</span>
       <select name="schedule_mode" onchange="toggleScheduleMode(this.value)">
         <option value="simple" {% if setting.schedule_mode=='simple' or not setting.schedule_mode %}selected{% endif %}>
-          常规中文计划配置 (推荐)</option>
-        <option value="cron" {% if setting.schedule_mode=='cron' %}selected{% endif %}>高级 Cron 表达式</option>
+          按时间设置</option>
+        <option value="cron" {% if setting.schedule_mode=='cron' %}selected{% endif %}>Cron 表达式</option>
       </select>
     </label>
 
@@ -66,118 +64,111 @@
       </div>
 
       <button type="button" class="button" style="margin-top: 10px; font-size: 13px; font-weight: 600;"
-        onclick="addTimeRow()">+ 增加执行时间点</button>
+        onclick="addTimeRow()">+ 添加时间</button>
     </div>
 
     <!-- 高级 Cron 表达式配置 -->
     <label id="cron_schedule_container" class="span-2">
       Cron 表达式 <span style="color: var(--danger);">*</span>
       <input name="cron_expression" value="{{ setting.cron_expression or '' }}">
-      <span class="form-tip">使用标准 5 位 Cron，例如：<code>0 9 * * 1</code> (每周一早上 9 点)。</span>
+      <span class="form-tip">5 位 Cron，例如 <code>0 9 * * 1</code>（每周一 9 点）。</span>
     </label>
   </div>
 
-  <!-- 第三部分：推送推送与归档设置 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">三、
-    推送推送与归档设置</h3>
+  <!-- 通知与打包设置 -->
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">通知与打包</h3>
     
   <div class="panel" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 20px; border-radius: 6px; margin-bottom: 30px;">
     <!-- 邮件推送开关 -->
     <label class="check" style="margin-bottom: 16px; font-weight: 600; display: block;">
       <input name="enable_email" type="checkbox" {% if setting.enable_email %}checked{% endif %} onchange="toggleMailFields(this.checked)">
-      开启邮件推送归档 ZIP 附件 (默认关闭)
+      邮件发送 ZIP 报告
     </label>
     
     <div id="mail_fields_container" class="form-grid" style="margin-bottom: 24px; padding-left: 20px; border-left: 2px dashed #cbd5e1; display: none;">
       <label class="span-2">
-        发信邮件服务配置
+        发信邮箱
         <select name="mail_profile_id">
-          <option value="">-- 请选择发信邮箱 --</option>
+          <option value="">请选择邮箱</option>
           {% for profile in mail_profiles %}
           <option value="{{ profile.id }}" {% if setting.mail_profile_id==profile.id %}selected{% endif %}>{{ profile.name }}</option>
           {% endfor %}
         </select>
-        <span class="form-tip">选择用于发送周期归档 ZIP 压缩包的主发信邮箱配置。</span>
       </label>
 
       <label class="span-2">
-        收件人邮箱覆盖 (选填)
+        收件人（选填）
         <input name="recipients_override" value="{{ setting.recipients_override or '' }}"
           placeholder="ops@example.com, manager@example.com">
-        <span class="form-tip">留空则直接发送给上述发信邮箱配置的默认收件人；若填写则覆盖默认收件人。多个邮箱以英文逗号分隔。</span>
+        <span class="form-tip">留空使用邮箱默认收件人。多个地址用英文逗号隔开。</span>
       </label>
     </div>
 
     <!-- 钉钉推送开关 -->
     <label class="check" style="margin-top: 16px; margin-bottom: 16px; font-weight: 600; display: block;">
       <input name="dingtalk_enabled" type="checkbox" {% if setting.dingtalk_enabled %}checked{% endif %}>
-      开启钉钉群机器人 Webhook 通知 (使用全局配置)
+      发送钉钉通知（使用系统配置）
     </label>
   </div>
 
   <!-- 第四部分：月报专属等待与重试参数 -->
   {% if setting.report_type == 'monthly' %}
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">四、
-    月报延迟重试策略</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">月报等待设置</h3>
   <div class="panel"
     style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 20px; border-radius: 6px; margin-bottom: 30px;">
     <label class="check" style="margin-bottom: 16px; font-weight: 600;">
       <input name="wait_for_daily_jobs" type="checkbox" {% if setting.wait_for_daily_jobs %}checked{% endif %}>
-      必须等待当天所有巡检任务执行完毕，才开始打包发信
+      等待当天巡检完成后再发送
     </label>
 
     <div class="form-grid">
       <label>
-        最晚等待截止时间 <span style="color: var(--danger);">*</span>
+        最晚等待时间 <span style="color: var(--danger);">*</span>
         <input name="retry_until_time" value="{{ setting.retry_until_time or '23:50' }}" placeholder="23:50" required>
-        <span class="form-tip">格式为 HH:MM (例如 23:50)。如超过该时间仍有巡检任务未完成，则不再等待直接强行打包，并在报告中标记异常。</span>
       </label>
 
       <label>
-        检测重试间隔 (分钟) <span style="color: var(--danger);">*</span>
+        重试间隔（分钟） <span style="color: var(--danger);">*</span>
         <input name="retry_interval_minutes" type="number" value="{{ setting.retry_interval_minutes or 10 }}" min="1"
           required>
-        <span class="form-tip">如果有巡检任务未跑完，每隔多少分钟重新检查一次是否全部完成。</span>
       </label>
 
       <label class="span-2">
-        截止超时处理策略 <span style="color: var(--danger);">*</span>
+        等待超时后 <span style="color: var(--danger);">*</span>
         <select name="send_on_timeout">
           <option value="1" {% if setting.send_on_timeout==1 or setting.send_on_timeout is none %}selected{% endif %}>
-            强行发送已完成部分</option>
-          <option value="0" {% if setting.send_on_timeout==0 %}selected{% endif %}>直接标记失败且不发送</option>
+            发送已完成部分</option>
+          <option value="0" {% if setting.send_on_timeout==0 %}selected{% endif %}>不发送</option>
         </select>
-        <span class="form-tip">当达到最晚等待截止时间，但仍有巡检任务未完成时，系统执行的处理方式。</span>
       </label>
     </div>
   </div>
   {% endif %}
 
   <!-- 第五部分：基本配置开关 -->
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">{{ "四、
-    基本配置开关" if setting.report_type == 'weekly' else "五、 基本配置开关" }}</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">报告内容</h3>
   <div class="span-2" style="display: flex; gap: 24px; margin: 8px 0; flex-wrap: wrap;">
     <label class="check">
       <input name="enabled" type="checkbox" {% if setting.enabled %}checked{% endif %}>
-      启用此周期汇总计划 (定时执行)
+      启用定时生成
     </label>
     <label class="check">
       <input name="include_docx" type="checkbox" {% if setting.include_docx %}checked{% endif %}>
-      将生成的巡检 Word 文档作为附件打包 (.zip)
+      ZIP 包含 Word 报告
     </label>
   </div>
 
   <details class="advanced-settings span-2"
     style="margin-top: 16px; border: 1px solid var(--panel-border); border-radius: 6px; padding: 12px; background: #fafafa;">
-    <summary style="cursor: pointer; font-weight: bold; color: var(--primary); font-size: 13px;">高级汇总参数设置</summary>
+    <summary style="cursor: pointer; font-weight: bold; color: var(--primary); font-size: 13px;">更多内容设置</summary>
     <div style="display: flex; gap: 24px; margin-top: 12px; flex-wrap: wrap;">
       <label class="check">
         <input name="include_screenshots" type="checkbox" {% if setting.include_screenshots %}checked{% endif %}>
-        在归档 ZIP 压缩包中包含成功的巡检截图图片 (默认不包含，以减小体积)
+        ZIP 包含截图
       </label>
       <label class="check">
         <input name="send_empty_report" type="checkbox" {% if setting.send_empty_report %}checked{% endif %}>
-        即便在周期内未生成任何巡检报告，也发送空报告邮件进行告知
+        没有报告时也发送邮件
       </label>
     </div>
   </details>
@@ -254,7 +245,7 @@
     if (container.children.length > 1) {
       button.closest('.time-row').remove();
     } else {
-      alert('任务必须保留至少一个执行时间点。');
+      window.showToast('至少保留一个执行时间', 'warning');
     }
   }
 

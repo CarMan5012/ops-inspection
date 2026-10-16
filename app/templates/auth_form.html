@@ -13,18 +13,16 @@
 
 <div class="page-head">
   <div>
-    <h1>{{ "修改认证配置" if profile.id else "新建认证配置" }}</h1>
-    <p class="muted">先选择系统类型并填写登录地址、账号和密码；高级选择器通常不用改。</p>
+    <h1>{{ "编辑认证" if profile.id else "新增认证" }}</h1>
   </div>
 </div>
 
-<form method="post" action="{{ action }}" class="panel" id="auth-profile-form">
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">一、 基本信息</h3>
+<form method="post" action="{{ action }}" class="panel form-page" id="auth-profile-form">
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">基本信息</h3>
   <div class="form-grid" style="margin-bottom: 30px;">
     <label>
-      配置名称 <span style="color: var(--danger);">* (必填)</span>
+      名称 <span style="color: var(--danger);">*</span>
       <input name="name" value="{{ profile.name or '' }}" required placeholder="例如：Grafana 生产认证">
-      <span class="form-tip">给这组登录凭据起一个容易识别的名称。</span>
     </label>
 
     <label>
@@ -35,35 +33,31 @@
         <option value="custom" {% if detected_system == "custom" %}selected{% endif %}>普通网页</option>
         <option value="none" {% if detected_system == "none" %}selected{% endif %}>无需登录</option>
       </select>
-      <span class="form-tip">选择后会自动带入适合的登录成功判断方式。</span>
     </label>
 
     <input type="hidden" name="auth_type" id="auth_type" value="{{ current_auth_type }}">
   </div>
 
-  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">二、 登录地址与账号密码</h3>
+  <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">登录信息</h3>
   <div class="form-grid" style="margin-bottom: 24px;">
     <label class="span-2" data-login-field>
-      登录页面地址 <span style="color: var(--danger);">* (必填)</span>
+      登录地址 <span style="color: var(--danger);">*</span>
       <input name="login_url" id="login_url" value="{{ profile.login_url or '' }}" placeholder="例如：http://localhost:3000/login">
-      <span class="form-tip">填写浏览器能打开的登录页地址。</span>
     </label>
 
     <label data-login-field>
-      登录账号 <span style="color: var(--danger);">* (必填)</span>
+      登录账号 <span style="color: var(--danger);">*</span>
       <input name="username_value" id="username_value" value="{{ profile.username_value or profile.username or '' }}" placeholder="例如：admin">
-      <span class="form-tip">直接填写登录用户名。</span>
     </label>
 
     <label data-login-field>
-      登录密码 <span style="color: var(--danger);">* (必填)</span>
+      登录密码 <span style="color: var(--danger);">*</span>
       <div style="position: relative; display: flex; align-items: center; width: 100%;">
         <input name="password" id="auth_password_input" type="password" value="" placeholder="{{ '已保存，留空沿用原密码' if profile.id else '请输入密码' }}" style="padding-right: 40px; width: 100%;">
         <button type="button" onclick="togglePasswordVisibility('auth_password_input', this)" style="position: absolute; right: 10px; background: none; border: none; cursor: pointer; color: var(--text-muted); display: flex; align-items: center; min-height: auto; border-radius: 0; border: 0; padding: 0;" title="显示/隐藏密码" aria-label="显示密码">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
         </button>
       </div>
-      <span class="form-tip">编辑已有配置时，留空表示沿用原密码。</span>
     </label>
   </div>
 
@@ -73,30 +67,26 @@
       <label>
         用户名选择器
         <input name="username_selector" id="username_selector" value="{{ profile.username_selector or 'input[name="user"], input[name="username"], input[type="email"], input[placeholder*="username"], input[placeholder*="email"], input[placeholder*="user"]' }}">
-        <span class="form-tip">用于定位用户名输入框，通常不用改。</span>
       </label>
 
       <label>
         密码选择器
         <input name="password_selector" id="password_selector" value="{{ profile.password_selector or 'input[name="password"], input[type="password"], input[placeholder*="password"]' }}">
-        <span class="form-tip">用于定位密码输入框，通常不用改。</span>
       </label>
 
       <label>
         提交按钮选择器
         <input name="submit_selector" id="submit_selector" value="{{ profile.submit_selector or 'button[type="submit"], button:has-text("Log in"), button:has-text("Login"), button:has-text("登录"), input[type="submit"]' }}">
-        <span class="form-tip">用于定位登录按钮。</span>
       </label>
 
       <label>
         成功选择器
         <input name="success_selector" id="success_selector" value="{{ profile.success_selector or '' }}" placeholder="不确定可留空">
-        <span class="form-tip">用于判断登录成功；Grafana 默认 .react-grid-layout，Kibana 默认 dashboardViewport。</span>
       </label>
 
       <label class="span-2">
         浏览器状态文件
-        <input name="storage_state_path" value="{{ profile.storage_state_path or '' }}" placeholder="通常留空，由系统自动管理">
+        <input name="storage_state_path" value="{{ profile.storage_state_path or '' }}" placeholder="留空则自动管理">
       </label>
     </div>
   </details>

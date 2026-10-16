@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-from zoneinfo import ZoneInfo
 from typing import Any
-from apscheduler.triggers.cron import CronTrigger
 
 
 def parse_time_parts(time_str: str, force_fixed: bool = False) -> tuple[int, int]:
@@ -31,30 +29,6 @@ def parse_time_parts(time_str: str, force_fixed: bool = False) -> tuple[int, int
         raise ValueError("时间数值超出范围，必须为有效的小时(0-23)和分钟(0-59)") from e
 
 
-def build_inspection_triggers(schedule_config: dict[str, Any], timezone: ZoneInfo) -> list[CronTrigger]:
-    """根据结构化配置构建上午/下午对应的 CronTrigger 触发器列表"""
-    triggers = []
-    frequency = schedule_config.get("frequency", "daily")
-    day_of_week = "*" if frequency == "daily" else "mon-fri"
-    import random
-    
-    if schedule_config.get("morning_enabled"):
-        t_str = str(schedule_config.get("morning_time", "09:05")).strip()
-        h, m = parse_time_parts(t_str)
-        if t_str.upper().endswith(":R"):
-            m = random.randint(0, 59)
-        triggers.append(CronTrigger(day_of_week=day_of_week, hour=h, minute=m, timezone=timezone))
-        
-    if schedule_config.get("afternoon_enabled"):
-        t_str = str(schedule_config.get("afternoon_time", "17:05")).strip()
-        h, m = parse_time_parts(t_str)
-        if t_str.upper().endswith(":R"):
-            m = random.randint(0, 59)
-        triggers.append(CronTrigger(day_of_week=day_of_week, hour=h, minute=m, timezone=timezone))
-        
-    return triggers
-
-
 def build_inspection_schedule_label(schedule_config: dict[str, Any]) -> str:
     """根据配置构造可读的中文字符串"""
     frequency = schedule_config.get("frequency", "daily")
@@ -80,7 +54,7 @@ def build_inspection_schedule_label(schedule_config: dict[str, Any]) -> str:
 def parse_simple_inspection_schedule(payload: dict[str, Any]) -> tuple[str, str, str]:
     """
     解析前端表单的 payload 数据。
-    返回: (cron_expression, schedule_label, schedule_config_json_str)
+    返回: (空的旧表达式字段, schedule_label, schedule_config_json_str)
     """
     frequency = str(payload.get("frequency") or "daily").strip()
     
@@ -114,102 +88,7 @@ def parse_simple_inspection_schedule(payload: dict[str, Any]) -> tuple[str, str,
     
     label = build_inspection_schedule_label(cfg)
     
-    import random
-    cron_dow = "*" if frequency == "daily" else "1-5"
-    cron_parts = []
-    
-    if morning_enabled:
-        mh, mm = parse_time_parts(morning_time, force_fixed=False)
-        if morning_time.upper().endswith(":R"):
-            mm = random.randint(0, 59)
-        cron_parts.append(f"{mm} {mh} * * {cron_dow}")
-        
-    if afternoon_enabled:
-        ah, am = parse_time_parts(afternoon_time, force_fixed=False)
-        if afternoon_time.upper().endswith(":R"):
-            am = random.randint(0, 59)
-        cron_parts.append(f"{am} {ah} * * {cron_dow}")
-        
-    cron_expr = "; ".join(cron_parts)
-    
-    return cron_expr, label, json.dumps(cfg, ensure_ascii=False)
-
-
-def try_migrate_cron_to_simple(cron_expression: str) -> dict[str, Any] | None:
-    """
-    尝试把旧的 cron 表达式反向转换并迁移为简单结构。
-    成功转换返回简单配置字典，若无法简单转换返回 None。
-    """
-    parts = cron_expression.strip().split()
-    if len(parts) != 5:
-        return None
-        
-    minute_part, hour_part, day_part, month_part, dow_part = parts
-    
-    if day_part != "*" or month_part != "*":
-        return None
-        
-    if dow_part in {"*", "?"}:
-        frequency = "daily"
-    elif dow_part in {"1-5", "mon-fri", "1,2,3,4,5"}:
-        frequency = "workday"
-    else:
-        return None
-        
-    try:
-        hours = [int(h) for h in hour_part.split(",")]
-        minutes = [int(m) for m in minute_part.split(",")]
-    except ValueError:
-        return None
-        
-    if len(hours) > 2:
-        return None
-        
-    if len(hours) == 1:
-        h = hours[0]
-        if len(minutes) != 1:
-            return None
-        m = minutes[0]
-        time_str = f"{h:02d}:{m:02d}"
-        
-        if h < 12:
-            return {
-                "frequency": frequency,
-                "morning_enabled": True,
-                "morning_time": time_str,
-                "afternoon_enabled": False,
-                "afternoon_time": "17:05"
-            }
-        else:
-            return {
-                "frequency": frequency,
-                "morning_enabled": False,
-                "morning_time": "09:05",
-                "afternoon_enabled": True,
-                "afternoon_time": time_str
-            }
-    elif len(hours) == 2:
-        h1, h2 = sorted(hours)
-        if h1 >= 12 or h2 < 12:
-            return None
-            
-        if len(minutes) == 1:
-            m1 = m2 = minutes[0]
-        elif len(minutes) == 2:
-            m1, m2 = minutes
-        else:
-            return None
-            
-        return {
-            "frequency": frequency,
-            "morning_enabled": True,
-            "morning_time": f"{h1:02d}:{m1:02d}",
-            "afternoon_enabled": True,
-            "afternoon_time": f"{h2:02d}:{m2:02d}"
-        }
-        
-    return None
-
+    return "", label, json.dumps(cfg, ensure_ascii=False)
 
 def validate_inspection_schedule(schedule_config: dict[str, Any]) -> None:
     """做基本的属性完整性校验"""

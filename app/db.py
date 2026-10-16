@@ -3,11 +3,12 @@ from __future__ import annotations
 from pysqlcipher3 import dbapi2 as sqlite3
 from pathlib import Path
 from typing import Any
+from contextlib import contextmanager
 
 from app.settings import settings
 
 
-def connect() -> sqlite3.Connection:
+def _migrate_plain_database() -> None:
     import os
     import shutil
 
@@ -16,14 +17,8 @@ def connect() -> sqlite3.Connection:
     # 对密钥中的单引号进行转义，防止特殊字符导致 SQL 注入或 PRAGMA 语法解析错
     db_key = db_key.replace("'", "''")
 
-    # 1. 数据库不存在时，直接创建加密数据库
     if not os.path.exists(db_path):
-        conn = sqlite3.connect(str(db_path), timeout=10.0)
-        conn.execute(f"PRAGMA key = '{db_key}'")
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL;")
-        return conn
+        return
 
     # 2. 数据库存在，探测其是明文还是已加密
     is_plain = False
@@ -84,19 +79,29 @@ def connect() -> sqlite3.Connection:
                         pass
             raise RuntimeError(f"自动将 SQLite 明文库加密热迁移失败: {e}")
 
-    # 4. 以加密连接打开
+@contextmanager
+def connect():
+    import os
+
+    db_path = settings.db_path
+    db_key = os.getenv("SQLCIPHER_DB_KEY", settings.secret_key or "default-key-change-me").replace("'", "''")
     conn = sqlite3.connect(str(db_path), timeout=10.0)
-    conn.execute(f"PRAGMA key = '{db_key}'")
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL;")
-    return conn
+    try:
+        conn.execute(f"PRAGMA key = '{db_key}'")
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 
 def init_db() -> None:
     settings.ensure_dirs()
     Path(settings.db_path).parent.mkdir(parents=True, exist_ok=True)
+    _migrate_plain_database()
     with connect() as conn:
         conn.executescript(
             """
@@ -112,6 +117,17 @@ def init_db() -> None:
                 submit_selector TEXT DEFAULT 'button[type="submit"]',
                 success_selector TEXT DEFAULT '',
                 storage_state_path TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS dingtalk_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                webhook TEXT NOT NULL DEFAULT '',
+                secret TEXT DEFAULT '',
+                keyword TEXT DEFAULT '',
+                emoji_enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
@@ -153,6 +169,22 @@ def init_db() -> None:
                 FOREIGN KEY(mail_profile_id) REFERENCES mail_profiles(id) ON DELETE SET NULL
             );
 
+            CREATE TABLE IF NOT EXISTS report_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                stored_name TEXT NOT NULL UNIQUE,
+                original_name TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS taskbar_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                stored_name TEXT NOT NULL UNIQUE,
+                original_name TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS screenshot_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id INTEGER NOT NULL,
@@ -166,13 +198,16 @@ def init_db() -> None:
                 wait_selector TEXT DEFAULT '',
                 wait_seconds REAL NOT NULL DEFAULT 3,
                 timeout_seconds INTEGER NOT NULL DEFAULT 60,
+                total_timeout_seconds INTEGER NOT NULL DEFAULT 240,
                 retry_count INTEGER NOT NULL DEFAULT 2,
                 browser_width INTEGER,
                 browser_height INTEGER,
                 sort_order INTEGER NOT NULL DEFAULT 100,
                 enabled INTEGER NOT NULL DEFAULT 1,
-                real_browser_capture INTEGER NOT NULL DEFAULT 1,
+                real_browser_capture INTEGER NOT NULL DEFAULT 0,
                 watermark_enabled INTEGER NOT NULL DEFAULT 0,
+                watermark_time_enabled INTEGER NOT NULL DEFAULT 1,
+                watermark_time_format TEXT NOT NULL DEFAULT 'datetime_seconds',
                 watermark_text TEXT DEFAULT '',
                 watermark_opacity INTEGER NOT NULL DEFAULT 65,
                 watermark_font_size INTEGER NOT NULL DEFAULT 24,
@@ -189,6 +224,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id INTEGER,
                 job_name TEXT NOT NULL,
+                schedule_slot TEXT DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'running',
                 started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 finished_at TEXT,
@@ -197,6 +233,8 @@ def init_db() -> None:
                 failed_count INTEGER NOT NULL DEFAULT 0,
                 error_summary TEXT DEFAULT '',
                 mail_status TEXT DEFAULT '',
+                monitor_status TEXT NOT NULL DEFAULT 'not_checked',
+                monitor_summary TEXT DEFAULT '',
                 FOREIGN KEY(job_id) REFERENCES report_jobs(id) ON DELETE SET NULL
             );
 
@@ -209,6 +247,11 @@ def init_db() -> None:
                 status TEXT NOT NULL,
                 file_path TEXT DEFAULT '',
                 error_message TEXT DEFAULT '',
+                duration_seconds REAL DEFAULT 0.0,
+                content_status TEXT NOT NULL DEFAULT 'not_applicable',
+                content_summary TEXT DEFAULT '',
+                monitor_status TEXT NOT NULL DEFAULT 'not_applicable',
+                monitor_data TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(run_id) REFERENCES run_records(id) ON DELETE CASCADE,
                 FOREIGN KEY(item_id) REFERENCES screenshot_items(id) ON DELETE SET NULL
@@ -308,6 +351,7 @@ def init_db() -> None:
         )
         
         # Database schema migrations to support frontend config & credentials source status
+        old_item_columns = {row[1] for row in conn.execute("PRAGMA table_info(screenshot_items)")}
         migrations = [
             ("auth_profiles", "username", "TEXT DEFAULT ''"),
             ("auth_profiles", "password", "TEXT DEFAULT ''"),
@@ -331,7 +375,11 @@ def init_db() -> None:
             ("periodic_report_settings", "dingtalk_secret", "TEXT DEFAULT ''"),
             ("periodic_report_settings", "dingtalk_keyword", "TEXT DEFAULT ''"),
             ("periodic_report_runs", "dingtalk_status", "TEXT DEFAULT ''"),
-            ("screenshot_items", "real_browser_capture", "INTEGER DEFAULT 1"),
+            ("screenshot_items", "real_browser_capture", "INTEGER DEFAULT 0"),
+            ("screenshot_items", "total_timeout_seconds", "INTEGER NOT NULL DEFAULT 240"),
+            ("screenshot_results", "duration_seconds", "REAL DEFAULT 0.0"),
+            ("screenshot_results", "content_status", "TEXT NOT NULL DEFAULT 'not_applicable'"),
+            ("screenshot_results", "content_summary", "TEXT DEFAULT ''"),
             ("report_jobs", "send_mail_on_complete", "INTEGER DEFAULT 1"),
             ("report_jobs", "send_mail_on_error", "INTEGER DEFAULT 1"),
             ("report_jobs", "dingtalk_enabled", "INTEGER DEFAULT 0"),
@@ -339,7 +387,14 @@ def init_db() -> None:
             ("report_jobs", "dingtalk_secret", "TEXT DEFAULT ''"),
             ("report_jobs", "dingtalk_keyword", "TEXT DEFAULT ''"),
             ("run_records", "dingtalk_status", "TEXT DEFAULT ''"),
+            ("run_records", "schedule_slot", "TEXT DEFAULT ''"),
+            ("run_records", "monitor_status", "TEXT NOT NULL DEFAULT 'not_checked'"),
+            ("run_records", "monitor_summary", "TEXT DEFAULT ''"),
+            ("screenshot_results", "monitor_status", "TEXT NOT NULL DEFAULT 'not_applicable'"),
+            ("screenshot_results", "monitor_data", "TEXT DEFAULT ''"),
             ("screenshot_items", "watermark_enabled", "INTEGER DEFAULT 0"),
+            ("screenshot_items", "watermark_time_enabled", "INTEGER NOT NULL DEFAULT 1"),
+            ("screenshot_items", "watermark_time_format", "TEXT NOT NULL DEFAULT 'datetime_seconds'"),
             ("screenshot_items", "watermark_text", "TEXT DEFAULT ''"),
             ("screenshot_items", "watermark_opacity", "INTEGER DEFAULT 65"),
             ("screenshot_items", "watermark_font_size", "INTEGER DEFAULT 24"),
@@ -347,13 +402,33 @@ def init_db() -> None:
             ("screenshot_items", "watermark_gap_y", "INTEGER DEFAULT 140"),
             ("screenshot_items", "watermark_angle", "INTEGER DEFAULT -45"),
             ("screenshot_items", "taskbar_enabled", "INTEGER DEFAULT 1"),
+            ("screenshot_items", "taskbar_template_key", "TEXT NOT NULL DEFAULT ''"),
             ("report_jobs", "browser_scale_factor", "REAL DEFAULT 1.5"),
+            ("report_jobs", "dingtalk_profile_id", "INTEGER DEFAULT NULL"),
+            ("report_jobs", "template_id", "INTEGER DEFAULT NULL"),
+            ("report_jobs", "send_dingtalk_on_complete", "INTEGER DEFAULT 1"),
+            ("report_jobs", "send_dingtalk_on_error", "INTEGER DEFAULT 1"),
+            ("periodic_report_settings", "dingtalk_profile_id", "INTEGER DEFAULT NULL"),
         ]
         for table, col, t in migrations:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {t}")
             except sqlite3.OperationalError:
                 pass # 列已存在时直接忽略，保证平滑向后兼容
+
+        if "watermark_time_enabled" not in old_item_columns:
+            conn.execute("""
+                UPDATE screenshot_items
+                SET watermark_time_enabled = CASE
+                        WHEN instr(COALESCE(watermark_text, ''), '{time}') > 0 OR
+                             (trim(COALESCE(watermark_text, '')) = '' AND watermark_enabled = 1) THEN 1
+                        ELSE 0 END,
+                    watermark_text = CASE
+                        WHEN trim(COALESCE(watermark_text, '')) = '' AND watermark_enabled = 1
+                        THEN '省客户服务中心' || char(10) || 'dwangchengyi7(王诚毅)'
+                        ELSE trim(replace(COALESCE(watermark_text, ''), '{time}', ''), char(10) || char(13) || ' ')
+                    END
+            """)
 
         # 兼容同步老数据中的邮件发送配置
         try:
@@ -362,6 +437,26 @@ def init_db() -> None:
             pass
 
         migrate_schema_defaults(conn)
+
+        # 兼容同步全局钉钉配置到 dingtalk_profiles
+        try:
+            bot_count = conn.execute("SELECT COUNT(*) FROM dingtalk_profiles").fetchone()[0]
+            if bot_count == 0:
+                row = conn.execute("SELECT value FROM system_settings WHERE key = 'dingtalk_webhook'").fetchone()
+                if row and row[0]:
+                    old_webhook = row[0]
+                    sec_row = conn.execute("SELECT value FROM system_settings WHERE key = 'dingtalk_secret'").fetchone()
+                    old_sec = sec_row[0] if sec_row else ""
+                    kw_row = conn.execute("SELECT value FROM system_settings WHERE key = 'dingtalk_keyword'").fetchone()
+                    old_kw = kw_row[0] if kw_row else ""
+                    em_row = conn.execute("SELECT value FROM system_settings WHERE key = 'dingtalk_emoji_enabled'").fetchone()
+                    old_em = 1 if (em_row and em_row[0] in ("1", "true")) else 0
+                    conn.execute(
+                        "INSERT INTO dingtalk_profiles (name, webhook, secret, keyword, emoji_enabled) VALUES (?, ?, ?, ?, ?)",
+                        ("默认钉钉机器人", old_webhook, old_sec, old_kw, old_em)
+                    )
+        except Exception:
+            pass
 
         seed_system_defaults(conn)
 
@@ -511,41 +606,7 @@ def seed_system_defaults(conn: sqlite3.Connection) -> None:
                 90, 90, 90, 90, 90, 90, 30, 0, 7
             )
         )
-    else:
-        # 对老数据库执行一次自愈升级，将原来默认的 3/7/14/30 天升级为 90 天默认保留周期
-        conn.execute(
-            """
-            UPDATE storage_cleanup_settings
-            SET periodic_sent_retention_days = 90
-            WHERE periodic_sent_retention_days = 3
-            """
-        )
-        conn.execute(
-            """
-            UPDATE storage_cleanup_settings
-            SET periodic_failed_retention_days = 90,
-                screenshot_retention_days = 90,
-                report_retention_days = 90,
-                log_retention_days = 90
-            WHERE report_retention_days = 30
-            """
-        )
-        # 将默认的 3 天保护升级为 7 天
-        conn.execute(
-            """
-            UPDATE storage_cleanup_settings
-            SET protect_recent_days = 7
-            WHERE protect_recent_days = 3
-            """
-        )
-        # 将浏览器会话保留天数的系统默认升级值由 90 天下调为更合理的 30 天
-        conn.execute(
-            """
-            UPDATE storage_cleanup_settings
-            SET browser_state_retention_days = 30
-            WHERE browser_state_retention_days = 90
-            """
-        )
+    # Existing retention values are user settings. Never rewrite them at startup.
 
     default_settings = {
         "swagger_enabled": "0",
@@ -565,13 +626,36 @@ def seed_system_defaults(conn: sqlite3.Connection) -> None:
 def reset_database_data() -> None:
     """一键删除重置所有本地测试数据及物理目录文件"""
     import shutil
+    from datetime import date
     # 1. 物理清理截图、报告和会话状态目录
-    for d in (settings.screenshot_dir, settings.report_dir, settings.browser_state_dir):
+    for d in (settings.screenshot_dir, settings.report_dir, settings.browser_state_dir, settings.data_dir / "periodic-reports"):
         if d.exists():
             try:
                 shutil.rmtree(d)
             except Exception:
                 pass
+    for month_dir in settings.data_dir.glob("????/??"):
+        if not month_dir.is_dir():
+            continue
+        try:
+            date(int(month_dir.parent.name), int(month_dir.name), 1)
+        except ValueError:
+            continue
+        for file_path in month_dir.glob("*.zip"):
+            if file_path.is_file():
+                file_path.unlink()
+        for day_dir in month_dir.glob("??"):
+            if not day_dir.is_dir():
+                continue
+            for file_path in day_dir.iterdir():
+                if file_path.is_file() and file_path.suffix.lower() in {".png", ".docx"}:
+                    file_path.unlink()
+            if not any(day_dir.iterdir()):
+                day_dir.rmdir()
+        if not any(month_dir.iterdir()):
+            month_dir.rmdir()
+            if not any(month_dir.parent.iterdir()):
+                month_dir.parent.rmdir()
     settings.ensure_dirs()
 
     # 2. 清理数据库所有数据表

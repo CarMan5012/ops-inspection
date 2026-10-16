@@ -203,7 +203,7 @@ def get_totp_code(secret: str, for_time: int | None = None, step: int = 30, digi
     return str(code_int % (10 ** digits)).zfill(digits)
 
 
-def verify_totp_code(secret: str, code: str, window: int = 1) -> bool:
+def verify_totp_code(secret: str, code: str, window: int = 1, replay_key: str = "last_used_totp_slice") -> bool:
     normalized = "".join(str(code or "").split())
     if not normalized.isdigit():
         return False
@@ -224,7 +224,8 @@ def verify_totp_code(secret: str, code: str, window: int = 1) -> bool:
         with connect() as conn:
             # 核对数据库，避免同周期甚至过期周期被重用
             row = conn.execute(
-                "SELECT value FROM system_settings WHERE key = 'last_used_totp_slice'"
+                "SELECT value FROM system_settings WHERE key = ?",
+                (replay_key,),
             ).fetchone()
             if row:
                 last_used = int(row[0] or 0)
@@ -234,9 +235,9 @@ def verify_totp_code(secret: str, code: str, window: int = 1) -> bool:
             conn.execute(
                 """
                 REPLACE INTO system_settings (key, value, updated_at)
-                VALUES ('last_used_totp_slice', ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
                 """,
-                (str(matched_time_slice),)
+                (replay_key, str(matched_time_slice)),
             )
         return True
     except Exception:
@@ -290,189 +291,3 @@ def resolve_mail_credential(profile: dict[str, Any]) -> str:
         password = str(profile.get("password") or "")
             
     return password
-
-
-def times_to_cron(
-    frequency: str,
-    day_of_week: str | None,
-    day_of_month: str | None,
-    times_list: list[dict[str, Any]],
-) -> tuple[str, str]:
-    """
-    将中文时间表单字段转换为分号分隔的 5段 cron 表达式及可读中文说明
-    """
-    if not times_list:
-        times_list = [{"ampm": "am", "hour": 9, "minute": 0}]
-        
-    cron_list = []
-    label_times = []
-    
-    day_month_cron = "*"
-    day_week_cron = "*"
-    label_prefix = ""
-    
-    if frequency == "daily":
-        label_prefix = "每天"
-    elif frequency == "workday":
-        day_week_cron = "mon-fri"
-        label_prefix = "工作日(周一至周五)"
-    elif frequency == "weekly":
-        mapping_en = {1: "mon", 2: "tue", 3: "wed", 4: "thu", 5: "fri", 6: "sat", 7: "sun"}
-        mapping_cn = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五", 6: "周六", 7: "周日"}
-        try:
-            val = int(day_of_week or 1)
-        except ValueError:
-            val = 1
-        day_week_cron = mapping_en.get(val, "mon")
-        label_prefix = f"每周{mapping_cn.get(val, '一')}"
-    elif frequency == "monthly":
-        try:
-            val = int(day_of_month or 1)
-        except ValueError:
-            val = 1
-        day_month_cron = str(val)
-        label_prefix = f"每月 {val} 号"
-    elif frequency == "monthly_last":
-        day_month_cron = "L"
-        label_prefix = "每月最后一天"
-        
-    for t in times_list:
-        ampm = t.get("ampm", "am")
-        try:
-            hour_12 = int(t.get("hour", 9))
-        except (ValueError, TypeError):
-            hour_12 = 9
-        try:
-            minute = int(t.get("minute", 0))
-        except (ValueError, TypeError):
-            minute = 0
-            
-        if ampm == "pm" and hour_12 < 12:
-            hour_24 = hour_12 + 12
-        elif ampm == "am" and hour_12 == 12:
-            hour_24 = 0
-        else:
-            hour_24 = hour_12
-            
-        # 5 段标准 crontab：分 时 日 月 周（去掉了秒，避免 6 段问题）
-        cron_list.append(f"{minute} {hour_24} {day_month_cron} * {day_week_cron}")
-        
-        ampm_cn = "上午" if ampm == "am" else "下午"
-        label_times.append(f"{ampm_cn}{hour_12}点{minute:02d}分" if minute else f"{ampm_cn}{hour_12}点")
-        
-    cron_expr = ";".join(cron_list)
-    label_expr = f"{label_prefix} {', '.join(label_times)}"
-    return cron_expr, label_expr
-
-
-def validate_cron_expression(cron_expression: str) -> None:
-    from apscheduler.triggers.cron import CronTrigger
-    from zoneinfo import ZoneInfo
-    cron_parts = [p.strip() for p in cron_expression.split(";") if p.strip()]
-    if not cron_parts:
-        raise ValueError("定时 Cron 表达式不能为空")
-    for cron_str in cron_parts:
-        # 去掉 L 以检测常规段落合法性
-        cron_str_test = cron_str.replace("L", "*")
-        parts = cron_str_test.split()
-        if len(parts) == 6:
-            # 兼容处理可能传进来的 6 段 cron（跳过第一段秒）
-            cron_str_test = " ".join(parts[1:])
-        elif len(parts) != 5:
-            raise ValueError(f"表达式 '{cron_str}' 格式不正确，必须为 5 段(分 时 日 月 周)")
-        try:
-            CronTrigger.from_crontab(cron_str_test, timezone=ZoneInfo(settings.default_timezone))
-        except Exception as e:
-            raise ValueError(f"表达式 '{cron_str}' 无效: {e}")
-
-
-def get_next_run_times(cron_expression: str, limit: int = 3) -> list[str]:
-    from apscheduler.triggers.cron import CronTrigger
-    from zoneinfo import ZoneInfo
-    import calendar
-    
-    if not cron_expression:
-        return []
-        
-    local_tz = ZoneInfo(settings.default_timezone)
-    now = datetime.now(local_tz)
-    
-    cron_parts = [p.strip() for p in cron_expression.split(";") if p.strip()]
-    fire_times = []
-    
-    for cron_str in cron_parts:
-        is_monthly_last = "L" in cron_str
-        cron_str_for_trigger = cron_str.replace("L", "*")
-        
-        parts = cron_str_for_trigger.split()
-        if len(parts) == 6:
-            cron_str_for_trigger = " ".join(parts[1:])
-            
-        try:
-            trigger = CronTrigger.from_crontab(cron_str_for_trigger, timezone=local_tz)
-        except Exception:
-            continue
-            
-        prev = now
-        for _ in range(limit * 8):
-            next_time = trigger.get_next_fire_time(None, prev)
-            if not next_time:
-                break
-            
-            if is_monthly_last:
-                # 检查此 next_time 是否真的为该月最后一天
-                last_day = calendar.monthrange(next_time.year, next_time.month)[1]
-                if next_time.day == last_day:
-                    fire_times.append(next_time)
-            else:
-                fire_times.append(next_time)
-            from datetime import timedelta
-            prev = next_time + timedelta(seconds=1)
-            
-    if not fire_times:
-        return []
-        
-    unique_times = sorted(list(set(fire_times)))
-    return [t.strftime("%Y-%m-%d %H:%M:%S") for t in unique_times[:limit]]
-
-
-def has_more_scheduled_runs_today(cron_expression: str, start_time_str: str, timezone_str: str) -> bool:
-    from apscheduler.triggers.cron import CronTrigger
-    from zoneinfo import ZoneInfo
-    from datetime import datetime, timedelta
-    
-    if not cron_expression:
-        return False
-        
-    local_tz = ZoneInfo(timezone_str)
-    
-    try:
-        if "T" in start_time_str:
-            base_dt = datetime.fromisoformat(start_time_str)
-        else:
-            base_dt = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S")
-        if base_dt.tzinfo is None:
-            base_dt = base_dt.replace(tzinfo=local_tz)
-    except Exception:
-        base_dt = datetime.now(local_tz)
-        
-    check_time = base_dt + timedelta(seconds=60)
-    
-    cron_parts = [p.strip() for p in cron_expression.split(";") if p.strip()]
-    for cron_str in cron_parts:
-        cron_str_for_trigger = cron_str.replace("L", "*")
-        parts = cron_str_for_trigger.split()
-        if len(parts) == 6:
-            cron_str_for_trigger = " ".join(parts[1:])
-        try:
-            trigger = CronTrigger.from_crontab(cron_str_for_trigger, timezone=local_tz)
-            next_time = trigger.get_next_fire_time(None, check_time)
-            if next_time:
-                next_time_local = next_time.astimezone(local_tz)
-                if (next_time_local.year == base_dt.year and 
-                    next_time_local.month == base_dt.month and 
-                    next_time_local.day == base_dt.day):
-                    return True
-        except Exception:
-            continue
-    return False

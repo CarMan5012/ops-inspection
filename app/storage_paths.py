@@ -43,25 +43,26 @@ def get_run_date(run_id: int | str) -> tuple[str, str, str]:
 
 
 def get_screenshot_dir(run_id: int | str) -> Path:
-    """
-    获取截图项在新结构下的存放目录，并自动创建：
-    data/screenshots/YYYY/MM/DD/run-{run_id}/
-    """
+    """截图和报告共用日期目录：data/YYYY/MM/DD/。"""
     yyyy, mm, dd = get_run_date(run_id)
-    target_dir = settings.screenshot_dir / yyyy / mm / dd / f"run-{run_id}"
+    target_dir = settings.data_dir / yyyy / mm / dd
     target_dir.mkdir(parents=True, exist_ok=True)
     return target_dir
 
 
 def get_report_dir(run_id: int | str) -> Path:
-    """
-    获取报告在新结构下的存放目录，并自动创建：
-    data/reports/YYYY/MM/DD/run-{run_id}/
-    """
-    yyyy, mm, dd = get_run_date(run_id)
-    target_dir = settings.report_dir / yyyy / mm / dd / f"run-{run_id}"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    return target_dir
+    """报告与截图放在同一个日期目录。"""
+    return get_screenshot_dir(run_id)
+
+
+def unique_artifact_path(directory: Path, stem: str, suffix: str) -> Path:
+    """同名文件追加序号，避免同一天的重复执行覆盖已有产物。"""
+    path = directory / f"{stem}{suffix}"
+    number = 2
+    while path.exists():
+        path = directory / f"{stem}-{number}{suffix}"
+        number += 1
+    return path
 
 
 def is_safe_path(path: Path | str) -> bool:
@@ -91,11 +92,9 @@ def resolve_artifact_path(file_path: str | Path) -> Path:
     if path_text.startswith(app_data_prefix):
         path = settings.data_dir / path_text[len(app_data_prefix):]
 
-    # 2. 如果当前文件已经存在，安全校验后直接返回
-    if path.exists():
-        if is_safe_path(path):
-            return path.resolve()
-        return path
+    # 2. 现存文件必须位于 data 内。
+    if path.exists() and is_safe_path(path):
+        return path.resolve()
 
     # 3. 如果文件物理不存在，尝试进行新旧路径转换查找
     filename = path.name
@@ -113,27 +112,33 @@ def resolve_artifact_path(file_path: str | Path) -> Path:
     if run_id is not None:
         is_screenshot = "screenshots" in path_text
         is_report = "reports" in path_text
+        yyyy, mm, dd = get_run_date(run_id)
+        current_dir = settings.data_dir / yyyy / mm / dd
 
         if is_screenshot:
+            current_path = current_dir / filename
+            if current_path.exists() and is_safe_path(current_path):
+                return current_path.resolve()
             # A. 尝试旧格式 fallback: screenshots/{run_id}/filename
             legacy_path = settings.screenshot_dir / str(run_id) / filename
             if legacy_path.exists() and is_safe_path(legacy_path):
                 return legacy_path.resolve()
 
             # B. 尝试新格式 fallback: screenshots/YYYY/MM/DD/run-{run_id}/filename
-            yyyy, mm, dd = get_run_date(run_id)
             new_path = settings.screenshot_dir / yyyy / mm / dd / f"run-{run_id}" / filename
             if new_path.exists() and is_safe_path(new_path):
                 return new_path.resolve()
 
         elif is_report:
+            current_path = current_dir / filename
+            if current_path.exists() and is_safe_path(current_path):
+                return current_path.resolve()
             # A. 尝试旧格式 fallback: reports/{run_id}/filename
             legacy_path = settings.report_dir / str(run_id) / filename
             if legacy_path.exists() and is_safe_path(legacy_path):
                 return legacy_path.resolve()
 
             # B. 尝试新格式 fallback: reports/YYYY/MM/DD/run-{run_id}/filename
-            yyyy, mm, dd = get_run_date(run_id)
             new_path = settings.report_dir / yyyy / mm / dd / f"run-{run_id}" / filename
             if new_path.exists() and is_safe_path(new_path):
                 return new_path.resolve()

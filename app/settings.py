@@ -7,7 +7,7 @@ from pathlib import Path
 
 class Settings:
     def __init__(self) -> None:
-        self.app_name = os.getenv("APP_NAME", "自动化巡检报告系统")
+        self.app_name = os.getenv("APP_NAME", "自动化运维平台")
         self.admin_username = os.getenv("ADMIN_USERNAME", "admin")
         self.admin_password = os.getenv("ADMIN_PASSWORD", "admin")
 
@@ -22,6 +22,8 @@ class Settings:
         self.browser_state_dir = self.data_dir / "browser-state"
 
         self.default_timezone = os.getenv("APP_TIMEZONE", "Asia/Shanghai")
+        self.holiday_primary_url = os.getenv("HOLIDAY_PRIMARY_URL", "https://timor.tech/api/holiday/year/{year}/").strip()
+        self.holiday_backup_url = os.getenv("HOLIDAY_BACKUP_URL", "https://publicapi.xiaoai.me/holiday/year?date={year}").strip()
         self.max_recent_runs = int(os.getenv("APP_MAX_RECENT_RUNS", "50"))
 
         # 全局钉钉配置

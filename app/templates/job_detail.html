@@ -11,16 +11,16 @@
       {% endif %}
     </div>
     <p class="muted">
-      所属环境：<strong>{{ job.environment }}</strong> · 
-      报告范围：<code>{{ job.time_range_label }}</code> · 
-      生成标题：<code>{{ job.report_title }}</code>
+      环境：<strong>{{ job.environment }}</strong> ·
+      时间范围：<code>{{ job.time_range_label }}</code> ·
+      报告标题：<code>{{ job.report_title }}</code>
     </p>
   </div>
   <div class="button-row" style="gap: 8px;">
     <form method="post" action="{{ url_for_frontend('/jobs/' ~ job.id ~ '/run') }}" style="margin: 0; display: inline-block;">
-      <button class="primary" type="submit">立即运行巡检</button>
+      <button class="primary" type="submit">立即运行</button>
     </form>
-    <a class="button" href="{{ url_for_frontend('/jobs/' ~ job.id ~ '/edit') }}">修改配置</a>
+    <a class="button" href="{{ url_for_frontend('/jobs/' ~ job.id ~ '/edit') }}">编辑任务</a>
     <a class="button" href="{{ url_for_frontend('/jobs/' ~ job.id ~ '/items/new') }}">+ 添加截图项</a>
   </div>
 </div>
@@ -41,7 +41,7 @@
     </strong>
   </div>
   <div>
-    <span>下次执行时间预览 (未来3次)</span>
+    <span>下次运行时间</span>
     {% if next_runs %}
       <div style="font-size: 13px; line-height: 1.4; margin-top: 4px; color: var(--primary); text-align: left;">
         {% for t in next_runs %}
@@ -53,17 +53,17 @@
     {% endif %}
   </div>
   <div>
-    <span>关联截图项数</span>
+    <span>截图项</span>
     <strong>{{ item_count }} 项</strong>
   </div>
   <div>
-    <span>默认浏览器分辨率</span>
+    <span>浏览器尺寸</span>
     <strong style="font-size: 16px; margin-top: 4px;">{{ job.browser_width or 3840 }} × {{ job.browser_height or 2160 }}</strong>
   </div>
 </div>
 
 <div class="section-title">
-  <h2>关联截图项列表</h2>
+  <h2>截图项</h2>
 </div>
 
 <section class="panel">
@@ -133,7 +133,7 @@
             <button type="submit" style="padding: 4px 10px; font-size: 12px; min-height: 28px;">测试截图</button>
           </form>
           <a class="button" href="{{ url_for_frontend('/items/' ~ item.id ~ '/edit') }}" style="padding: 4px 10px; font-size: 12px; min-height: 28px;">编辑</a>
-          <form method="post" action="{{ url_for_frontend('/items/' ~ item.id ~ '/delete') }}" onsubmit="return confirm('确认要彻底删除截图项 [{{ item.name }}] 吗？')" style="display: inline-block; margin: 0;">
+          <form method="post" action="{{ url_for_frontend('/items/' ~ item.id ~ '/delete') }}" data-confirm="删除截图项“{{ item.name }}”？删除后无法恢复。" style="display: inline-block; margin: 0;">
             <button class="danger" type="submit" style="padding: 4px 10px; font-size: 12px; min-height: 28px;">删除</button>
           </form>
         </td>
@@ -141,7 +141,7 @@
       {% else %}
       <tr>
         <td colspan="8" class="empty" style="padding: 48px; text-align: center;">
-          <p class="muted" style="margin-bottom: 16px; font-size: 14px;">此任务下暂无截图项，请手动添加需要巡检的页面。</p>
+          <p class="muted" style="margin-bottom: 16px; font-size: 14px;">暂无截图项，请先添加巡检页面。</p>
           <a class="button primary" href="{{ url_for_frontend('/jobs/' ~ job.id ~ '/items/new') }}" style="font-size: 13px;">新增截图项</a>
         </td>
       </tr>
@@ -151,13 +151,13 @@
 </section>
 
 <div class="delete-zone">
-  <div style="display: flex; justify-content: space-between; align-items: center; background: #fff1f2; border: 1px solid #fecaca; border-radius: 6px; padding: 16px 20px;">
+  <div class="danger-actions" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; background: #fff1f2; border: 1px solid #fecaca; border-radius: 6px; padding: 16px 20px;">
     <div>
-      <strong style="color: var(--danger); font-size: 14px; display: block; margin-bottom: 4px;">危险操作区域</strong>
-      <span style="color: var(--text-muted); font-size: 12px;">删除任务将会同步清除该任务下的所有截图项配置，且该操作不可逆，请谨慎操作。</span>
+      <strong style="color: var(--danger); font-size: 14px; display: block; margin-bottom: 4px;">删除任务</strong>
+      <span style="color: var(--text-muted); font-size: 12px;">同时删除该任务的截图项配置，无法恢复。</span>
     </div>
-    <form method="post" action="{{ url_for_frontend('/jobs/' ~ job.id ~ '/delete') }}" onsubmit="return confirm('警告：确认要删除任务 [{{ job.name }}] 及其关联的所有截图项吗？该操作不可撤销！')">
-      <button class="danger" type="submit" style="font-weight: 600;">删除此巡检任务</button>
+    <form method="post" action="{{ url_for_frontend('/jobs/' ~ job.id ~ '/delete') }}" data-confirm="删除任务“{{ job.name }}”和全部截图项？删除后无法恢复。">
+      <button class="danger" type="submit" style="font-weight: 600;">删除任务</button>
     </form>
   </div>
 </div>

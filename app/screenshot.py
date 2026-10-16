@@ -5,18 +5,21 @@ import re
 import time
 import random
 import logging
+import tempfile
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import unquote, urlsplit
 
 from playwright.sync_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from app.repository import get_auth_profile
 from app.settings import settings
-from app.utils import safe_name, timestamp_text, resolve_auth_credential
-from app.storage_paths import get_screenshot_dir
+from app.utils import safe_name, now_local, resolve_auth_credential
+from app.storage_paths import get_screenshot_dir, unique_artifact_path
+from app.watermark import DEFAULT_TIME_FORMAT, format_watermark_time
 
 logger = logging.getLogger("app.screenshot")
 
@@ -38,6 +41,33 @@ class CaptureResult:
     status: str
     file_path: str = ""
     error_message: str = ""
+    duration_seconds: float = 0.0
+    monitor_data: dict[str, Any] | None = None
+    content_status: str = "not_applicable"
+    content_summary: str = ""
+
+
+@dataclass
+class BrowserSession:
+    browser: Any
+    launch: Callable[[], Any]
+
+    @classmethod
+    def open(cls, launch: Callable[[], Any]) -> BrowserSession:
+        return cls(browser=launch(), launch=launch)
+
+    def restart(self) -> None:
+        try:
+            self.browser.close()
+        except Exception:
+            logger.debug("关闭故障浏览器失败", exc_info=True)
+        self.browser = self.launch()
+
+    def close(self) -> None:
+        try:
+            self.browser.close()
+        except Exception:
+            logger.debug("关闭浏览器失败", exc_info=True)
 
 
 def resolve_env_placeholders(text: str) -> str:
@@ -58,24 +88,88 @@ def capture_item(
     job: dict[str, Any],
     run_id: int,
     suffix: str = "",
-    browser: Any = None,
-    contexts: dict[Any, Any] = None,
+    browser_session: BrowserSession | None = None,
+    item_index: int | None = None,
+    total_items: int | None = None,
 ) -> CaptureResult:
+    start_time = time.monotonic()
     last_error = ""
-    retry_count = int(item.get("retry_count") or 0)
-    logger.info(f"====> 开始截图项: '{item.get('name')}' (ID: {item.get('id')}, 运行 ID: {run_id})")
+    retry_count = max(0, int(item.get("retry_count") or 0))
+    total_seconds = max(1, int(item.get("total_timeout_seconds") or 240))
+    total_deadline = start_time + total_seconds
+    tag = f"[{item_index}/{total_items}] " if (item_index is not None and total_items is not None) else ""
+    logger.info(f"截图开始 {tag}{item.get('name')}（记录 #{run_id}，最多尝试 {retry_count + 1} 次，总时限 {total_seconds} 秒）")
     for attempt in range(retry_count + 1):
+        if time.monotonic() >= total_deadline:
+            last_error = f"单项总耗时已达 {total_seconds} 秒，已停止重试"
+            break
         try:
             if attempt > 0:
-                logger.info(f"第 {attempt} 次重试...")
-            return _capture_once(item, job, run_id, suffix=suffix, browser=browser, contexts=contexts)
+                logger.info(f"截图重试 {tag}{item.get('name')}：第 {attempt + 1}/{retry_count + 1} 次")
+            browser = browser_session.browser if browser_session is not None else None
+            res = _capture_once(item, job, run_id, suffix=suffix, browser=browser, total_deadline=total_deadline)
+            duration = round(time.monotonic() - start_time, 2)
+            res.duration_seconds = duration
+            file_name = Path(res.file_path).name if res.file_path else ""
+            logger.info(f"截图成功 {tag}{item.get('name')}：{file_name}，{res.content_summary or '页面已截取'}，耗时 {duration} 秒")
+            return res
         except Exception as exc:  # noqa: BLE001 - the error is saved into run history.
-            last_error = f"{type(exc).__name__}: {exc}"
-            logger.error(f"截图尝试失败 (当前第 {attempt} 次/最多 {retry_count} 次重试): {last_error}", exc_info=True)
+            expired = time.monotonic() >= total_deadline
+            failure_stage = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+            last_error = (
+                f"单项总耗时已达 {total_seconds} 秒，已停止重试；最后阶段：{failure_stage}"
+                if expired else f"{type(exc).__name__}: {exc}"
+            )
+            reason = last_error if expired else failure_stage
+            logger.warning(f"截图失败 {tag}{item.get('name')}（第 {attempt + 1}/{retry_count + 1} 次）：{reason}")
+            logger.debug("截图失败的详细信息", exc_info=True)
+            if expired:
+                break
             if attempt < retry_count:
-                time.sleep(min(2 + attempt, 5))
-    logger.error(f"====> 截图项 '{item.get('name')}' 最终失败. 错误: {last_error}")
-    return CaptureResult(status="failed", error_message=last_error)
+                if browser_session is not None and _browser_needs_restart(exc, browser_session.browser):
+                    logger.warning("  浏览器失联或卡住，正在重启后重试")
+                    try:
+                        _remaining_ms(total_deadline)
+                        browser_session.restart()
+                        _remaining_ms(total_deadline)
+                    except Exception as restart_exc:
+                        last_error = (
+                            f"单项总耗时已达 {total_seconds} 秒，已停止重试"
+                            if time.monotonic() >= total_deadline
+                            else f"浏览器重启失败：{restart_exc}"
+                        )
+                        break
+                time.sleep(min(2 + attempt, 5, max(0, total_deadline - time.monotonic())))
+    duration = round(time.monotonic() - start_time, 2)
+    logger.error(f"截图失败 {tag}{item.get('name')}：{last_error.splitlines()[0] if last_error else '未执行'}，耗时 {duration} 秒")
+    return CaptureResult(status="failed", error_message=last_error, duration_seconds=duration)
+
+
+def _browser_needs_restart(exc: Exception, browser: Any) -> bool:
+    try:
+        if not browser.is_connected():
+            return True
+    except Exception:
+        return True
+    causes = []
+    current: BaseException | None = exc
+    while current is not None and len(causes) < 8:
+        causes.append(current)
+        current = current.__cause__
+    detail = " ".join(str(cause).lower() for cause in causes)
+    if any(signal in detail for signal in (
+        "browser has been closed", "browser closed", "browser disconnected",
+        "target page, context or browser has been closed", "browser process exited",
+    )):
+        return True
+    timed_out = any(isinstance(cause, PlaywrightTimeoutError) for cause in causes)
+    if not timed_out:
+        return False
+    if str(exc).startswith(("准备浏览器失败：", "登录失败：")):
+        return True
+    return str(exc).startswith("截图失败：") and not any(
+        marker in detail for marker in ("grafana 面板仍为空白", "grafana 至少一个面板仍为空白")
+    )
 
 
 DEFAULT_USERNAME_SELECTOR = (
@@ -109,6 +203,45 @@ def _browser_scale_factor(job: dict[str, Any]) -> float:
 
 def _css_viewport_size(physical_width: int, physical_height: int, scale_factor: float) -> tuple[int, int]:
     return max(1, round(physical_width / scale_factor)), max(1, round(physical_height / scale_factor))
+
+
+def _logical_window_position(scale_factor: float) -> tuple[int, int]:
+    return round(20 / scale_factor), round(50 / scale_factor)
+
+
+def chrome_launch_args(scale_factor: float, real_window: bool, width: int = 0, height: int = 0) -> list[str]:
+    args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--lang=zh-CN",
+        "--disable-translate",
+        "--disable-features=Translate,TranslateUI",
+        "--disable-save-password-bubble",
+        "--enable-features=SidePanel,SharingHub,DesktopSharingHub",
+    ]
+    if real_window:
+        logical_width, logical_height = _css_viewport_size(width, height, scale_factor)
+        left, top = _logical_window_position(scale_factor)
+        args.extend([
+            f"--force-device-scale-factor={scale_factor}",
+            "--high-dpi-support=1",
+            f"--window-position={left},{top}",
+            f"--window-size={logical_width},{logical_height}",
+        ])
+    else:
+        args.extend([f"--force-device-scale-factor={scale_factor}", "--high-dpi-support=1"])
+    return args
+
+
+def _remaining_ms(deadline: float) -> int:
+    remaining = int((deadline - time.monotonic()) * 1000)
+    if remaining <= 0:
+        raise TimeoutError("截图超时：已超过本项设置的加载超时时间")
+    return remaining
+
+
+def _bounded_timeout_ms(timeout_ms: int, total_deadline: float | None) -> int:
+    return min(timeout_ms, _remaining_ms(total_deadline)) if total_deadline is not None else timeout_ms
 
 def _selector_with_fallback(configured_selector: Any, fallback_selector: str) -> str:
     configured = str(configured_selector or "").strip()
@@ -210,18 +343,25 @@ def _wait_for_login_success(page: Page, success_selector: str, timeout_ms: int) 
     raise RuntimeError(f"登录后没有检测到成功状态。请检查账号密码、成功选择器或 Grafana 登录状态。{detail}")
 
 
-def _fill_login_form(page: Page, auth_profile: dict[str, Any], username: str, password: str) -> None:
+def _fill_login_form(
+    page: Page,
+    auth_profile: dict[str, Any],
+    username: str,
+    password: str,
+    deadline: float | None = None,
+    action_timeout_ms: int = 30_000,
+) -> None:
     username_selector = _selector_with_fallback(auth_profile.get("username_selector"), DEFAULT_USERNAME_SELECTOR)
     password_selector = _selector_with_fallback(auth_profile.get("password_selector"), DEFAULT_PASSWORD_SELECTOR)
     submit_selector = _selector_with_fallback(auth_profile.get("submit_selector"), DEFAULT_SUBMIT_SELECTOR)
 
     user_input = page.locator(username_selector).first
     password_input = page.locator(password_selector).first
-    user_input.wait_for(state="visible", timeout=15_000)
-    password_input.wait_for(state="visible", timeout=15_000)
-    user_input.fill(username)
-    password_input.fill(password)
-    page.locator(submit_selector).first.click()
+    user_input.wait_for(state="visible", timeout=_bounded_timeout_ms(15_000, deadline))
+    password_input.wait_for(state="visible", timeout=_bounded_timeout_ms(15_000, deadline))
+    user_input.fill(username, timeout=_bounded_timeout_ms(action_timeout_ms, deadline))
+    password_input.fill(password, timeout=_bounded_timeout_ms(action_timeout_ms, deadline))
+    page.locator(submit_selector).first.click(timeout=_bounded_timeout_ms(action_timeout_ms, deadline))
 
 
 def _capture_once(
@@ -230,25 +370,28 @@ def _capture_once(
     run_id: int,
     suffix: str = "",
     browser: Any = None,
-    contexts: dict[Any, Any] = None,
+    total_deadline: float | None = None,
 ) -> CaptureResult:
+    if total_deadline is not None:
+        _remaining_ms(total_deadline)
     auth_profile = get_auth_profile(item.get("auth_profile_id"))
-    width = int(item.get("browser_width") or job.get("browser_width") or 3840)
-    height = int(item.get("browser_height") or job.get("browser_height") or 2160)
+    target_width = int(item.get("browser_width") or job.get("browser_width") or 3840)
+    target_height = int(item.get("browser_height") or job.get("browser_height") or 2160)
+    is_real_capture = bool(item.get("real_browser_capture") if "real_browser_capture" in item else 0)
+    width, height = browser_window_size(item, job, run_id) if is_real_capture else (target_width, target_height)
     scale_factor = _browser_scale_factor(job)
     timeout_ms = int(item.get("timeout_seconds") or 60) * 1000
     screenshot_dir = get_screenshot_dir(run_id)
-    file_name = f"{safe_name(item.get('name', 'screenshot'))}{suffix}_{timestamp_text()}.png"
-    output_path = screenshot_dir / file_name
+    time_label = now_local().strftime("%H-%M-%S")
+    stem = f"{time_label}_{safe_name(str(item.get('name') or 'screenshot'))}{suffix}"
+    output_path = unique_artifact_path(screenshot_dir, stem, ".png")
 
     raw_url = str(item["url"])
     resolved_url = resolve_env_placeholders(raw_url)
-    logger.info(f"原始 URL: {raw_url} | 解析后 URL: {resolved_url}")
 
-    is_real_capture = bool(item.get("real_browser_capture") if "real_browser_capture" in item else 1)
     capture_mode = str(item.get("capture_mode") or "viewport")
     if is_real_capture and capture_mode == "full_page":
-        logger.warning("启用真实浏览器截图时不支持整页长截图 (full_page)，已自动降级为视口截图 (viewport) 模式。")
+        logger.warning("  ├─ 视口配置: 启用真实浏览器截图时不支持 full_page，已自动降级为视口模式 (viewport)")
 
     if browser is None:
         with sync_playwright() as p:
@@ -257,43 +400,26 @@ def _capture_once(
                 "headless": headless_val,
                 "channel": "chrome",
                 "ignore_default_args": ["--enable-automation", "--disable-sync"],
-                "args": [
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    f"--force-device-scale-factor={scale_factor}",
-                    "--high-dpi-support=1",
-                    "--lang=zh-CN",
-                    "--disable-translate",
-                    "--enable-features=SidePanel,SharingHub,DesktopSharingHub"
-                ]
+                "args": chrome_launch_args(scale_factor, is_real_capture, width, height),
             }
-            if is_real_capture:
-                launch_kwargs["args"].extend([
-                    "--window-position=0,0",
-                    f"--window-size={width},{height}"
-                ])
-            logger.info(f"启动单次使用 chromium 浏览器 (headless={headless_val})...")
             tmp_browser = p.chromium.launch(**launch_kwargs)
             try:
-                local_contexts = {}
-                res = _capture_with_browser(
-                    item, job, run_id, suffix, tmp_browser, width, height, timeout_ms,
-                    screenshot_dir, file_name, output_path, resolved_url, is_real_capture,
-                    auth_profile, local_contexts
+                if total_deadline is not None:
+                    _remaining_ms(total_deadline)
+                return _capture_with_browser(
+                    item, job, run_id, tmp_browser, width, height, timeout_ms,
+                    screenshot_dir, output_path, resolved_url, is_real_capture, auth_profile,
+                    total_deadline=total_deadline,
+                    final_size=(target_width, target_height) if is_real_capture else None,
                 )
-                return res
             finally:
-                for ctx in list(local_contexts.values()):
-                    try:
-                        ctx.close()
-                    except Exception:
-                        pass
                 tmp_browser.close()
     else:
         return _capture_with_browser(
-            item, job, run_id, suffix, browser, width, height, timeout_ms,
-            screenshot_dir, file_name, output_path, resolved_url, is_real_capture,
-            auth_profile, contexts
+            item, job, run_id, browser, width, height, timeout_ms,
+            screenshot_dir, output_path, resolved_url, is_real_capture, auth_profile,
+            total_deadline=total_deadline,
+            final_size=(target_width, target_height) if is_real_capture else None,
         )
 
 
@@ -301,84 +427,143 @@ def _capture_with_browser(
     item: dict[str, Any],
     job: dict[str, Any],
     run_id: int,
-    suffix: str,
     browser: Any,
     width: int,
     height: int,
     timeout_ms: int,
     screenshot_dir: Path,
-    file_name: str,
     output_path: Path,
     resolved_url: str,
     is_real_capture: bool,
     auth_profile: dict[str, Any] | None,
-    contexts: dict[Any, Any] | None,
+    deadline: float | None = None,
+    total_deadline: float | None = None,
+    final_size: tuple[int, int] | None = None,
 ) -> CaptureResult:
-    auth_id = auth_profile["id"] if auth_profile else None
     scale_factor = _browser_scale_factor(job)
     viewport_width, viewport_height = _css_viewport_size(width, height, scale_factor)
-    context_key = (auth_id, viewport_width, viewport_height, round(scale_factor, 3))
-    logger.info(
-        f"截图尺寸: physical={width}x{height}, css_viewport={viewport_width}x{viewport_height}, dpr={scale_factor}"
-    )
-
-    if contexts is not None and context_key in contexts:
-        context = contexts[context_key]
-    else:
-        context = _new_context(browser, auth_profile, viewport_width, viewport_height, scale_factor)
-        if contexts is not None:
-            contexts[context_key] = context
-            
-    page = context.new_page()
+    logger.debug(f"目标地址：{resolved_url}")
+    logger.debug(f"截图尺寸：{width}x{height}，网页视口：{viewport_width}x{viewport_height}，缩放：{scale_factor}")
+    if total_deadline is not None:
+        _remaining_ms(total_deadline)
+    context = _new_context(browser, auth_profile, viewport_width, viewport_height, scale_factor)
+    page = None
+    temp_path = None
+    monitor_data: dict[str, Any] | None = None
+    content: dict[str, Any] = {"status": "not_applicable", "summary": ""}
+    query_tracker: _GrafanaQueryTracker | None = None
+    stage = "准备浏览器"
     try:
-        page.set_default_timeout(timeout_ms)
-        page.set_viewport_size({"width": viewport_width, "height": viewport_height})
-        
-        _ensure_logged_in(context, page, auth_profile, timeout_ms)
-        
-        logger.info(f"正在加载截图 URL: {resolved_url}")
-        page.goto(resolved_url, wait_until="domcontentloaded", timeout=timeout_ms)
-        
+        page = context.new_page()
+        page.set_default_timeout(_bounded_timeout_ms(timeout_ms, total_deadline))
+        if is_real_capture:
+            _browser_window_rect(page, viewport_width, viewport_height, scale_factor=scale_factor)
+        stage = "登录"
+        _ensure_logged_in(
+            context, page, auth_profile,
+            _bounded_timeout_ms(timeout_ms, total_deadline),
+            deadline=total_deadline,
+        )
+        deadline = deadline if deadline is not None else time.monotonic() + timeout_ms / 1000
+        if total_deadline is not None:
+            deadline = min(deadline, total_deadline)
+        page.set_default_timeout(_remaining_ms(deadline))
+        if _is_grafana_dashboard(resolved_url):
+            query_tracker = _GrafanaQueryTracker(page)
+
+        stage = "打开页面"
+        logger.info("  正在打开页面…")
+        response = page.goto(resolved_url, wait_until="domcontentloaded", timeout=_remaining_ms(deadline))
+        if response is not None and response.status >= 400:
+            raise RuntimeError(f"页面返回 HTTP {response.status}")
+
         state_path = _storage_state_path(auth_profile)
         if state_path and state_path.exists() and _is_on_login_page(page, auth_profile):
-            logger.warning("载入缓存状态文件后访问目标页面，却被重定向回了登录页。将清空失效的缓存文件并尝试重新登录自愈！")
+            logger.warning("  登录状态已失效，正在重新登录")
             safe_delete_auth_state(auth_profile)
-            
-            page.close()
-            if contexts is not None and context_key in contexts:
-                try:
-                    contexts[context_key].close()
-                except Exception:
-                    pass
-                del contexts[context_key]
-                
-            context = _new_context(browser, auth_profile, viewport_width, viewport_height, scale_factor)
-            if contexts is not None:
-                contexts[context_key] = context
-                
-            page = context.new_page()
-            page.set_default_timeout(timeout_ms)
-            page.set_viewport_size({"width": viewport_width, "height": viewport_height})
-            
-            _ensure_logged_in(context, page, auth_profile, timeout_ms)
-            logger.info(f"登录自愈重试完毕，再次载入截图页面 URL: {resolved_url}")
-            page.goto(resolved_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            context.clear_cookies()
+            stage = "重新登录"
+            _ensure_logged_in(
+                context, page, auth_profile,
+                _bounded_timeout_ms(timeout_ms, total_deadline),
+                deadline=total_deadline,
+            )
+            deadline = time.monotonic() + timeout_ms / 1000
+            if total_deadline is not None:
+                deadline = min(deadline, total_deadline)
+            page.set_default_timeout(_remaining_ms(deadline))
+            stage = "重新打开页面"
+            logger.info("  重新打开页面…")
+            response = page.goto(resolved_url, wait_until="domcontentloaded", timeout=_remaining_ms(deadline))
+            if response is not None and response.status >= 400:
+                raise RuntimeError(f"页面返回 HTTP {response.status}")
 
+        stage = "等待页面"
+        _disable_grafana_auto_refresh(page, deadline)
         _assert_not_login_page_before_screenshot(page, auth_profile)
-        _wait_for_page(page, item, timeout_ms)
+        waited_content = _wait_for_page(page, item, _remaining_ms(deadline), query_tracker)
+        if isinstance(waited_content, dict):
+            content = waited_content
         _assert_not_login_page_before_screenshot(page, auth_profile)
-        _take_screenshot(page, item, output_path, is_real_capture, width, height)
-        _apply_configured_watermark(output_path, item)
-        _apply_simulated_taskbar(output_path, item, run_id)
+        _remaining_ms(deadline)
+        if _is_grafana_dashboard(str(page.url)):
+            content = _wait_for_grafana_panels(page, min(5_000, _remaining_ms(deadline)), query_tracker, settle_ms=0)
+        if is_real_capture:
+            _assert_real_window_viewport(page)
+        fd, temp_name = tempfile.mkstemp(prefix=".capture-", suffix=".png", dir=screenshot_dir)
+        os.close(fd)
+        temp_path = Path(temp_name)
+        stage = "截图"
+        logger.info("  正在截图…")
+        final_content = _take_screenshot(
+            page, item, temp_path, is_real_capture, width, height, _remaining_ms(deadline),
+            deadline=deadline, window_scale_factor=scale_factor if is_real_capture else 1.0,
+            query_tracker=query_tracker,
+        )
+        if isinstance(final_content, dict):
+            content = final_content
+        _remaining_ms(deadline)
+        stage = "处理图片"
+        if is_real_capture:
+            _normalize_window_image(temp_path, width, height)
+        _apply_configured_watermark(temp_path, item)
+        _apply_simulated_taskbar(temp_path, item, run_id)
+        if final_size is not None:
+            _assert_image_size(temp_path, final_size)
+        _remaining_ms(deadline)
         _persist_storage_state(context, auth_profile)
+        _remaining_ms(deadline)
+        stage = "保存图片"
+        os.replace(temp_path, output_path)
+        temp_path = None
+        logger.info(f"  截图已保存：{output_path.name}")
+        if re.search(r"/d(?:-solo)?/", str(page.url)):
+            from app.monitoring import collect_dashboard_alerts
+
+            monitor_data = collect_dashboard_alerts(
+                context, str(page.url), total_deadline,
+                runtime_datasource_keys=query_tracker.datasource_keys if query_tracker else None,
+            )
+            logger.info("  数据源告警：%s（%s 条）", monitor_data["status"], len(monitor_data["alerts"]))
+    except Exception as exc:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"{stage}失败：{exc}") from exc
     finally:
         try:
-            page.close()
+            if page is not None:
+                page.close()
         except Exception:
             pass
-            
-    logger.info(f"截图成功并保存至: {output_path}")
-    return CaptureResult(status="success", file_path=str(output_path))
+        try:
+            context.close()
+        except Exception:
+            logger.debug("关闭截图页面环境失败", exc_info=True)
+
+    return CaptureResult(
+        status="success", file_path=str(output_path), monitor_data=monitor_data,
+        content_status=content["status"], content_summary=content["summary"],
+    )
 
 
 def _new_context(browser: Any, auth_profile: dict[str, Any] | None, width: int, height: int, scale_factor: float = 1.5) -> BrowserContext:
@@ -391,18 +576,29 @@ def _new_context(browser: Any, auth_profile: dict[str, Any] | None, width: int, 
     }
     state_path = _storage_state_path(auth_profile)
     if state_path and state_path.exists():
-        logger.info(f"正在读取并解密浏览器状态缓存文件: {state_path}")
+        logger.info(f"  ├─ 会话认证: 载入已缓存的登录状态 ({state_path.name})")
         try:
             import json
             encrypted_bytes = state_path.read_bytes()
             decrypted_str = _decrypt_state_data(encrypted_bytes)
             kwargs["storage_state"] = json.loads(decrypted_str)
         except Exception as e:
-            logger.error(f"解密或加载浏览器状态缓存失败，将跳过缓存重新登录: {e}")
+            logger.error(f"  ├─ 会话认证: 解密或加载状态缓存失败，将重新登录: {e}")
     return browser.new_context(**kwargs)
 
 
 def _storage_state_path(auth_profile: dict[str, Any] | None) -> Path | None:
+    if not auth_profile:
+        return None
+    profile_id = auth_profile.get("id")
+    if profile_id:
+        raw_path = str(auth_profile.get("storage_state_path") or "").strip()
+        suffix = safe_name(Path(raw_path).stem) if raw_path else "session"
+        return settings.browser_state_dir / f"auth_{int(profile_id)}_{suffix}.json"
+    return _legacy_storage_state_path(auth_profile)
+
+
+def _legacy_storage_state_path(auth_profile: dict[str, Any] | None) -> Path | None:
     if not auth_profile:
         return None
     raw_path = str(auth_profile.get("storage_state_path") or "").strip()
@@ -466,11 +662,19 @@ def _assert_not_login_page_before_screenshot(page: Page, auth_profile: dict[str,
 
 def safe_delete_auth_state(auth_profile: dict[str, Any]) -> None:
     """安全地物理删除该认证配置对应的缓存 JSON 状态文件"""
-    from app.cleanup import is_safe_path
-    
     try:
-        state_path = _storage_state_path(auth_profile)
-        if not state_path or not state_path.exists():
+        state_paths = {_storage_state_path(auth_profile), _legacy_storage_state_path(auth_profile)}
+        for state_path in state_paths:
+            if state_path is not None:
+                _delete_one_auth_state(state_path)
+    except Exception as exc:
+        logger.error(f"清理浏览器状态缓存文件失败: {exc}", exc_info=True)
+
+
+def _delete_one_auth_state(state_path: Path) -> None:
+    from app.cleanup import is_safe_path
+    try:
+        if not state_path.exists():
             return
             
         if not state_path.is_file():
@@ -502,17 +706,18 @@ def _ensure_logged_in(
     page: Page,
     auth_profile: dict[str, Any] | None,
     timeout_ms: int,
+    deadline: float | None = None,
 ) -> None:
     if not auth_profile or auth_profile.get("auth_type") in {"", "none"}:
         return
     if auth_profile.get("auth_type") == "state":
-        logger.info("认证类型为 state，信任本地存储状态。")
+        logger.info("  ├─ 会话认证: 认证类型为 state，信任本地持久化状态")
         return
     if auth_profile.get("auth_type") != "form":
         return
     state_path = _storage_state_path(auth_profile)
     if state_path and state_path.exists():
-        logger.info(f"缓存状态文件已存在，跳过登录表单: {state_path}")
+        logger.info(f"  ├─ 会话认证: 检测到本地会话凭证，已复用无需重新登录")
         return
 
     raw_login_url = str(auth_profile.get("login_url") or "").strip()
@@ -523,28 +728,22 @@ def _ensure_logged_in(
     password = creds["password"]
         
     if not login_url:
-        logger.info("登录配置没有 login_url，跳过表单登录。")
+        logger.info("  ├─ 会话认证: 缺少 login_url，跳过表单登录")
         return
     if not username or not password:
         raise RuntimeError(f"登录配置 {auth_profile['name']} 缺少用户名或密码配置，请在网页端核对配置")
 
-    logger.info(f"开始执行表单登录. 登录页面: {login_url}")
-    page.goto(login_url, wait_until="domcontentloaded", timeout=timeout_ms)
+    logger.info(f"  ├─ 会话认证: 正在执行表单登录 (地址: {login_url}, 用户: {username})")
+    page.goto(login_url, wait_until="domcontentloaded", timeout=_bounded_timeout_ms(timeout_ms, deadline))
     _assert_login_page_ready(page, login_url)
-    _fill_login_form(page, auth_profile, username, password)
-    logger.info("已点击提交按钮，等待登录成功...")
+    _fill_login_form(page, auth_profile, username, password, deadline=deadline, action_timeout_ms=timeout_ms)
     
     success_selector = str(auth_profile.get("success_selector") or "").strip()
-    if success_selector and success_selector != "body":
-        logger.info(f"等待登录成功指示选择器: '{success_selector}'")
-    else:
-        logger.info("未配置成功选择器，自动检测 URL、登录表单和失败提示。")
-    _wait_for_login_success(page, success_selector, timeout_ms)
-    logger.info(f"登录成功，当前 URL: {page.url}")
-            
-    logger.info("登录完成，正在将浏览器状态(Cookies等)保存至缓存文件...")
+    _wait_for_login_success(page, success_selector, _bounded_timeout_ms(timeout_ms, deadline))
+    if deadline is not None:
+        _remaining_ms(deadline)
     _persist_storage_state(context, auth_profile)
-    logger.info("浏览器登录状态保存成功！")
+    logger.info("  ├─ 会话认证: ✔ 登录成功，最新会话已持久化加密保存")
 
 
 def _persist_storage_state(context: BrowserContext, auth_profile: dict[str, Any] | None) -> None:
@@ -562,20 +761,256 @@ def _persist_storage_state(context: BrowserContext, auth_profile: dict[str, Any]
         logger.error(f"加密保存浏览器状态缓存失败: {exc}", exc_info=True)
 
 
-def _wait_for_page(page: Page, item: dict[str, Any], timeout_ms: int) -> None:
+def _disable_grafana_auto_refresh(page: Page, deadline: float) -> None:
+    if not re.search(r"/d(?:-solo)?/", str(page.url)):
+        return
+    # Grafana versions and languages expose different refresh controls. Pausing it
+    # is only a best-effort improvement, never a prerequisite for a screenshot.
+    pause_deadline = min(deadline, time.monotonic() + 2)
+
+    def short_timeout() -> int:
+        remaining = int((pause_deadline - time.monotonic()) * 1000)
+        if remaining <= 0:
+            raise TimeoutError("暂停自动刷新的尝试已超时")
+        return min(750, remaining)
+
+    button = page.locator('button[aria-label*="Choose refresh time interval"]').first
+    menu_opened = False
+    try:
+        button.wait_for(state="visible", timeout=short_timeout())
+        label = button.get_attribute("aria-label", timeout=short_timeout()) or ""
+        if "Auto refresh turned off" in label:
+            return
+        button.evaluate("element => element.click()", timeout=short_timeout())
+        menu_opened = True
+        off = page.get_by_role("menu").get_by_text("Off", exact=True).first
+        off.wait_for(state="visible", timeout=short_timeout())
+        off.evaluate("element => element.click()", timeout=short_timeout())
+        page.wait_for_function(
+            "() => !!document.querySelector('button[aria-label*=\"Auto refresh turned off\"]')",
+            timeout=short_timeout(),
+        )
+    except Exception as exc:
+        if menu_opened:
+            try:
+                page.keyboard.press("Escape", timeout=500)
+            except Exception:
+                logger.debug("收起 Grafana 刷新菜单失败", exc_info=True)
+        logger.warning("  Grafana 自动刷新未能暂停，继续等待面板并截图：%s", str(exc).splitlines()[0])
+        return
+    logger.info("  Grafana 自动刷新已暂停，正在等待面板内容")
+
+
+def _is_grafana_dashboard(url: str) -> bool:
+    return bool(re.search(r"/d(?:-solo)?/", urlsplit(url).path))
+
+
+class _GrafanaQueryTracker:
+    """Observe this page's Grafana queries without waiting for unrelated live traffic."""
+
+    def __init__(self, page: Page) -> None:
+        self.pending: set[int] = set()
+        self.responses_by_request: dict[int, Any] = {}
+        self.responses: list[Any] = []
+        self.errors: list[str] = []
+        self.datasource_keys: set[str] = set()
+        self.seen = 0
+        self.completed_cycle = False
+        page.on("request", self._started)
+        page.on("response", self._responded)
+        page.on("requestfinished", self._finished)
+        page.on("requestfailed", self._failed)
+
+    @staticmethod
+    def _is_query(url: str) -> bool:
+        path = urlsplit(url).path.lower()
+        return "/api/ds/query" in path or (
+            "/api/datasources/proxy/" in path and
+            any(part in path for part in ("/api/v1/query", "/_search", "/_msearch"))
+        )
+
+    def _started(self, request: Any) -> None:
+        if self._is_query(request.url):
+            self.seen += 1
+            self.pending.add(id(request))
+            proxy = re.search(r"/api/datasources/proxy/(?:uid/)?([^/]+)", urlsplit(request.url).path, re.IGNORECASE)
+            if proxy:
+                self.datasource_keys.add(unquote(proxy.group(1)))
+            if "/api/ds/query" in urlsplit(request.url).path.lower():
+                try:
+                    payload = request.post_data_json
+                    if isinstance(payload, dict):
+                        for query in payload.get("queries", []):
+                            if not isinstance(query, dict):
+                                continue
+                            source = query.get("datasource")
+                            key = (source.get("uid") or source.get("id")) if isinstance(source, dict) else source
+                            key = key or query.get("datasourceUid") or query.get("datasourceId")
+                            if isinstance(key, (str, int)) and str(key):
+                                self.datasource_keys.add(str(key))
+                except Exception:
+                    logger.debug("无法解析 Grafana 查询使用的数据源", exc_info=True)
+
+    def _responded(self, response: Any) -> None:
+        if self._is_query(response.url):
+            if response.status >= 400:
+                self.errors.append(f"Grafana 数据查询返回 HTTP {response.status}")
+            else:
+                self.responses_by_request[id(response.request)] = response
+
+    def _finished(self, request: Any) -> None:
+        self.pending.discard(id(request))
+        response = self.responses_by_request.pop(id(request), None)
+        if response is not None:
+            self.responses.append(response)
+
+    def _failed(self, request: Any) -> None:
+        if id(request) in self.pending:
+            self.pending.discard(id(request))
+            self.responses_by_request.pop(id(request), None)
+            reason = str(request.failure or "请求失败")
+            if "aborted" not in reason.lower():
+                self.errors.append(f"Grafana 数据查询失败：{reason[:120]}")
+
+    def check(self) -> None:
+        if self.errors:
+            raise RuntimeError(self.errors[0])
+        while self.responses:
+            response = self.responses.pop(0)
+            try:
+                payload = response.json()
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("error"):
+                raise RuntimeError(f"Grafana 数据查询失败：{str(payload['error'])[:160]}")
+            if payload.get("status") == "error":
+                raise RuntimeError("Grafana 数据查询返回错误状态")
+            results = payload.get("results")
+            if isinstance(results, dict):
+                for result in results.values():
+                    if not isinstance(result, dict):
+                        continue
+                    status = result.get("status")
+                    is_http_error = (isinstance(status, int) and status >= 400) or (
+                        isinstance(status, str) and status.lower() in {"error", "failed"}
+                    )
+                    if result.get("error") or is_http_error:
+                        detail = result.get("error") or f"HTTP {status}"
+                        raise RuntimeError(f"Grafana 数据查询失败：{str(detail)[:160]}")
+        if self.seen and not self.pending:
+            self.completed_cycle = True
+
+
+_GRAFANA_PANEL_SNAPSHOT = r"""() => {
+  const gridItems = [...document.querySelectorAll('.react-grid-item')];
+  const candidates = gridItems.length
+    ? gridItems.filter(item => !item.querySelector('.dashboard-row'))
+    : [...document.querySelectorAll('.panel-container, [class*="panel-container"], [data-testid="panel-container"]')];
+  const visible = candidates.filter(panel => {
+    const rect = panel.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && rect.bottom > 0 &&
+      rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth;
+  });
+  const panels = visible.map((panel, index) => {
+    const container = panel.matches('.panel-container, [class*="panel-container"], [data-testid="panel-container"]')
+      ? panel : panel.querySelector('.panel-container, [class*="panel-container"], [data-testid="panel-container"]');
+    const title = (container?.querySelector('.panel-title, [class*="panel-title"], .panel-header, [class*="panel-header"], [class*="panelHeader"]')?.innerText ||
+      container?.getAttribute('data-testid')?.replace(/^data-testid Panel header\s*/, '') ||
+      `面板 ${index + 1}`).trim().slice(0, 80);
+    if (!container) return {title, state: 'loading'};
+    const content = container.querySelector(
+      '.panel-content, [class*="panel-content"], [data-testid="panel-content"], [data-testid="data-testid panel content"], [data-testid="panel-body"], [class*="panelContent"]'
+    );
+    const nodes = content ? [content] : [...container.children].filter(node =>
+      !node.matches('.panel-header, .panel-info-corner, [class*="panelHeader"], [class*="panel-header"], [class*="panel-loading"], [class*="resize-handle"]')
+    );
+    const bodyText = nodes.map(node => node.innerText || '').join(' ').trim();
+    const loading = /Loading plugin panel|Loading panel|Loading data|加载中/i.test(bodyText) ||
+      nodes.some(node => !!node.querySelector('[role="progressbar"], [aria-busy="true"], .panel-loading'));
+    if (loading || !nodes.length) return {title, state: 'loading'};
+    const errorNode = nodes.some(node => !!node.querySelector(
+      '.panel-error, [data-testid="panel-error"], .query-error, [class*="panelError"]'
+    ));
+    const errorText = /(?:^|\n)\s*(?:Query error|Data source error|Datasource error|Failed to fetch|Internal Server Error|Bad Gateway|查询失败|数据源错误|加载失败)(?:\b|\s|:|：|$)/i.test(bodyText);
+    if (errorNode || errorText) return {title, state: 'error', detail: bodyText.slice(0, 160)};
+    const noData = /^(?:No data|暂无数据|无数据)(?:\s|$)/i.test(bodyText);
+    if (noData) return {title, state: 'no_data'};
+    const visual = 'canvas, svg, img, video, iframe, table, [role="table"], [role="img"], [role="grid"]';
+    const hasVisual = nodes.some(node => node.matches(visual) || !!node.querySelector(visual));
+    return {title, state: hasVisual || !!bodyText ? 'data' : 'loading'};
+  });
+  return {panels};
+}"""
+
+
+def _grafana_snapshot(page: Page) -> dict[str, Any]:
+    return page.evaluate(_GRAFANA_PANEL_SNAPSHOT)
+
+
+def _wait_for_grafana_panels(
+    page: Page, timeout_ms: int, tracker: _GrafanaQueryTracker | None = None,
+    settle_ms: int = 2000,
+) -> dict[str, Any]:
+    if not _is_grafana_dashboard(str(page.url)):
+        return {"status": "not_applicable", "summary": ""}
+    logger.info("  等待 Grafana 图表完成加载…")
+    deadline = time.monotonic() + timeout_ms / 1000
+    ready_since: float | None = None
+    last_panels: list[dict[str, str]] = []
+    while True:
+        if tracker is not None:
+            tracker.check()
+        snapshot = _grafana_snapshot(page)
+        panels = snapshot.get("panels") or []
+        last_panels = panels
+        errors = [p for p in panels if p.get("state") == "error"]
+        if errors:
+            panel = errors[0]
+            raise RuntimeError(f"Grafana 图表“{panel['title']}”查询错误：{panel.get('detail') or '请检查数据源'}")
+        pending_first_cycle = tracker is not None and bool(tracker.pending) and not tracker.completed_cycle
+        ready = bool(panels) and not pending_first_cycle and all(p.get("state") in {"data", "no_data"} for p in panels)
+        now = time.monotonic()
+        if ready:
+            ready_since = ready_since or now
+            if (now - ready_since) * 1000 >= settle_ms:
+                no_data = [p["title"] for p in panels if p["state"] == "no_data"]
+                status = "no_data" if len(no_data) == len(panels) else "partial_no_data" if no_data else "data"
+                summary = (
+                    f"全部 {len(panels)} 个图表无数据，需确认" if status == "no_data" else
+                    f"{len(no_data)} 个图表无数据：{'、'.join(no_data[:5])}" if no_data else
+                    f"{len(panels)} 个图表已显示"
+                )
+                logger.info("  Grafana 图表已加载：%s", summary)
+                return {"status": status, "summary": summary}
+        else:
+            ready_since = None
+        remaining = deadline - now
+        if remaining <= 0:
+            unfinished = [p["title"] for p in last_panels if p.get("state") not in {"data", "no_data"}]
+            detail = "、".join(unfinished[:5]) or ("数据查询仍在进行" if pending_first_cycle else "未找到可见图表")
+            raise TimeoutError(f"Grafana 图表未完成加载：{detail}")
+        page.wait_for_timeout(min(300, max(1, int(remaining * 1000))))
+
+
+def _wait_for_page(
+    page: Page, item: dict[str, Any], timeout_ms: int,
+    tracker: _GrafanaQueryTracker | None = None,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_ms / 1000
     wait_selector = str(item.get("wait_selector") or "").strip()
     if wait_selector:
-        logger.info(f"等待页面指定元素加载可见: {wait_selector}")
-        page.wait_for_selector(wait_selector, state="visible", timeout=timeout_ms)
-    try:
-        logger.info("等待网络活动空闲 (networkidle)...")
-        page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
-    except PlaywrightTimeoutError:
-        logger.warning("等待 networkidle 超时，将强行继续后续步骤")
+        logger.info(f"  等待元素：{wait_selector}")
+        page.wait_for_selector(wait_selector, state="visible", timeout=_remaining_ms(deadline))
+    content = _wait_for_grafana_panels(page, _remaining_ms(deadline), tracker)
     wait_seconds = float(item.get("wait_seconds") or 0)
     if wait_seconds > 0:
-        logger.info(f"额外等待页面静止渲染: {wait_seconds} 秒")
+        if wait_seconds * 1000 > _remaining_ms(deadline):
+            raise TimeoutError("截图超时：手动等待时间超过本项剩余超时时间")
+        logger.info(f"  等待 {wait_seconds:g} 秒后截图")
         page.wait_for_timeout(int(wait_seconds * 1000))
+    return content
 
 
 def _current_watermark_time() -> str:
@@ -620,9 +1055,23 @@ def _apply_configured_watermark(image_path: Path, item: dict[str, Any]) -> None:
     if not _watermark_bool(item.get("watermark_enabled"), False):
         return
 
+    custom_text = str(item.get("watermark_text") or "").strip()
+    parts = []
+    if _watermark_bool(item.get("watermark_time_enabled"), False):
+        try:
+            from zoneinfo import ZoneInfo
+            now = datetime.now(ZoneInfo(settings.default_timezone))
+        except Exception:
+            now = datetime.now()
+        parts.append(format_watermark_time(now, str(item.get("watermark_time_format") or DEFAULT_TIME_FORMAT)))
+    if custom_text:
+        parts.append(custom_text)
+    if not parts:
+        return
+
     _apply_watermark(
         image_path=image_path,
-        text=_watermark_text(str(item.get("watermark_text") or "")),
+        text="\n".join(parts),
         opacity=_watermark_int(item.get("watermark_opacity"), DEFAULT_WATERMARK_OPACITY, 0, 255),
         font_size=_watermark_int(item.get("watermark_font_size"), DEFAULT_WATERMARK_FONT_SIZE, 10, 72),
         gap_x=_watermark_int(item.get("watermark_gap_x"), DEFAULT_WATERMARK_TILE_GAP_X, 20, 800),
@@ -638,13 +1087,64 @@ def _taskbar_template_paths() -> list[Path]:
     return [(TASKBAR_TEMPLATE_DIR / name).resolve() for name in TASKBAR_TEMPLATE_NAMES if (TASKBAR_TEMPLATE_DIR / name).exists()]
 
 
-def _taskbar_template_path(run_id: int | str | None = None) -> Path:
+def _taskbar_template_path(run_id: int | str | None = None, key: str = "") -> Path:
+    if key:
+        from app.taskbar_templates import selected_path
+        return selected_path(key)
     paths = _taskbar_template_paths()
     if not paths:
         return DEFAULT_TASKBAR_TEMPLATE_PATH.resolve()
     if run_id is None:
         return random.choice(paths)
     return random.Random(str(run_id)).choice(paths)
+
+
+def browser_window_size(item: dict[str, Any], job: dict[str, Any], run_id: int | str) -> tuple[int, int]:
+    """Reserve space for the taskbar within the requested final screenshot size."""
+    from PIL import Image
+
+    width = int(item.get("browser_width") or job.get("browser_width") or 3840)
+    height = int(item.get("browser_height") or job.get("browser_height") or 2160)
+    if not _watermark_bool(item.get("taskbar_enabled"), True):
+        return width, height
+    template_path = _taskbar_template_path(run_id, str(item.get("taskbar_template_key") or ""))
+    if not template_path.exists():
+        raise FileNotFoundError(f"Windows 任务栏模板不存在：{template_path}")
+    with Image.open(template_path) as template:
+        taskbar_height = max(1, round(template.height * width / template.width))
+    if taskbar_height >= height:
+        raise ValueError(f"截图高度 {height}px 不足以容纳 {taskbar_height}px 任务栏")
+    return width, height - taskbar_height
+
+
+def _normalize_window_image(image_path: Path, width: int, height: int) -> None:
+    """Correct the one-pixel X11 rounding difference without scaling the browser UI."""
+    from PIL import Image
+
+    with Image.open(image_path) as source:
+        if source.size == (width, height):
+            return
+        if abs(source.width - width) > 8 or abs(source.height - height) > 8:
+            raise RuntimeError(
+                f"浏览器窗口图片尺寸 {source.width}x{source.height} 与预期 {width}x{height} 不一致"
+            )
+        original = source.convert("RGB")
+        original.load()
+    background = original.getpixel((original.width - 1, original.height - 1))
+    normalized = Image.new("RGB", (width, height), background)
+    normalized.paste(original.crop((0, 0, min(width, original.width), min(height, original.height))))
+    normalized.save(image_path)
+
+
+def _assert_image_size(image_path: Path, expected: tuple[int, int]) -> None:
+    from PIL import Image
+
+    with Image.open(image_path) as image:
+        if image.size != expected:
+            raise RuntimeError(
+                f"最终截图尺寸 {image.width}x{image.height} 与配置 {expected[0]}x{expected[1]} 不一致"
+            )
+
 
 def _format_taskbar_clock(now: datetime) -> tuple[str, str]:
     return now.strftime("%H:%M"), now.strftime("%Y/%m/%d")
@@ -752,7 +1252,7 @@ def _apply_taskbar_template(image_path: Path, template_path: Path) -> None:
     else:
         combined.save(image_path)
 
-    logger.info(f"Applied real Windows taskbar template: {template_path} -> {image_path}")
+    logger.info("  ├─ 视觉增强: ✔ 已合成真实的 Windows 任务栏底栏")
 
 
 def _apply_simulated_taskbar(image_path: Path, item: dict[str, Any], run_id: int | str | None = None) -> None:
@@ -767,7 +1267,7 @@ def _apply_simulated_taskbar(image_path: Path, item: dict[str, Any], run_id: int
     if not image_path.exists():
         raise FileNotFoundError(f"Taskbar template composition failed: screenshot file not found {image_path}")
 
-    template_path = _taskbar_template_path(run_id)
+    template_path = _taskbar_template_path(run_id, str(item.get("taskbar_template_key") or ""))
     if not template_path.exists():
         logger.warning(f"Windows 任务栏模板未找到，已跳过拼接底栏美化逻辑。模板路径: {template_path}")
         return
@@ -885,40 +1385,99 @@ def _apply_watermark(
     else:
         combined.save(image_path)
 
-    logger.info(f"已为截图添加水印: {image_path}")
+    logger.info("  ├─ 视觉增强: ✔ 已为截图添加配置的水印")
 
 
-def _trim_mss_desktop_margin(image_path: Path, max_trim: int = 40) -> None:
-    from PIL import Image
+def _browser_window_rect(page: Page, width: int, height: int, *, position: bool = True, scale_factor: float = 1.0) -> dict[str, int]:
+    """Ask Chromium for this page's actual window instead of guessing a screen area."""
+    if width <= 0 or height <= 0:
+        raise ValueError("未配置有效的浏览器窗口尺寸")
+    session = page.context.new_cdp_session(page)
+    try:
+        window_id = session.send("Browser.getWindowForTarget")["windowId"]
+        if position:
+            left, top = _logical_window_position(scale_factor)
+            session.send("Browser.setWindowBounds", {
+                "windowId": window_id,
+                "bounds": {"windowState": "normal", "left": left, "top": top, "width": width, "height": height},
+            })
+        page.bring_to_front()
+        page.wait_for_timeout(300)
+        bounds = session.send("Browser.getWindowBounds", {"windowId": window_id})["bounds"]
+        rect = {key: int(bounds[key]) for key in ("left", "top", "width", "height")}
+        if rect["width"] <= 0 or rect["height"] <= 0:
+            raise RuntimeError("目标浏览器窗口没有有效尺寸")
+        if abs(rect["width"] - width) > 8 or abs(rect["height"] - height) > 8:
+            raise RuntimeError(
+                f"浏览器窗口实际尺寸 {rect['width']}x{rect['height']} 与配置 {width}x{height} 不一致"
+            )
+        if page.evaluate("document.visibilityState") != "visible":
+            raise RuntimeError("目标浏览器窗口不可见")
+        return rect
+    except Exception as exc:
+        raise RuntimeError(f"无法定位目标浏览器窗口：{exc}") from exc
+    finally:
+        try:
+            session.detach()
+        except Exception:
+            logger.debug("关闭窗口定位会话失败", exc_info=True)
 
-    cropped_img = None
-    with Image.open(image_path) as img:
-        rgb = img.convert("RGB")
-        width, height = rgb.size
 
-        def is_black_column(x: int) -> bool:
-            black = sum(1 for y in range(height) if max(rgb.getpixel((x, y))) <= 20)
-            return black / height >= 0.98
+def _rect_inside_screen(rect: dict[str, int], screen: dict[str, int]) -> bool:
+    return (
+        rect["left"] >= screen["left"]
+        and rect["top"] >= screen["top"]
+        and rect["left"] + rect["width"] <= screen["left"] + screen["width"]
+        and rect["top"] + rect["height"] <= screen["top"] + screen["height"]
+    )
 
-        def is_black_row(y: int) -> bool:
-            black = sum(1 for x in range(width) if max(rgb.getpixel((x, y))) <= 20)
-            return black / width >= 0.98
 
-        left = 0
-        while left < min(max_trim, width - 1) and is_black_column(left):
-            left += 1
+def _assert_real_window_viewport(page: Page) -> None:
+    sizes = page.evaluate("() => ({outer: window.outerWidth, inner: window.innerWidth})")
+    outer = int(sizes["outer"])
+    inner = int(sizes["inner"])
+    if outer <= 0 or inner <= 0 or abs(outer - inner) > max(32, round(outer * 0.03)):
+        raise RuntimeError(
+            f"网页视口宽度 {inner}px 与浏览器窗口宽度 {outer}px 不匹配，"
+            "页面可能只显示在窗口的一部分"
+        )
 
-        top = 0
-        while top < min(max_trim, height - 1) and is_black_row(top):
-            top += 1
 
-        if left or top:
-            cropped_img = img.crop((left, top, width, height))
-            cropped_img.load()
+def _active_browser_frame_rect() -> dict[str, int]:
+    """Locate the decorated X11 frame of the foreground Chrome window."""
+    import subprocess
 
-    if cropped_img is not None:
-        cropped_img.save(image_path)
-        logger.info(f"Trimmed mss desktop margin: left={left}, top={top}, file={image_path}")
+    env = {**os.environ, "LC_ALL": "C"}
+    active_info = subprocess.check_output(
+        ["xprop", "-root", "_NET_ACTIVE_WINDOW"], text=True, timeout=5, env=env,
+    )
+    active_match = re.search(r"window id #\s*(0x[0-9a-fA-F]+)", active_info)
+    if active_match is None or int(active_match.group(1), 16) == 0:
+        raise RuntimeError("无法确定前台浏览器窗口")
+    window_id = active_match.group(1)
+    window_class = subprocess.check_output(
+        ["xprop", "-id", window_id, "WM_CLASS"], text=True, timeout=5, env=env,
+    )
+    if not re.search(r"chrome|chromium", window_class, re.IGNORECASE):
+        raise RuntimeError(f"前台窗口不是 Chrome：{window_class.strip()}")
+    info = subprocess.check_output(
+        ["xwininfo", "-frame", "-id", window_id], text=True, timeout=5, env=env,
+    )
+    fields = {
+        "left": "Absolute upper-left X",
+        "top": "Absolute upper-left Y",
+        "width": "Width",
+        "height": "Height",
+    }
+    rect = {}
+    for key, label in fields.items():
+        match = re.search(rf"^\s*{re.escape(label)}:\s*(-?\d+)\s*$", info, re.MULTILINE)
+        if match is None:
+            raise RuntimeError(f"无法读取浏览器窗口外框的 {label}")
+        rect[key] = int(match.group(1))
+    if rect["width"] <= 0 or rect["height"] <= 0:
+        raise RuntimeError("浏览器窗口外框没有有效尺寸")
+    return rect
 
 
 def _take_screenshot(
@@ -928,9 +1487,15 @@ def _take_screenshot(
     is_real_capture: bool,
     expected_width: int | None = None,
     expected_height: int | None = None,
-) -> None:
+    timeout_ms: int = 60_000,
+    *,
+    deadline: float | None = None,
+    window_scale_factor: float = 1.0,
+    query_tracker: _GrafanaQueryTracker | None = None,
+) -> dict[str, Any] | None:
+    deadline = deadline if deadline is not None else time.monotonic() + timeout_ms / 1000
     if is_real_capture:
-        logger.info("真实浏览器窗口截图模式已启用，正在使用 mss 进行系统级屏幕截图...")
+        logger.info("  正在截取浏览器窗口…")
         
         # 1. 验证 DISPLAY 环境变量
         import os
@@ -948,31 +1513,36 @@ def _take_screenshot(
                 "请确保 requirements.txt 中包含了 mss，并在容器内执行了安装。"
             ) from err
             
-        # 3. 执行系统级截屏
+        # 3. CDP 定位浏览器，X11 获取包含标题栏和窗口按钮的完整外框。
         try:
-            # 真实地址栏必须来自 Chromium 窗口本身。为确保渲染就绪并置顶，略微等待 500ms
-            page.wait_for_timeout(500)
+            logical_width, logical_height = _css_viewport_size(
+                int(expected_width or 0), int(expected_height or 0), window_scale_factor,
+            )
+            _browser_window_rect(page, logical_width, logical_height, position=False)
+            rect = _active_browser_frame_rect()
+            if abs(rect["width"] - int(expected_width or 0)) > 8 or abs(rect["height"] - int(expected_height or 0)) > 8:
+                raise RuntimeError(
+                    f"浏览器实际截图尺寸 {rect['width']}x{rect['height']} 与配置 "
+                    f"{expected_width}x{expected_height} 不一致"
+                )
+            content = _wait_for_grafana_panels(
+                page, min(5_000, _remaining_ms(deadline)), query_tracker, settle_ms=0,
+            )
+            _remaining_ms(deadline)
             with mss.mss() as sct:
-                if not sct.monitors or len(sct.monitors) < 2:
-                    raise RuntimeError("系统截图失败：无法获取任何有效的虚拟显示器设备（sct.monitors 为空或不足）")
-                # monitors[0] 是所有监视器的合集，monitors[1] 是第一个显示屏
-                monitor = sct.monitors[1]
-                monitor_width = int(monitor["width"])
-                monitor_height = int(monitor["height"])
-                target_width = int(expected_width or monitor_width)
-                target_height = int(expected_height or monitor_height)
-                if monitor_width < target_width or monitor_height < target_height:
+                if not sct.monitors:
+                    raise RuntimeError("没有可用的虚拟显示器")
+                screens = sct.monitors[1:] or sct.monitors
+                if not any(_rect_inside_screen(rect, screen) for screen in screens):
+                    screen = sct.monitors[0]
                     raise RuntimeError(
-                        f"虚拟屏幕尺寸 {monitor_width}x{monitor_height} 小于截图配置 {target_width}x{target_height}。"
-                        "请设置 XVFB_WIDTH/XVFB_HEIGHT 与截图分辨率一致，并重建或重启容器。"
+                        f"浏览器窗口 {rect['width']}x{rect['height']} 位于 ({rect['left']},{rect['top']})，"
+                        f"超出虚拟屏幕 {screen['width']}x{screen['height']}；请调整 XVFB_WIDTH/XVFB_HEIGHT。"
                     )
-                capture_area = dict(monitor)
-                capture_area["width"] = target_width
-                capture_area["height"] = target_height
-                sct_img = sct.grab(capture_area)
+                sct_img = sct.grab(rect)
                 mss.tools.to_png(sct_img.rgb, sct_img.size, output=str(output_path))
-                _trim_mss_desktop_margin(output_path)
-                logger.info(f"系统级真实窗口截图获取成功并保存至: {output_path}")
+                logger.info(f"  浏览器窗口已截取：{rect['width']}x{rect['height']}")
+            return content
         except Exception as exc:
             raise RuntimeError(
                 f"真实浏览器窗口截图捕获失败：{exc}。\n"
@@ -982,13 +1552,14 @@ def _take_screenshot(
         # 普通 Playwright 截图
         capture_mode = str(item.get("capture_mode") or "viewport")
         selector = str(item.get("css_selector") or "").strip()
-        logger.info(f"开始普通截图操作. 模式: {capture_mode}, 局部选择器: '{selector}'")
+        logger.info(f"  ├─ 画面捕获: 使用 Playwright 截图 (模式: {capture_mode})")
         if capture_mode == "selector" and selector:
             locator = page.locator(selector).first
-            locator.wait_for(state="visible")
-            locator.screenshot(path=str(output_path))
+            locator.wait_for(state="visible", timeout=_remaining_ms(deadline))
+            locator.screenshot(path=str(output_path), timeout=_remaining_ms(deadline))
         else:
-            page.screenshot(path=str(output_path), full_page=(capture_mode == "full_page"))
+            page.screenshot(path=str(output_path), full_page=(capture_mode == "full_page"), timeout=_remaining_ms(deadline))
+        return None
 
 
 def test_auth_profile_login(auth_profile_id: int) -> dict[str, Any]:
@@ -1012,19 +1583,34 @@ def test_auth_profile_login(auth_profile_id: int) -> dict[str, Any]:
     if not username or not password:
         return {"success": False, "message": "用户名或密码为空，请核对凭据配置"}
         
+    logger.info("-" * 68)
+    logger.info(f"🔑 [认证配置测试登录] 配置: '{auth_profile.get('name')}' (ID: {auth_profile_id})")
+    logger.info(f"├─ 登录地址: {login_url}")
+    logger.info(f"├─ 用户名: {username}")
+
     timeout_ms = 30000
     try:
         with sync_playwright() as p:
-            logger.info(f"启动 chromium 测试浏览器登录: {login_url}")
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
+            launch_kwargs = {
+                "headless": True,
+                "channel": "chrome",
+                "ignore_default_args": ["--enable-automation", "--disable-sync"],
+                "args": [
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--force-device-scale-factor=1",
-                    "--high-dpi-support=1"
+                    "--high-dpi-support=1",
+                    "--lang=zh-CN",
+                    "--disable-translate",
+                    "--disable-features=Translate,TranslateUI",
+                    "--disable-save-password-bubble",
                 ]
-            )
+            }
+            try:
+                browser = p.chromium.launch(**launch_kwargs)
+            except Exception:
+                launch_kwargs.pop("channel", None)
+                browser = p.chromium.launch(**launch_kwargs)
             context = browser.new_context(
                 ignore_https_errors=True,
                 locale="zh-CN",
@@ -1035,14 +1621,14 @@ def test_auth_profile_login(auth_profile_id: int) -> dict[str, Any]:
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
             
-            page.on("console", lambda msg: logger.warning(f"测试登录浏览器 Console: [{msg.type}] {msg.text}"))
-            page.on("requestfailed", lambda req: logger.warning(f"测试登录浏览器 Request 失败: {req.url} - ({req.failure.error_text if req.failure else 'unknown'})"))
+            page.on("console", lambda msg: logger.warning(f"  ├─ 浏览器 Console: [{msg.type}] {msg.text}"))
+            page.on("requestfailed", lambda req: logger.warning(f"  ├─ 网络 Request 失败: {req.url} - ({req.failure.error_text if req.failure else 'unknown'})"))
             
             try:
                 page.goto(login_url, wait_until="domcontentloaded", timeout=timeout_ms)
                 _assert_login_page_ready(page, login_url)
                 _fill_login_form(page, auth_profile, username, password)
-                logger.info("已点击提交，等待页面状态响应...")
+                logger.info("├─ 表单提交成功，等待授权成功标识...")
                 
                 success_selector = str(auth_profile.get("success_selector") or "").strip()
                 _wait_for_login_success(page, success_selector, timeout_ms)
@@ -1051,17 +1637,20 @@ def test_auth_profile_login(auth_profile_id: int) -> dict[str, Any]:
                     settings.log_dir.mkdir(parents=True, exist_ok=True)
                     error_path = settings.log_dir / "test_login_error.png"
                     page.screenshot(path=str(error_path))
-                    logger.info(f"验证登录凭证异常，已保存错误截图至: {error_path}")
+                    logger.info(f"├─ 认证异常，已保存排查截图至: {error_path.name}")
                 except Exception as screenshot_exc:
-                    logger.error(f"保存测试登录错误截图失败: {screenshot_exc}", exc_info=True)
+                    logger.error(f"├─ 保存错误排查截图失败: {screenshot_exc}")
                 raise inner_exc
                 
             context.close()
             browser.close()
+        logger.info("└─ ✔ 认证登录测试成功！页面选择器匹配正常")
+        logger.info("-" * 68)
         return {"success": True, "message": "测试登录成功！凭据配置及网页选择器匹配正常！"}
     except Exception as exc:
         err_msg = f"{type(exc).__name__}: {exc}"
-        logger.error(f"验证登录凭证异常: {err_msg}", exc_info=True)
+        logger.error(f"└─ ✖ 认证登录测试失败: {err_msg}")
+        logger.info("-" * 68)
         return {"success": False, "message": f"测试登录失败: {err_msg}"}
 
 

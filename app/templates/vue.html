@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="巡检任务、截图与报告管理">
+  <meta name="theme-color" content="#f6f8fa">
+  <title>自动化运维平台</title>
+  <link rel="icon" href="{{ url_for_frontend('static/favicon.ico') }}">
+  <link rel="stylesheet" href="{{ url_for_frontend('static/vue/' + vue_css) }}">
+  <script>
+    window.APP_CONFIG = {
+      apiBase: {{ api_prefix | tojson }},
+      frontendBase: {{ frontend_base_path | tojson }},
+      artifactBase: {{ url_for_frontend('artifact') | tojson }}
+    };
+  </script>
+  <script type="module" src="{{ url_for_frontend('static/vue/' + vue_js) }}"></script>
+</head>
+<body><div id="app"></div></body>
+</html>

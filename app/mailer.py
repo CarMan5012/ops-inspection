@@ -85,7 +85,7 @@ def send_report_mail(mail_profile: dict[str, Any], job: dict[str, Any], report_p
         "date": today_text(),
         "job": str(job.get("name") or ""),
         "environment": str(job.get("environment") or ""),
-        "time_range": str(job.get("time_range_label") or ""),
+        "time_range": str(job.get("time_range_label") or today_text()),
     }
 
     message = EmailMessage()
@@ -97,7 +97,8 @@ def send_report_mail(mail_profile: dict[str, Any], job: dict[str, Any], report_p
         
     body_text = render_template(str(mail_profile.get("body_template") or ""), context)
     if error_msg:
-        body_text += f"\n\n[系统提示] 该巡检任务执行期间发生异常，未生成巡检报告。错误详情如下：\n{error_msg}"
+        report_note = "报告已附在邮件中。" if report_path and Path(report_path).is_file() else "本次没有可附加的报告。"
+        body_text += f"\n\n[运行提醒] {report_note}\n{error_msg}"
     message.set_content(body_text)
 
     if report_path:
@@ -165,4 +166,3 @@ def send_periodic_report_mail(
     all_recipients = recipients + cc
     _execute_send_mail(mail_profile, message, password, all_recipients)
     return "sent"
-
