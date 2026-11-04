@@ -13,7 +13,7 @@ const storage = reactive<Row>({})
 const security = reactive<Row>({})
 const swagger = ref(false)
 const busy = ref(false)
-const pendingAction = ref<'storage' | 'security' | 'cleanup' | null>(null)
+const pendingAction = ref<'storage' | 'cleanup' | null>(null)
 const refreshing = ref(false)
 const cleanupMonth = ref('')
 const cleanupScopes = ref<string[]>([])
@@ -25,19 +25,11 @@ const cleanupMonthMenuRef = ref<HTMLElement | null>(null)
 const cleanupMonthYear = ref(new Date().getFullYear())
 const cleanupPreview = ref<Row | null>(null)
 const cleanupPreviewBusy = ref(false)
-const cleanupScopeOptions = [
-  { value: 'inspection', label: '巡检数据', detail: '截图、Word 报告和运行记录' },
-  { value: 'periodic', label: '周期报告', detail: '压缩包和生成记录' },
-  { value: 'logs', label: '日志文件', detail: '系统运行日志' },
-]
-const cleanupPeriodOptions = [
-  { value: '7', label: '7 天前' },
-  { value: '30', label: '30 天前' },
-  { value: '90', label: '90 天前' },
-  { value: '180', label: '180 天前' },
-  { value: '365', label: '1 年前' },
-  { value: 'month', label: '指定月份' },
-]
+const cleanupScopeOptions = ref<Row[]>([])
+const cleanupPeriodOptions = ref<Row[]>([])
+const cleanupScheduleModes = ref<Row[]>([])
+const configLoading = ref(true)
+const configError = ref(false)
 const previousMonthDate = new Date()
 previousMonthDate.setDate(1)
 previousMonthDate.setMonth(previousMonthDate.getMonth() - 1)
@@ -52,7 +44,10 @@ const isViewOnlyMfa = ref(false)
 const qrDataUrl = ref('')
 const mfaSecretText = ref('')
 const modalVerifyCode = ref('')
+const modalCurrentCode = ref('')
 const modalBusy = ref(false)
+const mfaDisableOpen = ref(false)
+const mfaDisableCode = ref('')
 
 function bytes(value: unknown) {
   const size = Number(value || 0)
@@ -141,7 +136,19 @@ function closeCleanupMenu(event: PointerEvent) {
 }
 
 function cleanupPeriodLabel(): string {
-  return cleanupPeriodOptions.find((item) => item.value === cleanupPeriod.value)?.label || '选择时间范围'
+  return cleanupPeriodOptions.value.find((item) => item.value === cleanupPeriod.value)?.label || '选择时间范围'
+}
+
+async function loadUiConfig() {
+  configLoading.value = true
+  const config = await attempt(() => api<Row>('/ui-config'))
+  configError.value = !Array.isArray(config?.cleanup_scopes) || !Array.isArray(config?.cleanup_periods) || !Array.isArray(config?.cleanup_schedule_modes)
+  if (!configError.value) {
+    cleanupScopeOptions.value = config!.cleanup_scopes
+    cleanupPeriodOptions.value = config!.cleanup_periods
+    cleanupScheduleModes.value = config!.cleanup_schedule_modes
+  }
+  configLoading.value = false
 }
 
 async function load(): Promise<boolean> {
@@ -179,7 +186,7 @@ async function load(): Promise<boolean> {
 }
 
 async function saveStorage() {
-  if (busy.value || refreshing.value) return
+  if (busy.value || refreshing.value || configLoading.value || configError.value) return
   pendingAction.value = 'storage'
   busy.value = true
   try {
@@ -204,19 +211,6 @@ async function saveStorage() {
   }
 }
 
-async function saveSecurity() {
-  if (busy.value) return
-  pendingAction.value = 'security'
-  busy.value = true
-  const payload = {
-    session_ttl_minutes: security.session_ttl_minutes,
-  }
-  const result = await attempt(() => api('/security-settings', 'PUT', payload), '安全设置已保存')
-  busy.value = false
-  pendingAction.value = null
-  if (result) load()
-}
-
 async function cleanup() {
   if (busy.value) return
   const filters = cleanupFilters()
@@ -227,7 +221,7 @@ async function cleanup() {
   }
   const month = cleanupPeriod.value === 'month' ? cleanupMonth.value : undefined
   const scopes = [...cleanupScopes.value]
-  const names = cleanupScopeOptions.filter((item) => scopes.includes(item.value)).map((item) => `${item.label}（${item.detail}）`).join('、')
+  const names = cleanupScopeOptions.value.filter((item) => scopes.includes(item.value)).map((item) => `${item.label}（${item.detail}）`).join('、')
   const period = month ? `${month} 的` : `${cleanupPeriodLabel()}的`
   busy.value = true
   try {
@@ -287,21 +281,25 @@ async function renderQr(url: string) {
 
 // 生成 / 刷新密钥并渲染二维码
 async function refreshMfaSecret(showNotice = false) {
+  if (modalBusy.value) return
   modalBusy.value = true
   qrDataUrl.value = ''
+  mfaSecretText.value = ''
+  modalVerifyCode.value = ''
   const result = await attempt(() => api<Row>('/security-settings/mfa-secret', 'POST', {}))
-  modalBusy.value = false
   if (result) {
     mfaSecretText.value = String(result.mfa_secret || result.secret || '')
     await renderQr(String(result.mfa_otpauth_url || result.qr_uri || ''))
     if (showNotice) notify('已刷新两步验证密钥与二维码')
   }
+  modalBusy.value = false
 }
 
 // 打开绑定弹窗
 async function openBindModal() {
   isViewOnlyMfa.value = false
   modalVerifyCode.value = ''
+  modalCurrentCode.value = ''
   mfaModalOpen.value = true
   await refreshMfaSecret(false)
 }
@@ -310,36 +308,52 @@ async function openBindModal() {
 async function openViewQrModal() {
   isViewOnlyMfa.value = true
   modalVerifyCode.value = ''
+  modalCurrentCode.value = ''
   qrDataUrl.value = ''
   mfaSecretText.value = ''
   mfaModalOpen.value = true
+}
+
+async function revealCurrentMfaQr() {
+  if (modalBusy.value) return
+  const code = modalCurrentCode.value.trim()
+  if (!/^\d{6}$/.test(code)) {
+    notify('请输入当前设备的 6 位动态验证码', 'error')
+    return
+  }
   modalBusy.value = true
-  const result = await attempt(() => api<Row>('/security-settings/mfa-qr', 'GET'))
-  modalBusy.value = false
+  const result = await attempt(() => api<Row>('/security-settings/mfa-qr', 'POST', { mfa_current_code: code }))
   if (result) {
     mfaSecretText.value = String(result.mfa_secret || '')
     await renderQr(String(result.mfa_otpauth_url || result.qr_uri || ''))
   }
+  modalBusy.value = false
 }
 
 // 关闭弹窗（未确认时绝不修改任何启用状态）
 function closeMfaModal() {
   mfaModalOpen.value = false
   modalVerifyCode.value = ''
+  modalCurrentCode.value = ''
   qrDataUrl.value = ''
   mfaSecretText.value = ''
 }
 
 // 在弹窗中提交 6 位验证码以完成绑定并开启
 async function submitMfaBind() {
+  if (modalBusy.value) return
   const code = modalVerifyCode.value.trim()
-  if (code.length !== 6) {
+  if (!/^\d{6}$/.test(code)) {
     notify('请输入完整的 6 位动态验证码', 'error')
+    return
+  }
+  if (security.mfa_enabled && !/^\d{6}$/.test(modalCurrentCode.value.trim())) {
+    notify('请输入当前设备的 6 位动态验证码', 'error')
     return
   }
   modalBusy.value = true
   const result = await attempt(
-    () => api('/security-settings', 'PUT', { mfa_enabled: true, mfa_code: code }),
+    () => api('/security-settings', 'PUT', { mfa_enabled: true, mfa_code: code, mfa_current_code: modalCurrentCode.value.trim() }),
     '两步验证（MFA）已成功开启并绑定！'
   )
   modalBusy.value = false
@@ -351,26 +365,34 @@ async function submitMfaBind() {
   }
 }
 
+async function submitMfaDisable() {
+  if (busy.value) return
+  const code = mfaDisableCode.value.trim()
+  if (!/^\d{6}$/.test(code)) {
+    notify('请输入当前设备的 6 位动态验证码', 'error')
+    return
+  }
+  busy.value = true
+  try {
+    const result = await attempt(() => api('/security-settings', 'PUT', { mfa_enabled: false, mfa_current_code: code }), '两步验证（MFA）已关闭')
+    if (result) {
+      security.mfa_enabled = false
+      mfaDisableOpen.value = false
+      mfaDisableCode.value = ''
+      await load()
+    }
+  } finally {
+    busy.value = false
+  }
+}
+
 // 点击开关处理
 async function onMfaSwitchToggle(e: Event) {
   const target = e.target as HTMLInputElement
   if (security.mfa_enabled) {
-    // 当前已开启，用户想要关闭 -> 弹出危险确认
     target.checked = true
-    const ok = await confirmModal({
-      title: '关闭两步验证（MFA）',
-      message: '关闭两步验证后，登录将仅依赖密码，账号安全性将降低。确定要关闭两步验证吗？',
-      confirmText: '关闭',
-      danger: true,
-    })
-    if (!ok) return
-    busy.value = true
-    const result = await attempt(() => api('/security-settings', 'PUT', { mfa_enabled: false }), '两步验证（MFA）已关闭')
-    busy.value = false
-    if (result) {
-      security.mfa_enabled = false
-      load()
-    }
+    mfaDisableCode.value = ''
+    mfaDisableOpen.value = true
   } else {
     // 当前未开启，用户点击想要开启 -> 恢复未勾选，弹出专属绑定扫码弹窗
     target.checked = false
@@ -399,7 +421,7 @@ function scrollToSection(id: string) {
 
 onMounted(async () => {
   document.addEventListener('pointerdown', closeCleanupMenu)
-  await load()
+  await Promise.all([loadUiConfig(), load()])
   const section = route.query.section
   if (section === 'storage' || section === 'security') {
     scrollToSection(`${section}-section`)
@@ -415,8 +437,8 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
     <form class="form-section settings-form auto-cleanup-form" @submit.prevent="saveStorage">
       <div class="form-section-head"><div><h2>自动清理</h2></div></div>
       <label class="switch-row auto-cleanup-switch"><input v-model="storage.enabled" type="checkbox" /><strong>启用自动清理</strong></label>
-      <fieldset class="form-grid auto-cleanup-fields" :disabled="!storage.enabled">
-        <label class="field"><span>清理频率</span><select v-model="storage.cleanup_schedule_mode"><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option></select></label>
+      <fieldset class="form-grid auto-cleanup-fields" :disabled="!storage.enabled || configLoading || configError">
+        <label class="field"><span>清理频率</span><select v-model="storage.cleanup_schedule_mode"><option v-for="option in cleanupScheduleModes" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
         <label class="field"><span>执行时间</span><input v-model="cleanupTime" type="time" required /></label>
         <label v-if="storage.cleanup_schedule_mode === 'weekly'" class="field"><span>每周几</span><select v-model="cleanupWeekday"><option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="7">周日</option></select></label>
         <label v-if="storage.cleanup_schedule_mode === 'monthly'" class="field"><span>每月几号</span><input v-model.number="cleanupDay" type="number" min="1" max="31" required /></label>
@@ -426,11 +448,13 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
         <label class="field"><span>日志保留（天）</span><input v-model.number="storage.log_retention_days" type="number" min="1" /></label>
         <label class="field"><span>最近数据保护（天）</span><input v-model.number="storage.protect_recent_days" type="number" min="1" /></label>
       </fieldset>
-      <ButtonGroup class="editor-footer"><ActionButton type="submit" :disabled="busy" variant="primary" :loading="pendingAction === 'storage'">保存配置</ActionButton></ButtonGroup>
+      <ButtonGroup class="editor-footer"><ActionButton type="submit" :disabled="busy || configLoading || configError" variant="primary" :loading="pendingAction === 'storage'">保存配置</ActionButton></ButtonGroup>
     </form>
     <div class="form-section settings-form manual-cleanup-section">
       <div class="form-section-head"><div><h2>手动清理</h2><p>选择内容和时间，确认后删除。</p></div></div>
-      <div class="manual-cleanup-layout">
+      <div v-if="configLoading" class="loading-panel"><div class="skeleton"></div></div>
+      <div v-else-if="configError" class="empty-state"><h3>清理选项加载失败</h3><p>请检查服务后重试。</p><ActionButton type="button" @click="loadUiConfig">重试</ActionButton></div>
+      <div v-else class="manual-cleanup-layout">
         <div class="manual-cleanup-group">
           <h3>清理内容</h3>
           <div class="manual-cleanup-scopes">
@@ -493,14 +517,9 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
   </section>
   <section id="security-section" class="settings-section">
     <div class="section-heading"><div><h2>安全设置</h2></div></div>
-    <form class="form-section settings-form" @submit.prevent="saveSecurity">
+    <div class="form-section settings-form">
       <div class="form-section-head"><div><h2>账户安全</h2></div></div>
       <div class="form-grid">
-        <label class="field">
-          <span>登录有效期（分钟）</span>
-          <input v-model.number="security.session_ttl_minutes" type="number" min="5" max="10080" />
-        </label>
-
         <!-- 两步验证独立交互行 -->
         <div class="mfa-switch-row field-full">
           <label class="switch-row">
@@ -526,10 +545,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
         </label>
       </div>
 
-      <ButtonGroup class="editor-footer">
-        <ActionButton type="submit" :disabled="busy" variant="primary" :loading="pendingAction === 'security'">保存配置</ActionButton>
-      </ButtonGroup>
-    </form>
+    </div>
   </section>
 
   <!-- MFA 绑定与二维码模态弹窗 -->
@@ -552,7 +568,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
           </p>
 
           <!-- 二维码展示区（支持点击刷新） -->
-          <div class="mfa-qr-center-box">
+          <div v-if="!isViewOnlyMfa || qrDataUrl" class="mfa-qr-center-box">
             <div
               class="mfa-qr-interactive"
               :class="{ 'clickable': !isViewOnlyMfa }"
@@ -575,7 +591,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
           </div>
 
           <!-- 手动添加密钥 -->
-          <div class="mfa-dialog-manual-row">
+          <div v-if="mfaSecretText" class="mfa-dialog-manual-row">
             <span>若无法扫码，可手动添加密钥：</span>
             <div class="mfa-secret-code-pill">
               <code>{{ mfaSecretText }}</code>
@@ -587,6 +603,10 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
 
           <!-- 动态验证码输入（仅在绑定模式下显示） -->
           <div v-if="!isViewOnlyMfa" class="mfa-dialog-verify-section">
+            <label v-if="security.mfa_enabled" class="field">
+              <span>当前设备验证码 <b>*</b></span>
+              <input v-model="modalCurrentCode" class="mfa-dialog-code-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+            </label>
             <label class="field">
               <span>动态验证码 <b>*</b></span>
               <input
@@ -600,6 +620,12 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
               />
             </label>
           </div>
+          <div v-else-if="!qrDataUrl" class="mfa-dialog-verify-section">
+            <label class="field">
+              <span>当前设备验证码 <b>*</b></span>
+              <input v-model="modalCurrentCode" class="mfa-dialog-code-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" @keyup.enter="revealCurrentMfaQr" />
+            </label>
+          </div>
         </div>
 
         <ButtonGroup class="mfa-dialog-footer">
@@ -607,15 +633,40 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
             {{ isViewOnlyMfa ? '关闭' : '取消' }}
           </ActionButton>
           <ActionButton
+            v-if="isViewOnlyMfa && !qrDataUrl"
+            type="button"
+            :disabled="modalBusy || !/^\d{6}$/.test(modalCurrentCode.trim())"
+            @click="revealCurrentMfaQr"
+            variant="primary">查看二维码</ActionButton>
+          <ActionButton
             v-if="!isViewOnlyMfa"
 
             type="button"
-            :disabled="modalBusy || modalVerifyCode.trim().length !== 6"
+            :disabled="modalBusy || !/^\d{6}$/.test(modalVerifyCode.trim()) || (security.mfa_enabled && !/^\d{6}$/.test(modalCurrentCode.trim()))"
             @click="submitMfaBind"
            variant="primary">
 
             确认绑定
           </ActionButton>
+        </ButtonGroup>
+      </div>
+    </div>
+  </Transition>
+  <Transition name="modal-fade">
+    <div v-if="mfaDisableOpen" class="modal-backdrop" @click="mfaDisableOpen = false">
+      <div class="mfa-dialog-box" role="dialog" aria-modal="true" @click.stop>
+        <div class="mfa-dialog-header">
+          <div class="mfa-dialog-title"><ShieldCheck :size="20" class="mfa-title-icon" /><h3>关闭两步验证（MFA）</h3></div>
+          <IconButton class="icon-button" type="button" aria-label="关闭" @click="mfaDisableOpen = false" label="关闭"><X :size="18" /></IconButton>
+        </div>
+        <p class="mfa-dialog-intro">关闭后登录将只验证密码。请输入当前设备的动态验证码以确认。</p>
+        <label class="field">
+          <span>当前设备验证码 <b>*</b></span>
+          <input v-model="mfaDisableCode" class="mfa-dialog-code-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" @keyup.enter="submitMfaDisable" />
+        </label>
+        <ButtonGroup class="mfa-dialog-footer">
+          <ActionButton type="button" variant="secondary" @click="mfaDisableOpen = false">取消</ActionButton>
+          <ActionButton type="button" variant="danger" :disabled="busy || !/^\d{6}$/.test(mfaDisableCode.trim())" @click="submitMfaDisable">确认关闭</ActionButton>
         </ButtonGroup>
       </div>
     </div>

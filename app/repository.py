@@ -8,27 +8,20 @@ from app.watermark import WATERMARK_DEFAULTS
 from app.utils import normalize_secret_for_storage
 
 
-def dashboard_data() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+def dashboard_data() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Read the dashboard snapshot with one SQLCipher connection."""
     with connect() as conn:
-        jobs = conn.execute("""
-            SELECT j.*, m.name AS mail_profile_name FROM report_jobs j
-            LEFT JOIN mail_profiles m ON m.id = j.mail_profile_id ORDER BY j.id DESC
-        """).fetchall()
+        jobs = conn.execute("SELECT * FROM report_jobs ORDER BY id DESC").fetchall()
         runs = conn.execute("SELECT * FROM run_records ORDER BY id DESC LIMIT 12").fetchall()
         auth_profiles = conn.execute("SELECT * FROM auth_profiles ORDER BY id ASC").fetchall()
-        mail_profiles = conn.execute("SELECT * FROM mail_profiles ORDER BY id ASC").fetchall()
-    return tuple([dict(row) for row in rows] for rows in (jobs, runs, auth_profiles, mail_profiles))
+    return tuple([dict(row) for row in rows] for rows in (jobs, runs, auth_profiles))
 
 
 def list_jobs() -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT j.*, m.name AS mail_profile_name
-            FROM report_jobs j
-            LEFT JOIN mail_profiles m ON m.id = j.mail_profile_id
-            ORDER BY j.id DESC
+            SELECT * FROM report_jobs ORDER BY id DESC
             """
         ).fetchall()
     return [dict(row) for row in rows]
@@ -38,10 +31,7 @@ def get_job(job_id: int) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute(
             """
-            SELECT j.*, m.name AS mail_profile_name
-            FROM report_jobs j
-            LEFT JOIN mail_profiles m ON m.id = j.mail_profile_id
-            WHERE j.id = ?
+            SELECT * FROM report_jobs WHERE id = ?
             """,
             (job_id,),
         ).fetchone()
@@ -103,7 +93,21 @@ def save_job(data: dict[str, Any], job_id: int | None = None) -> int:
 
 
 def delete_job(job_id: int) -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.settings import settings
+
+    finished_at = datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds")
     with connect() as conn:
+        # A queued item test may not hold the job lease yet. Finish it before
+        # deleting the job, which changes run_records.job_id to NULL.
+        conn.execute(
+            """UPDATE run_records
+               SET status = 'interrupted', finished_at = ?,
+                   error_summary = '所属任务已删除，排队中的巡检未执行。'
+               WHERE job_id = ? AND status = 'queued'""",
+            (finished_at, job_id),
+        )
         conn.execute("DELETE FROM report_jobs WHERE id = ?", (job_id,))
 
 
@@ -164,6 +168,7 @@ _SCREENSHOT_ITEM_FIELDS = (
         "watermark_gap_x",
         "watermark_gap_y",
         "watermark_angle",
+        "watermark_alignment",
         "taskbar_enabled",
         "taskbar_template_key",
 )
@@ -333,79 +338,45 @@ def delete_dingtalk_profile(profile_id: int) -> None:
         conn.execute("DELETE FROM dingtalk_profiles WHERE id = ?", (profile_id,))
 
 
-def list_mail_profiles() -> list[dict[str, Any]]:
-    with connect() as conn:
-        rows = conn.execute("SELECT * FROM mail_profiles ORDER BY id ASC").fetchall()
-    return [dict(row) for row in rows]
-
-
-def get_mail_profile(mail_id: int | None) -> dict[str, Any] | None:
-    if not mail_id:
-        return None
-    with connect() as conn:
-        row = conn.execute("SELECT * FROM mail_profiles WHERE id = ?", (mail_id,)).fetchone()
-    return dict(row) if row is not None else None
-
-
-def save_mail_profile(data: dict[str, Any], mail_id: int | None = None) -> int:
-    data = dict(data)
-    if data.get("password"):
-        data["password_secret"] = normalize_secret_for_storage(str(data.get("password") or ""))
-    elif data.get("password_secret"):
-        data["password_secret"] = normalize_secret_for_storage(str(data.get("password_secret") or ""))
-    data["password"] = ""
-
-    fields = (
-        "name",
-        "smtp_host",
-        "smtp_port",
-        "use_ssl",
-        "use_starttls",
-        "username",
-        "password",
-        "password_source",
-        "password_secret",
-        "password_env",
-        "sender",
-        "recipients",
-        "cc",
-        "subject_template",
-        "body_template",
-    )
-    values = [data.get(field) for field in fields]
-    with connect() as conn:
-        if mail_id:
-            assignments = ", ".join(f"{field} = ?" for field in fields)
-            conn.execute(
-                f"UPDATE mail_profiles SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (*values, mail_id),
-            )
-            return mail_id
-        placeholders = ", ".join("?" for _ in fields)
-        cur = conn.execute(
-            f"INSERT INTO mail_profiles ({', '.join(fields)}) VALUES ({placeholders})",
-            values,
-        )
-        return int(cur.lastrowid)
-
-
-def delete_mail_profile(mail_id: int) -> None:
-    with connect() as conn:
-        conn.execute("DELETE FROM mail_profiles WHERE id = ?", (mail_id,))
-
-
-def create_run(job_id: int | None, job_name: str, schedule_slot: str = "") -> int:
+def create_run(job_id: int | None, job_name: str, schedule_slot: str = "", *, status: str = "running") -> int:
     from datetime import datetime
     from zoneinfo import ZoneInfo
     from app.settings import settings
     local_tz = ZoneInfo(settings.default_timezone)
     now_str = datetime.now(local_tz).isoformat(timespec="seconds")
+    if status not in {"queued", "running"}:
+        raise ValueError("运行记录初始状态无效")
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO run_records (job_id, job_name, started_at, schedule_slot) VALUES (?, ?, ?, ?)",
-            (job_id, job_name, now_str, schedule_slot),
+            "INSERT INTO run_records (job_id, job_name, started_at, schedule_slot, status) VALUES (?, ?, ?, ?, ?)",
+            (job_id, job_name, now_str, schedule_slot, status),
         )
         return int(cur.lastrowid)
+
+
+def create_queued_test_run(job_id: int, item_id: int, item_name: str) -> int | None:
+    """Queue one active test per screenshot item, including concurrent requests."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.settings import settings
+
+    slot = f"test-item-{item_id}"
+    started_at = datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT id FROM run_records WHERE job_id = ? AND schedule_slot = ? "
+            "AND status IN ('queued', 'running') LIMIT 1",
+            (job_id, slot),
+        ).fetchone()
+        if existing:
+            return None
+        cursor = conn.execute(
+            "INSERT INTO run_records (job_id, job_name, started_at, schedule_slot, status) "
+            "VALUES (?, ?, ?, ?, 'queued')",
+            (job_id, f"测试截图 - {item_name}", started_at, slot),
+        )
+        return int(cursor.lastrowid)
 
 
 def update_run(run_id: int, **fields: Any) -> None:
@@ -415,6 +386,54 @@ def update_run(run_id: int, **fields: Any) -> None:
     values = list(fields.values())
     with connect() as conn:
         conn.execute(f"UPDATE run_records SET {assignments} WHERE id = ?", (*values, run_id))
+
+
+def start_queued_run(run_id: int) -> bool:
+    """Claim a queued record without reviving one already recovered as interrupted."""
+    with connect() as conn:
+        cursor = conn.execute(
+            "UPDATE run_records SET status = 'running' WHERE id = ? AND status = 'queued'",
+            (run_id,),
+        )
+        return cursor.rowcount > 0
+
+
+def skip_queued_run(run_id: int, reason: str) -> bool:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.settings import settings
+
+    finished_at = datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds")
+    with connect() as conn:
+        cursor = conn.execute(
+            "UPDATE run_records SET status = 'skipped', error_summary = ?, finished_at = ? "
+            "WHERE id = ? AND status = 'queued'",
+            (reason, finished_at, run_id),
+        )
+        return cursor.rowcount > 0
+
+
+def finish_active_run(run_id: int, status: str, error_summary: str) -> bool:
+    """Atomically finish a queued/running record without replacing a result already saved."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.settings import settings
+
+    if status not in {"failed", "interrupted"}:
+        raise ValueError("运行记录结束状态无效")
+    finished_at = datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds")
+    with connect() as conn:
+        cursor = conn.execute(
+            """UPDATE run_records
+               SET status = ?, finished_at = ?,
+                   error_summary = CASE
+                       WHEN TRIM(COALESCE(error_summary, '')) = '' THEN ?
+                       ELSE error_summary || CHAR(10) || ?
+                   END
+               WHERE id = ? AND status IN ('queued', 'running')""",
+            (status, finished_at, error_summary, error_summary, run_id),
+        )
+        return cursor.rowcount > 0
 
 
 def add_screenshot_result(data: dict[str, Any]) -> int:

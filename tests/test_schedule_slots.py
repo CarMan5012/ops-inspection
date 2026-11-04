@@ -55,7 +55,7 @@ def test_monthly_ignores_paused_legacy_expression(monkeypatch):
     assert periodic.check_today_jobs_completed(today) == (True, [])
 
 
-def test_success_in_same_hour_does_not_skip_other_slot(monkeypatch):
+def test_success_in_same_hour_does_not_skip_other_slot(monkeypatch, tmp_path):
     _periodic_reporter()
     from app import repository, runner
 
@@ -67,6 +67,7 @@ def test_success_in_same_hour_does_not_skip_other_slot(monkeypatch):
         (today + "T09:05:00",),
     )
     monkeypatch.setattr(repository, "connect", lambda: conn)
+    monkeypatch.setattr(runner.settings, "data_dir", tmp_path)
     monkeypatch.setattr(runner, "get_job", lambda _id: {
         "id": 1, "name": "inspection", "schedule_mode": "simple", "cron_expression": "5 9 * * *",
     })
@@ -74,10 +75,16 @@ def test_success_in_same_hour_does_not_skip_other_slot(monkeypatch):
     class NewRunStarted(Exception):
         pass
 
+    updates = {}
+    monkeypatch.setattr(runner, "create_run", lambda *_, **kwargs: 101)
+    monkeypatch.setattr(runner, "update_run", lambda _id, **fields: updates.update(fields))
+    monkeypatch.setattr(runner, "skip_queued_run", lambda _id, reason: updates.update(status="skipped", finished_at="2026-10-28T10:00:00+08:00") or True)
+    assert runner.run_job(1, schedule_type="morning") == 0
+    assert updates["status"] == "skipped" and updates["finished_at"]
+
     def create_run(*_args):
         raise NewRunStarted
 
     monkeypatch.setattr(runner, "create_run", create_run)
-    assert runner.run_job(1, schedule_type="morning") == 0
     with pytest.raises(NewRunStarted):
-        runner.run_job(1, schedule_type="afternoon")
+        runner._execute_job(1, schedule_type="afternoon")

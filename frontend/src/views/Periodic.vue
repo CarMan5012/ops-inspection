@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { FileArchive, Download, Trash2 } from '../icons'
 import RefreshButton from '../components/RefreshButton.vue'
-import { api, dateTime, statusText, type Row } from '../api'
+import { api, dateTime, statusText, utcDateTime, type Row } from '../api'
 import { attempt, confirmModal } from '../ui'
 
 const settings = ref<Row[]>([])
@@ -99,7 +99,7 @@ onUnmounted(() => {
           <tr v-for="run in runs" :key="run.id">
             <td><span class="id-badge">#{{ run.id }}</span></td>
             <td class="table-primary">{{ run.report_type === 'weekly' ? '巡检周报' : '巡检月报' }}</td>
-            <td>{{ dateTime(run.started_at || run.created_at) }}</td>
+            <td>{{ utcDateTime(run.started_at || run.created_at) }}</td>
             <td class="periodic-range">{{ run.period_start?.slice(0, 10) }} ~ {{ run.period_end?.slice(0, 10) }}</td>
             <td class="align-center"><span class="status-chip" :class="`status-${run.status}`"><span></span>{{ statusText(run.status) }}</span></td>
             <td class="align-right font-num">{{ run.size_str || '—' }}</td>

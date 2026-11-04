@@ -14,24 +14,21 @@ const loadFailed = ref(false)
 const saving = ref(false)
 const legacySchedule = ref(false)
 const legacyConfirmed = ref(false)
-const mailProfiles = ref<Row[]>([])
 const dingtalkProfiles = ref<Row[]>([])
 const form = reactive<Row>({
   name: '', enabled: true, schedule_mode: 'calendar', cron_expression: '', day_of_week: '1',
-  times: [{ ampm: 'am', hour: 9, minute: 0 }], enable_email: false, mail_profile_id: '',
-  recipients_override: '', dingtalk_enabled: false, dingtalk_profile_id: '', include_docx: true,
+  times: [{ ampm: 'am', hour: 9, minute: 0 }],
+  dingtalk_enabled: false, dingtalk_profile_id: '', include_docx: true,
   include_screenshots: false, send_empty_report: false, wait_for_daily_jobs: false,
   retry_until_time: '23:50', retry_interval_minutes: 10, send_on_timeout: true,
 })
 const bool = (value: unknown) => value === true || value === 1 || value === '1'
 
 onMounted(async () => {
-  const [reportData, mailData, botData] = await Promise.all([
+  const [reportData, botData] = await Promise.all([
     attempt(() => api<Row>('/periodic-reports')),
-    attempt(() => api<Row>('/mail-profiles')),
     attempt(() => api<Row>('/dingtalk-profiles')),
   ])
-  mailProfiles.value = reportData?.mail_profiles?.length ? reportData.mail_profiles : (mailData?.profiles || [])
   dingtalkProfiles.value = reportData?.dingtalk_profiles?.length ? reportData.dingtalk_profiles : (botData?.profiles || [])
   const setting = (reportData?.settings || []).find((row: Row) => row.report_type === type.value)
   if (!setting) {
@@ -44,7 +41,7 @@ onMounted(async () => {
     legacySchedule.value = setting.schedule_mode === 'cron'
     form.schedule_mode = 'calendar'
     form.dingtalk_profile_id = setting.dingtalk_profile_id || ''
-    for (const key of ['enabled', 'enable_email', 'dingtalk_enabled', 'include_docx', 'include_screenshots', 'send_empty_report', 'wait_for_daily_jobs', 'send_on_timeout']) form[key] = bool(form[key])
+    for (const key of ['enabled', 'dingtalk_enabled', 'include_docx', 'include_screenshots', 'send_empty_report', 'wait_for_daily_jobs', 'send_on_timeout']) form[key] = bool(form[key])
     try {
       const config = JSON.parse(setting.schedule_config || '{}')
       form.day_of_week = String(config.day_of_week || '1')
@@ -61,7 +58,9 @@ async function save() {
   saving.value = true
   const result = await attempt(() => api(`/periodic-reports/${type.value}`, 'PUT', {
     ...form,
-    mail_profile_id: form.mail_profile_id || null,
+    enable_email: false,
+    mail_profile_id: null,
+    recipients_override: '',
     dingtalk_profile_id: form.dingtalk_profile_id || null,
   }), `${title.value}计划已保存`)
   saving.value = false
@@ -80,9 +79,9 @@ async function save() {
       <label v-if="legacySchedule" class="field field-full"><span>原定时规则</span><small>此计划使用旧规则。请核对下面的时间，确认后再保存。</small><label class="switch-row"><input v-model="legacyConfirmed" type="checkbox" />我已核对新的生成时间</label></label>
       <label v-if="type === 'weekly'" class="field field-full"><span>执行星期</span><select v-model="form.day_of_week"><option v-for="day in 7" :key="day" :value="String(day)">星期{{ ['一','二','三','四','五','六','日'][day - 1] }}</option></select></label><div class="field-full time-list"><div v-for="(time, index) in form.times" :key="index" class="time-line"><select v-model="time.ampm" aria-label="上午或下午"><option value="am">上午</option><option value="pm">下午</option></select><select v-model.number="time.hour" aria-label="小时"><option v-for="hour in 12" :key="hour" :value="hour">{{ hour }} 点</option></select><select v-model.number="time.minute" aria-label="分钟"><option v-for="minute in 60" :key="minute" :value="minute - 1">{{ String(minute - 1).padStart(2, '0') }} 分</option></select><button v-if="form.times.length > 1" type="button" class="icon-button danger-hover" aria-label="删除时间" @click="form.times.splice(index, 1)"><Trash2 :size="16" /></button></div><ActionButton v-if="form.times.length < 4" type="button"  class="btn-small" @click="addTime" variant="secondary">添加时间</ActionButton></div>
     </div></section>
-    <section class="form-section"><div class="form-section-head"><div><h2>报告内容</h2></div></div><div class="form-grid"><label class="switch-row field-full"><input v-model="form.include_docx" type="checkbox" />ZIP 包含 Word 报告</label><label class="switch-row field-full"><input v-model="form.include_screenshots" type="checkbox" />ZIP 包含截图</label><label class="switch-row field-full"><input v-model="form.send_empty_report" type="checkbox" />没有报告时也发送邮件</label></div></section>
-    <section class="form-section"><div class="form-section-head"><div><h2>发送通知</h2></div></div><div class="form-grid"><label class="switch-row field-full"><input v-model="form.enable_email" type="checkbox" />通过邮件发送 ZIP 报告</label><template v-if="form.enable_email"><label class="field"><span>发信邮箱</span><select v-model="form.mail_profile_id"><option value="">请选择邮箱</option><option v-for="profile in mailProfiles" :key="profile.id" :value="profile.id">{{ profile.name }}</option></select></label><label class="field"><span>收件人（选填）</span><input v-model="form.recipients_override" placeholder="留空使用邮箱默认收件人" /></label></template><label class="switch-row field-full"><input v-model="form.dingtalk_enabled" type="checkbox" />发送钉钉通知（使用通知配置）</label><template v-if="form.dingtalk_enabled && dingtalkProfiles.length"><label class="field field-full"><span>指定钉钉机器人</span><select v-model="form.dingtalk_profile_id"><option value="">默认首个机器人</option><option v-for="bot in dingtalkProfiles" :key="bot.id" :value="bot.id">{{ bot.name }}</option></select></label></template></div></section>
-    <section v-if="type === 'monthly'" class="form-section"><div class="form-section-head"><div><h2>月报等待设置</h2></div></div><div class="form-grid"><label class="switch-row field-full"><input v-model="form.wait_for_daily_jobs" type="checkbox" />等待当天巡检完成后再发送</label><template v-if="form.wait_for_daily_jobs"><label class="field"><span>最晚等待时间</span><input v-model="form.retry_until_time" type="time" /></label><label class="field"><span>重试间隔（分钟）</span><input v-model.number="form.retry_interval_minutes" type="number" min="1" /></label><label class="field field-full"><span>等待超时后</span><select v-model="form.send_on_timeout"><option :value="true">发送已完成部分</option><option :value="false">不发送</option></select></label></template></div></section>
+    <section class="form-section"><div class="form-section-head"><div><h2>报告内容</h2></div></div><div class="form-grid"><label class="switch-row field-full"><input v-model="form.include_docx" type="checkbox" />ZIP 包含 Word 报告</label><label class="switch-row field-full"><input v-model="form.include_screenshots" type="checkbox" />ZIP 包含截图</label><label class="switch-row field-full"><input v-model="form.send_empty_report" type="checkbox" />没有报告时也生成归档包</label></div></section>
+    <section class="form-section"><div class="form-section-head"><div><h2>发送通知</h2></div></div><div class="form-grid"><label class="switch-row field-full"><input v-model="form.dingtalk_enabled" type="checkbox" />发送钉钉通知（使用通知配置）</label><template v-if="form.dingtalk_enabled && dingtalkProfiles.length"><label class="field field-full"><span>指定钉钉机器人</span><select v-model="form.dingtalk_profile_id"><option value="">默认首个机器人</option><option v-for="bot in dingtalkProfiles" :key="bot.id" :value="bot.id">{{ bot.name }}</option></select></label></template></div></section>
+    <section v-if="type === 'monthly'" class="form-section"><div class="form-section-head"><div><h2>月报等待设置</h2></div></div><div class="form-grid"><label class="switch-row field-full"><input v-model="form.wait_for_daily_jobs" type="checkbox" />等待当天巡检完成后再生成</label><template v-if="form.wait_for_daily_jobs"><label class="field"><span>最晚等待时间</span><input v-model="form.retry_until_time" type="time" /></label><label class="field"><span>重试间隔（分钟）</span><input v-model.number="form.retry_interval_minutes" type="number" min="1" /></label><label class="field field-full"><span>等待超时后</span><select v-model="form.send_on_timeout"><option :value="true">生成已完成部分</option><option :value="false">标记失败</option></select></label></template></div></section>
     <ButtonGroup class="editor-footer"><ActionButton to="/periodic" variant="secondary">取消</ActionButton><ActionButton type="submit" :disabled="saving" variant="primary" :loading="saving">保存计划</ActionButton></ButtonGroup>
   </div></form>
 </template>

@@ -375,3 +375,19 @@ def test_batch_endpoint_validates_then_passes_all_rows_to_one_transaction():
             assert exc.status_code == 400
         else:
             raise AssertionError("Duplicate URL and profile must be rejected")
+
+
+def test_batch_kibana_dashboard_uses_kibana_capture_checks():
+    from app.main import api_create_items_batch
+
+    captured = []
+    with (
+        patch("app.main.get_job", return_value={"id": 1}),
+        patch("app.main.list_screenshot_items", return_value=[]),
+        patch("app.main.save_screenshot_items_batch", side_effect=lambda rows: (captured.extend(rows), [102])[1]),
+    ):
+        api_create_items_batch(1, {"items": [{
+            "url": "https://elastic.example/s/prod/app/dashboards#/view/abc-123",
+            "name": "Kibana 生产看板",
+        }]})
+    assert captured[0]["item_type"] == "kibana"

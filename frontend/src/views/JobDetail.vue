@@ -12,13 +12,19 @@ const job = ref<Row | null>(null)
 const items = ref<Row[]>([])
 const nextRuns = ref<string[]>([])
 const busy = ref(false)
+const testingItemId = ref<number | null>(null)
+const loadError = ref(false)
 
 async function load() {
   const data = await attempt(() => api<Row>(`/jobs/${id.value}`))
   if (data) {
+    loadError.value = false
     job.value = data.job
     items.value = data.items || []
     nextRuns.value = data.next_runs || []
+  } else {
+    job.value = null
+    loadError.value = true
   }
 }
 
@@ -30,7 +36,11 @@ async function run() {
 }
 
 async function test(item: Row) {
-  await attempt(() => api(`/items/${item.id}/test`, 'POST'), `“${item.name}”测试已开始，可在巡检记录中查看结果`)
+  if (testingItemId.value !== null) return
+  testingItemId.value = Number(item.id)
+  const result = await attempt(() => api<Row>(`/items/${item.id}/test`, 'POST'), `“${item.name}”测试已加入队列`)
+  testingItemId.value = null
+  if (result?.run_id) router.push(`/runs/${result.run_id}`)
 }
 
 async function remove(item: Row) {
@@ -128,12 +138,13 @@ onMounted(load)
           </div>
         </div>
         <div class="item-actions">
-          <IconButton class="table-icon-action" type="button" :aria-label="`测试截图：${item.name}`" title="测试截图" @click="test(item)" :label="`测试截图：${item.name}`"><Camera :size="16" /></IconButton>
+          <IconButton class="table-icon-action" type="button" :disabled="testingItemId !== null" :aria-label="`测试截图：${item.name}`" title="测试截图" @click="test(item)" :label="`测试截图：${item.name}`"><Camera :size="16" /></IconButton>
           <IconButton class="table-icon-action" :to="`/jobs/${id}/items/${item.id}/edit`" :aria-label="`编辑截图：${item.name}`" title="编辑截图" :label="`编辑截图：${item.name}`"><Pencil :size="15" /></IconButton>
           <IconButton class="table-icon-action danger-hover" :aria-label="`删除截图：${item.name}`" title="删除截图" @click="remove(item)" :label="`删除截图：${item.name}`"><Trash2 :size="15" /></IconButton>
         </div>
       </article>
     </div>
   </template>
+  <div v-else-if="loadError" class="empty-state"><h3>任务加载失败或已删除</h3><p>请返回任务列表确认，或重试加载。</p><ActionButton type="button" @click="load" variant="primary">重试</ActionButton><ActionButton to="/jobs" variant="secondary">返回任务列表</ActionButton></div>
   <div v-else class="loading-panel"><div class="skeleton" v-for="n in 3" :key="n"></div></div>
 </template>

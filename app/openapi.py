@@ -14,7 +14,6 @@ OPENAPI_TAGS = [
     {"name": "截图项", "description": "截图项配置、测试截图和截图采集参数。"},
     {"name": "运行记录", "description": "巡检运行历史、截图结果和报告下载信息。"},
     {"name": "认证配置", "description": "目标系统登录账号、登录测试和会话状态管理。"},
-    {"name": "邮件配置", "description": "SMTP 发信配置和测试发送。"},
     {"name": "周期报告", "description": "周报、月报配置和手动生成。"},
     {"name": "存储清理", "description": "数据目录占用统计、保留策略和手动清理。"},
 ]
@@ -40,10 +39,6 @@ SUMMARY_BY_ROUTE: dict[tuple[str, str], str] = {
     ("PUT", "/auth-profiles/{auth_id}"): "更新认证配置",
     ("DELETE", "/auth-profiles/{auth_id}"): "删除认证配置",
     ("POST", "/auth-profiles/{auth_id}/test"): "测试认证登录",
-    ("GET", "/mail-profiles"): "获取邮件配置列表",
-    ("POST", "/mail-profiles"): "创建邮件配置",
-    ("PUT", "/mail-profiles/{mail_id}"): "更新邮件配置",
-    ("DELETE", "/mail-profiles/{mail_id}"): "删除邮件配置",
     ("GET", "/periodic-reports"): "获取周期报告配置和记录",
     ("POST", "/periodic-reports/{report_type}/run"): "立即生成周期报告",
     ("GET", "/storage"): "获取存储占用和清理配置",
@@ -142,8 +137,6 @@ def _tag_for_path(relative_path: str) -> str:
         return "运行记录"
     if relative_path.startswith("/auth-profiles"):
         return "认证配置"
-    if relative_path.startswith("/mail-profiles"):
-        return "邮件配置"
     if relative_path.startswith("/periodic-reports"):
         return "周期报告"
     if relative_path.startswith("/storage"):

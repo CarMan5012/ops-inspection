@@ -2,7 +2,7 @@ import logging
 import json
 import time
 import traceback
-from contextlib import nullcontext
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -12,17 +12,18 @@ from typing import Any
 from app.settings import settings
 from app.job_execution import JobAlreadyRunning, JobLease, acquire_job_lease
 
-from app.mailer import send_report_mail
 from app.monitoring import summarize_monitoring
 from app.report import generate_docx
 from app.repository import (
     add_screenshot_result,
     create_run,
+    finish_active_run,
     get_job,
-    get_mail_profile,
     get_run,
     list_screenshot_items,
     list_screenshot_results,
+    skip_queued_run,
+    start_queued_run,
     update_run,
 )
 from app.screenshot import BrowserSession, browser_window_size, capture_item, chrome_launch_args
@@ -30,30 +31,69 @@ from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger("app.runner")
 _real_browser_lock = Lock()
+_BROWSER_LOCK_WAIT_SECONDS = 900
+
+
+@contextmanager
+def _browser_window_access(enabled: bool):
+    if not enabled:
+        yield
+        return
+    if not _real_browser_lock.acquire(timeout=_BROWSER_LOCK_WAIT_SECONDS):
+        raise TimeoutError(f"等待独占浏览器窗口超过 {_BROWSER_LOCK_WAIT_SECONDS} 秒")
+    try:
+        yield
+    finally:
+        _real_browser_lock.release()
+
+
+def _finish_unhandled_run(run_id: int | None, exc: Exception) -> None:
+    if run_id is None:
+        return
+    logger.exception("巡检记录 #%s 在执行入口异常终止", run_id)
+    try:
+        finish_active_run(run_id, "failed", f"{type(exc).__name__}: {exc}")
+    except Exception:
+        logger.exception("写入巡检记录 #%s 的失败状态时出错", run_id)
 
 
 def run_job(
     job_id: int, run_id: int | None = None, schedule_type: str | None = None,
     *, execution_lease: JobLease | None = None,
 ) -> int:
+    is_scheduled = run_id is None
+    if is_scheduled:
+        job = get_job(job_id)
+        if not job:
+            raise RuntimeError(f"任务不存在：{job_id}")
+        run_id = create_run(job_id, str(job.get("name") or f"任务-{job_id}"), schedule_type or "", status="queued")
     try:
-        # Scheduled execution waits for the manual run rather than losing its scheduled slot.
-        lease = execution_lease or acquire_job_lease(job_id, blocking=run_id is None)
+        # Scheduled execution is visible while waiting for a manual run.
+        lease = execution_lease or acquire_job_lease(job_id, blocking=is_scheduled)
     except JobAlreadyRunning:
         if run_id is None:
             logger.info("任务 #%s 已在运行，跳过本次重复调度", job_id)
             return 0
-        update_run(run_id, status="failed", error_summary="任务已在运行，重复执行已取消",
-                   finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"))
+        finish_active_run(run_id, "failed", "任务已在运行，重复执行已取消")
         return run_id
+    except Exception as exc:
+        _finish_unhandled_run(run_id, exc)
+        raise
     try:
-        return _execute_job(job_id, run_id, schedule_type)
+        return _execute_job(job_id, run_id, schedule_type, is_scheduled)
+    except Exception as exc:
+        _finish_unhandled_run(run_id, exc)
+        raise
     finally:
         lease.close()
 
 
-def _execute_job(job_id: int, run_id: int | None = None, schedule_type: str | None = None) -> int:
-    is_scheduled = (run_id is None)
+def _execute_job(
+    job_id: int, run_id: int | None = None, schedule_type: str | None = None,
+    is_scheduled: bool | None = None,
+) -> int:
+    if is_scheduled is None:
+        is_scheduled = run_id is None
     job = get_job(job_id)
     if not job:
         logger.error(f"任务不存在: {job_id}")
@@ -81,16 +121,25 @@ def _execute_job(job_id: int, run_id: int | None = None, schedule_type: str | No
             ).fetchone()
         if has_run:
             logger.info("任务 %s 今天的 %s 时段已成功执行，跳过重复触发。", job_id, schedule_type)
+            if run_id is not None:
+                skip_queued_run(run_id, "同一时间段今天已有成功记录，跳过重复触发。")
             return 0
 
     job_start_time = time.monotonic()
     job_name = str(job.get("name") or f"任务-{job_id}")
     schedule_desc = schedule_type or ("自动定时" if is_scheduled else "手动执行")
 
+    queued_run = is_scheduled and run_id is not None
     if run_id is None:
         run_id = create_run(job_id, job_name, schedule_type or "")
 
     try:
+        if queued_run:
+            if not start_queued_run(run_id):
+                logger.info("巡检记录 #%s 已结束，忽略迟到的定时任务", run_id)
+                return 0
+        else:
+            update_run(run_id, status="running")
         items = [item for item in list_screenshot_items(job_id) if int(item.get("enabled") or 0)]
         logger.info("=" * 68)
         logger.info(f"巡检开始：{job_name}（任务 #{job_id}，记录 #{run_id}，{schedule_desc}）")
@@ -100,7 +149,6 @@ def _execute_job(job_id: int, run_id: int | None = None, schedule_type: str | No
             err_msg = "无可执行巡检项 (未配置任何截图项，或所有截图项已被禁用)"
             update_run(
                 run_id,
-                status="failed",
                 error_summary=err_msg,
                 success_count=0,
                 failed_count=0,
@@ -108,26 +156,21 @@ def _execute_job(job_id: int, run_id: int | None = None, schedule_type: str | No
             run = get_run(run_id)
             results = []
             report_path = generate_docx(job, run or {}, results)
-            mail_status = "skipped"
-            if int(job.get("send_mail_on_error") if job.get("send_mail_on_error") is not None else 1):
-                try:
-                    mail_profile = get_mail_profile(job.get("mail_profile_id"))
-                    mail_status = send_report_mail(mail_profile or {}, job, report_path, error_msg=err_msg)
-                except Exception as exc:
-                    mail_status = f"failed: {type(exc).__name__}: {exc}"
-                    logger.error("无可执行项时发送报告失败：%s", mail_status, exc_info=True)
             update_run(
                 run_id,
                 report_path=report_path,
-                mail_status=mail_status,
-                finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
             )
             try:
                 _send_dingtalk_notification(job, run_id, status="failed", success_count=0,
-                                           failed_count=0, error_summary=err_msg, mail_status=mail_status)
+                                           failed_count=0, error_summary=err_msg)
             except Exception as exc:
                 logger.exception("无可执行项时发送钉钉通知失败")
                 update_run(run_id, dingtalk_status=f"failed: {type(exc).__name__}: {exc}")
+            update_run(
+                run_id,
+                status="failed",
+                finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
+            )
             logger.error("└─ ✖ 任务终止: 无可执行巡检项，已生成空报告并退出")
             logger.info("=" * 68)
             return run_id
@@ -154,7 +197,7 @@ def _execute_job(job_id: int, run_id: int | None = None, schedule_type: str | No
 
         if any_real_capture:
             logger.info("真实窗口截图：等待独占浏览器窗口")
-        with (_real_browser_lock if any_real_capture else nullcontext()):
+        with _browser_window_access(any_real_capture):
             with sync_playwright() as p:
                 browser_session = BrowserSession.open(lambda: p.chromium.launch(**launch_kwargs))
                 total_items = len(items)
@@ -199,7 +242,6 @@ def _execute_job(job_id: int, run_id: int | None = None, schedule_type: str | No
         status = "success" if failed_count == 0 else "failed" if success_count == 0 else "partial_success"
         update_run(
             run_id,
-            status=status,
             success_count=success_count,
             failed_count=failed_count,
             error_summary=(f"全部 {failed_count} 个截图项失败，请查看截图结果。" if success_count == 0 else
@@ -219,60 +261,6 @@ def _execute_job(job_id: int, run_id: int | None = None, schedule_type: str | No
         logger.info(f"报告已生成：{Path(report_path).name}")
         update_run(run_id, report_path=report_path)
 
-        # 判定邮件发信条件
-        send_complete = job.get("send_mail_on_complete")
-        if send_complete is None:
-            send_complete = job.get("send_mail", 0)
-            
-        send_error = job.get("send_mail_on_error")
-        if send_error is None:
-            send_error = 1
-
-        mail_status = "skipped"
-        should_send = False
-        if status == "success" and monitor["status"] not in {"alert", "unknown", "unconfigured"}:
-            if int(send_complete) == 1:
-                if is_scheduled:
-                    started_at = run.get("started_at") or ""
-                    if job.get("schedule_mode") == "calendar":
-                        from app.date_schedule import from_job, upcoming
-                        config = from_job(job)
-                        start_dt = datetime.fromisoformat(started_at).replace(tzinfo=ZoneInfo(settings.default_timezone))
-                        later = upcoming(config, start_dt, 1, job_id=job_id) if config else []
-                        has_later_today = bool(later and later[0].date() == start_dt.date())
-                    else:
-                        has_later_today = False
-                    if has_later_today:
-                        logger.info("▶ 检测到今天后续还有定时巡检任务，且本次运行成功，跳过发送邮件")
-                        mail_status = "skipped"
-                    else:
-                        should_send = True
-                else:
-                    should_send = True
-        else:
-            should_send = int(send_error) == 1
-
-        if should_send:
-            logger.info("▶ 正在准备发送巡检结果邮件...")
-            try:
-                mail_profile = get_mail_profile(job.get("mail_profile_id"))
-                notices = [str(run.get("error_summary") or "").strip()]
-                if monitor["status"] in {"alert", "unknown", "unconfigured"}:
-                    notices.append(monitor["text"])
-                mail_status = send_report_mail(
-                    mail_profile or {}, job, report_path,
-                    error_msg="\n".join(part for part in notices if part),
-                )
-                logger.info(f"  └─ ✔ 邮件发送完成 (状态: {mail_status})")
-            except Exception as exc:  # noqa: BLE001 - saved to run record.
-                mail_status = f"failed: {type(exc).__name__}: {exc}"
-                logger.error(f"  └─ ✖ 发送邮件异常: {mail_status}", exc_info=True)
-                
-        update_run(
-            run_id,
-            mail_status=mail_status,
-            finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
-        )
         try:
             notify_status = (
                 f"monitor_{monitor['status']}"
@@ -289,17 +277,20 @@ def _execute_job(job_id: int, run_id: int | None = None, schedule_type: str | No
                     str(run.get("error_summary") or "").strip(),
                     monitor["text"] if monitor["status"] in {"alert", "unknown", "unconfigured"} else "",
                 ) if part),
-                mail_status=mail_status,
             )
         except Exception as exc:
             logger.exception("钉钉通知失败，巡检结果保持为 %s", status)
             update_run(run_id, dingtalk_status=f"failed: {type(exc).__name__}: {exc}")
+        update_run(
+            run_id,
+            status=status,
+            finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
+        )
 
         total_duration = round(time.monotonic() - job_start_time, 2)
         logger.info("=" * 68)
-        mail_label = "未发送" if mail_status.startswith("skipped") else "发送失败" if mail_status.startswith("failed:") else "已发送"
         logger.info(f"巡检结束：{job_name}（记录 #{run_id}）")
-        logger.info(f"结果：成功 {success_count} 项，失败 {failed_count} 项；报告：{Path(report_path).name if report_path else '未生成'}；邮件：{mail_label}；耗时 {total_duration} 秒")
+        logger.info(f"结果：成功 {success_count} 项，失败 {failed_count} 项；报告：{Path(report_path).name if report_path else '未生成'}；耗时 {total_duration} 秒")
         logger.info("=" * 68)
     except Exception as exc:  # noqa: BLE001 - run should keep failure details.
         total_duration = round(time.monotonic() - job_start_time, 2)
@@ -309,31 +300,9 @@ def _execute_job(job_id: int, run_id: int | None = None, schedule_type: str | No
         logger.error(f"└─ 异常详情: {err_summary.splitlines()[0] if err_summary else ''}", exc_info=True)
         logger.error("=" * 68)
         
-        send_error = job.get("send_mail_on_error")
-        if send_error is None:
-            send_error = 1
-            
-        mail_status = "skipped"
-        if int(send_error) == 1:
-            try:
-                logger.info("▶ 满足巡检异常发信策略，正在发送错误通知邮件...")
-                mail_profile = get_mail_profile(job.get("mail_profile_id"))
-                saved_run = get_run(run_id) or {}
-                mail_status = send_report_mail(
-                    mail_profile or {}, job, report_path=saved_run.get("report_path") or None,
-                    error_msg=err_summary,
-                )
-                logger.info(f"  └─ ✔ 异常通知邮件发送完成: {mail_status}")
-            except Exception as mail_exc:
-                mail_status = f"failed: {type(mail_exc).__name__}: {mail_exc}"
-                logger.error(f"  └─ ✖ 发送错误通知邮件失败: {mail_status}", exc_info=True)
-
         update_run(
             run_id,
-            status="failed",
             error_summary=err_summary,
-            mail_status=mail_status,
-            finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
         )
         try:
             _send_dingtalk_notification(
@@ -343,11 +312,15 @@ def _execute_job(job_id: int, run_id: int | None = None, schedule_type: str | No
                 success_count=0,
                 failed_count=0,
                 error_summary=err_summary,
-                mail_status=mail_status,
             )
         except Exception as notify_exc:
             logger.exception("发送巡检失败通知时出错")
             update_run(run_id, dingtalk_status=f"failed: {type(notify_exc).__name__}: {notify_exc}")
+        update_run(
+            run_id,
+            status="failed",
+            finished_at=datetime.now(ZoneInfo(settings.default_timezone)).isoformat(timespec="seconds"),
+        )
         
     if is_scheduled:
         try:
@@ -359,25 +332,49 @@ def _execute_job(job_id: int, run_id: int | None = None, schedule_type: str | No
     return run_id
 
 
-def test_capture_item(item_id: int) -> int:
+def test_capture_item(item_id: int, run_id: int | None = None) -> int:
     from app.repository import get_screenshot_item
 
-    item = get_screenshot_item(item_id)
-    if not item:
-        raise RuntimeError(f"截图项不存在：{item_id}")
-    job = get_job(int(item["job_id"]))
-    if not job:
-        raise RuntimeError(f"任务不存在：{item['job_id']}")
+    try:
+        item = get_screenshot_item(item_id)
+        if not item:
+            raise RuntimeError(f"截图项不存在：{item_id}")
+        job_id = int(item["job_id"])
+        lease = acquire_job_lease(job_id, blocking=True)
+        try:
+            # The item or its job may have been deleted while this test waited.
+            item = get_screenshot_item(item_id)
+            job = get_job(job_id)
+            if not item or not job or int(item["job_id"]) != job_id:
+                raise RuntimeError(f"截图项或任务已删除：{item_id}")
+            return _test_capture_item_locked(item, job, run_id)
+        finally:
+            lease.close()
+    except Exception as exc:
+        _finish_unhandled_run(run_id, exc)
+        raise
+
+
+def _test_capture_item_locked(item: dict[str, Any], job: dict[str, Any], run_id: int | None = None) -> int:
+    item_id = int(item["id"])
 
     test_start = time.monotonic()
     logger.info("-" * 68)
     logger.info(f"🔍 [单项测试截图] 截图项: '{item['name']}' (ID: {item_id}, 所属任务: '{job['name']}')")
     logger.info("-" * 68)
 
-    run_id = create_run(job["id"], f"测试截图 - {item['name']}")
+    queued_run = run_id is not None
+    if run_id is None:
+        run_id = create_run(job["id"], f"测试截图 - {item['name']}")
     is_real_capture = bool(item.get("real_browser_capture") if "real_browser_capture" in item else 0)
     try:
-        with (_real_browser_lock if is_real_capture else nullcontext()):
+        if queued_run:
+            if not start_queued_run(run_id):
+                logger.info("测试记录 #%s 已结束，忽略迟到的截图任务", run_id)
+                return run_id
+        else:
+            update_run(run_id, status="running")
+        with _browser_window_access(is_real_capture):
             result = capture_item(item, job, run_id, suffix="_test", item_index=1, total_items=1)
         add_screenshot_result(
             {
@@ -426,7 +423,6 @@ def _send_dingtalk_notification(
     success_count: int,
     failed_count: int,
     error_summary: str,
-    mail_status: str,
 ) -> None:
     if job.get("dingtalk_enabled") != 1:
         return
@@ -450,9 +446,15 @@ def _send_dingtalk_notification(
 
     from app.repository import get_dingtalk_profile, list_dingtalk_profiles
     bot_profile = None
-    if job.get("dingtalk_profile_id"):
-        bot_profile = get_dingtalk_profile(job.get("dingtalk_profile_id"))
-    if not bot_profile:
+    selected_bot_id = job.get("dingtalk_profile_id")
+    if selected_bot_id:
+        bot_profile = get_dingtalk_profile(selected_bot_id)
+        if not bot_profile:
+            message = f"failed: 指定的钉钉机器人 #{selected_bot_id} 不存在，未发送通知"
+            logger.error("任务 %s 的%s", job.get("id"), message)
+            update_run(run_id, dingtalk_status=message)
+            return
+    else:
         all_bots = list_dingtalk_profiles()
         if all_bots:
             bot_profile = all_bots[0]
@@ -493,12 +495,7 @@ def _send_dingtalk_notification(
         and os.path.exists(str(run_record.get("report_path") or ""))
     )
 
-    # 邮件状态 HTML
-    from app.dingtalk_builder import build_inspection_report_message, build_mail_status_html
-    mail_status_html = ""
-    if job.get("mail_profile_id") and mail_status and "skipped" not in mail_status.lower() \
-            and "failed: 系统没有任何邮件配置" not in mail_status:
-        mail_status_html = build_mail_status_html(mail_status)
+    from app.dingtalk_builder import build_inspection_report_message
 
     # 构建消息
     title, text = build_inspection_report_message(
@@ -509,7 +506,6 @@ def _send_dingtalk_notification(
         failed_count=failed_count,
         has_word_report=has_word_report,
         error_summary=error_summary,
-        mail_status_html=mail_status_html,
         enable_emoji=emoji_enabled,
     )
 

@@ -67,10 +67,9 @@ def test_custom_morning_is_preserved_when_afternoon_uses_template(tmp_path, monk
     assert len(doc.inline_shapes) == 1
 
 
-def test_empty_job_sends_failure_notification_and_keeps_failed_status(tmp_path, monkeypatch):
+def test_empty_job_sends_dingtalk_failure_notification_and_keeps_failed_status(tmp_path, monkeypatch):
     monkeypatch.setattr(job_execution.settings, "data_dir", tmp_path)
-    job = {"id": 7, "name": "巡检", "send_mail_on_error": 0,
-           "dingtalk_enabled": 1, "send_dingtalk_on_error": 1}
+    job = {"id": 7, "name": "巡检", "dingtalk_enabled": 1, "send_dingtalk_on_error": 1}
     record = {"id": 9}
     notices = []
     monkeypatch.setattr(runner, "get_job", lambda _: job)
@@ -78,7 +77,12 @@ def test_empty_job_sends_failure_notification_and_keeps_failed_status(tmp_path, 
     monkeypatch.setattr(runner, "get_run", lambda _: dict(record))
     monkeypatch.setattr(runner, "update_run", lambda _, **fields: record.update(fields))
     monkeypatch.setattr(runner, "generate_docx", lambda *_: "report.docx")
-    monkeypatch.setattr(runner, "_send_dingtalk_notification", lambda *_args, **kwargs: notices.append(kwargs))
+    def notify(*_args, **kwargs):
+        assert record["status"] == "running"
+        assert not record.get("finished_at")
+        notices.append(kwargs)
+
+    monkeypatch.setattr(runner, "_send_dingtalk_notification", notify)
     assert runner.run_job(7, 9) == 9
     assert record["status"] == "failed" and record["finished_at"]
     assert len(notices) == 1 and notices[0]["status"] == "failed"
@@ -99,11 +103,55 @@ def test_same_job_lock_rejects_duplicate_and_releases(tmp_path, monkeypatch):
     replacement.close()
 
 
+def test_job_cannot_be_deleted_while_its_run_is_active(tmp_path, monkeypatch):
+    monkeypatch.setattr(job_execution.settings, "data_dir", tmp_path)
+    deleted = []
+    monkeypatch.setattr(main, "get_job", lambda _: {"id": 1})
+    monkeypatch.setattr(main, "delete_job", lambda job_id: deleted.append(job_id))
+    monkeypatch.setattr(main, "reload_jobs", lambda: None)
+
+    active_lease = job_execution.acquire_job_lease(1)
+    try:
+        with pytest.raises(HTTPException) as exc:
+            main.api_delete_job(1)
+        assert exc.value.status_code == 409
+        assert deleted == []
+    finally:
+        active_lease.close()
+
+    assert main.api_delete_job(1) == {"ok": True}
+    assert deleted == [1]
+
+
+def test_deleting_job_finishes_queued_item_test(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("CREATE TABLE report_jobs (id INTEGER PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE run_records (id INTEGER PRIMARY KEY, job_id INTEGER REFERENCES report_jobs(id) "
+        "ON DELETE SET NULL, status TEXT, finished_at TEXT, error_summary TEXT)"
+    )
+    conn.execute("INSERT INTO report_jobs VALUES (7)")
+    conn.execute("INSERT INTO run_records VALUES (1, 7, 'queued', NULL, '')")
+    monkeypatch.setattr(repository, "connect", lambda: conn)
+    try:
+        repository.delete_job(7)
+        row = conn.execute("SELECT job_id, status, finished_at, error_summary FROM run_records").fetchone()
+        assert row["job_id"] is None
+        assert row["status"] == "interrupted"
+        assert row["finished_at"]
+        assert "任务已删除" in row["error_summary"]
+        assert repository.start_queued_run(1) is False
+    finally:
+        conn.close()
+
+
 def test_duplicate_api_request_creates_only_one_run(tmp_path, monkeypatch):
     monkeypatch.setattr(job_execution.settings, "data_dir", tmp_path)
     created = []
     monkeypatch.setattr(main, "get_job", lambda _: {"id": 1, "name": "巡检"})
-    monkeypatch.setattr(main, "create_run", lambda *_: created.append(100) or 100)
+    monkeypatch.setattr(main, "create_run", lambda *_, **kwargs: created.append((100, kwargs)) or 100)
     queue = BackgroundTasks()
     try:
         assert main.api_run_job(1, queue)["run_id"] == 100
@@ -111,14 +159,42 @@ def test_duplicate_api_request_creates_only_one_run(tmp_path, monkeypatch):
             main.api_run_job(1, queue)
         assert exc.value.status_code == 409
         assert len(created) == len(queue.tasks) == 1
+        assert created[0][1]["status"] == "queued"
     finally:
         for task in queue.tasks:
             task.kwargs["execution_lease"].close()
 
 
+def test_item_test_is_queued_once_and_returns_its_run_id(monkeypatch):
+    from app import db
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE run_records (id INTEGER PRIMARY KEY, job_id INTEGER, job_name TEXT, "
+        "started_at TEXT, schedule_slot TEXT, status TEXT)"
+    )
+    monkeypatch.setattr(repository, "connect", lambda: conn)
+    monkeypatch.setattr(db, "connect", lambda: conn)
+    monkeypatch.setattr(main, "get_screenshot_item", lambda _: {"id": 8, "job_id": 7, "name": "图表"})
+    queue = BackgroundTasks()
+    try:
+        response = main.api_test_item(8, queue)
+        run_id = response["run_id"]
+        assert response["ok"] is True
+        assert conn.execute("SELECT status FROM run_records WHERE id = ?", (run_id,)).fetchone()[0] == "queued"
+        assert queue.tasks[0].args == (8, run_id)
+        with pytest.raises(HTTPException) as exc:
+            main.api_test_item(8, queue)
+        assert exc.value.status_code == 409
+        assert len(queue.tasks) == 1
+    finally:
+        conn.close()
+
+
 def test_failed_submission_releases_lock(tmp_path, monkeypatch):
     monkeypatch.setattr(job_execution.settings, "data_dir", tmp_path)
-    monkeypatch.setattr(main, "create_run", lambda *_: (_ for _ in ()).throw(RuntimeError("数据库失败")))
+    monkeypatch.setattr(main, "create_run", lambda *_, **__: (_ for _ in ()).throw(RuntimeError("数据库失败")))
     with pytest.raises(RuntimeError):
         main.queue_inspection_job({"id": 1, "name": "巡检"}, BackgroundTasks())
     lease = job_execution.acquire_job_lease(1)
@@ -134,10 +210,148 @@ def test_runner_exception_releases_lock(tmp_path, monkeypatch):
     lease.close()
 
 
+def test_runner_startup_error_finishes_queued_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(job_execution.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(runner, "get_job", lambda _: None)
+    finished = []
+    monkeypatch.setattr(runner, "finish_active_run", lambda *args: finished.append(args) or True)
+
+    with pytest.raises(RuntimeError, match="任务不存在"):
+        runner.run_job(1, 42)
+
+    assert finished and finished[0][0:2] == (42, "failed")
+    assert "任务不存在" in finished[0][2]
+    lease = job_execution.acquire_job_lease(1)
+    lease.close()
+
+
+def test_scheduled_run_finishes_queue_if_job_disappears(tmp_path, monkeypatch):
+    monkeypatch.setattr(job_execution.settings, "data_dir", tmp_path)
+    calls = 0
+    finished = []
+
+    def get_job_once(_):
+        nonlocal calls
+        calls += 1
+        return {"id": 1, "name": "巡检"} if calls == 1 else None
+
+    monkeypatch.setattr(runner, "get_job", get_job_once)
+    monkeypatch.setattr(runner, "create_run", lambda *_, **kwargs: 42)
+    monkeypatch.setattr(runner, "finish_active_run", lambda *args: finished.append(args) or True)
+
+    with pytest.raises(RuntimeError, match="任务不存在"):
+        runner.run_job(1, schedule_type="morning")
+    assert finished and finished[0][0:2] == (42, "failed")
+
+
+def test_queued_item_test_finishes_if_item_was_deleted(monkeypatch):
+    monkeypatch.setattr("app.repository.get_screenshot_item", lambda _: None)
+    finished = []
+    monkeypatch.setattr(runner, "finish_active_run", lambda *args: finished.append(args) or True)
+
+    with pytest.raises(RuntimeError, match="截图项不存在"):
+        runner.test_capture_item(8, 42)
+    assert finished and finished[0][0:2] == (42, "failed")
+
+
+def test_recovery_preserves_live_job_and_finishes_abandoned_runs(tmp_path, monkeypatch):
+    from app import db
+
+    monkeypatch.setattr(job_execution.settings, "data_dir", tmp_path)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    started = datetime.now(ZoneInfo(job_execution.settings.default_timezone)).isoformat(timespec="seconds")
+    conn.execute("CREATE TABLE run_records (id INTEGER PRIMARY KEY, job_id INTEGER, status TEXT, started_at TEXT, finished_at TEXT, error_summary TEXT)")
+    conn.executemany(
+        "INSERT INTO run_records VALUES (?, ?, ?, ?, NULL, '')",
+        [(1, 1, "queued", started), (2, 2, "running", started), (3, None, "running", started)],
+    )
+    monkeypatch.setattr(db, "connect", lambda: conn)
+    monkeypatch.setattr(repository, "connect", lambda: conn)
+    active_lease = job_execution.acquire_job_lease(2)
+    try:
+        assert job_execution.recover_interrupted_runs() == 0
+        assert [row[0] for row in conn.execute("SELECT status FROM run_records ORDER BY id")] == [
+            "queued", "running", "running",
+        ]
+        assert conn.execute("SELECT finished_at FROM run_records WHERE id = 2").fetchone()[0] is None
+    finally:
+        active_lease.close()
+    try:
+        assert job_execution.recover_interrupted_runs(include_deleted_jobs=True, queued_grace_seconds=0) == 3
+        assert conn.execute("SELECT status FROM run_records WHERE id = 1").fetchone()[0] == "interrupted"
+        assert conn.execute("SELECT status FROM run_records WHERE id = 2").fetchone()[0] == "interrupted"
+        assert conn.execute("SELECT status FROM run_records WHERE id = 3").fetchone()[0] == "interrupted"
+    finally:
+        conn.close()
+
+
+def test_old_queued_run_is_recovered_and_cannot_be_started(tmp_path, monkeypatch):
+    from app import db
+
+    monkeypatch.setattr(job_execution.settings, "data_dir", tmp_path)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE run_records (id INTEGER PRIMARY KEY, job_id INTEGER, status TEXT, started_at TEXT, finished_at TEXT, error_summary TEXT)")
+    old = (datetime.now(ZoneInfo(job_execution.settings.default_timezone)) - timedelta(minutes=20)).isoformat(timespec="seconds")
+    conn.execute("INSERT INTO run_records VALUES (1, 7, 'queued', ?, NULL, '')", (old,))
+    monkeypatch.setattr(db, "connect", lambda: conn)
+    monkeypatch.setattr(repository, "connect", lambda: conn)
+    try:
+        assert job_execution.recover_interrupted_runs() == 1
+        assert conn.execute("SELECT status FROM run_records WHERE id = 1").fetchone()[0] == "interrupted"
+        assert repository.start_queued_run(1) is False
+        assert repository.skip_queued_run(1, "重复") is False
+    finally:
+        conn.close()
+
+
+def test_periodic_recovery_finishes_old_orphaned_run_but_spares_recent_one(monkeypatch):
+    from app import db
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE run_records (id INTEGER PRIMARY KEY, job_id INTEGER, status TEXT, started_at TEXT, finished_at TEXT, error_summary TEXT)")
+    now = datetime.now(ZoneInfo(job_execution.settings.default_timezone))
+    old = (now - timedelta(minutes=20)).isoformat(timespec="seconds")
+    recent = now.isoformat(timespec="seconds")
+    conn.executemany(
+        "INSERT INTO run_records VALUES (?, NULL, ?, ?, NULL, '')",
+        [(1, "queued", old), (2, "running", old), (3, "queued", recent)],
+    )
+    monkeypatch.setattr(db, "connect", lambda: conn)
+    monkeypatch.setattr(repository, "connect", lambda: conn)
+    try:
+        assert job_execution.recover_interrupted_runs() == 2
+        assert [row[0] for row in conn.execute("SELECT status FROM run_records ORDER BY id")] == [
+            "interrupted", "interrupted", "queued",
+        ]
+    finally:
+        conn.close()
+
+
+def test_real_browser_window_wait_has_a_deadline(monkeypatch):
+    class BusyLock:
+        def acquire(self, *, timeout):
+            assert timeout > 0
+            return False
+
+        def release(self):
+            raise AssertionError("未获得锁时不应释放")
+
+    monkeypatch.setattr(runner, "_real_browser_lock", BusyLock())
+    with pytest.raises(TimeoutError, match="独占浏览器窗口"):
+        with runner._browser_window_access(True):
+            pass
+
+
 def test_scheduled_run_waits_for_manual_run(tmp_path, monkeypatch):
     monkeypatch.setattr(job_execution.settings, "data_dir", tmp_path)
     called = Event()
     entered = Event()
+    queued = []
+    monkeypatch.setattr(runner, "get_job", lambda _: {"id": 1, "name": "巡检"})
+    monkeypatch.setattr(runner, "create_run", lambda *_, **kwargs: queued.append(kwargs) or 101)
     monkeypatch.setattr(runner, "_execute_job", lambda *_: called.set() or 101)
     manual = job_execution.acquire_job_lease(1)
     def scheduled():
@@ -147,6 +361,7 @@ def test_scheduled_run_waits_for_manual_run(tmp_path, monkeypatch):
     thread.start()
     try:
         assert entered.wait(2)
+        assert queued == [{"status": "queued"}]
         assert not called.wait(.1)
     finally:
         manual.close()

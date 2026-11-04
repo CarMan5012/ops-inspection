@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>登录 - 自动化运维平台</title>
+  <title>登录 - 运维巡检平台</title>
   <link rel="shortcut icon" href="{{ url_for_frontend('static/favicon.ico') }}" type="image/x-icon">
   <style>
     *, *::before, *::after {
@@ -24,7 +24,10 @@
       display: grid;
       place-items: center;
       background: #edf5ff;
+      color: #1e293b;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
       -webkit-font-smoothing: antialiased;
       overflow-y: auto;
     }
@@ -74,7 +77,22 @@
     }
     .form-stack {
       display: grid;
-      gap: 16px;
+      gap: 0;
+    }
+    .login-field {
+      display: grid;
+      grid-template-rows: 44px 20px;
+    }
+    .login-field-error {
+      display: block;
+      height: 20px;
+      margin: 0;
+      padding-left: 2px;
+      color: #b42318;
+      font-size: 12px;
+      font-weight: 650;
+      line-height: 20px;
+      white-space: nowrap;
     }
     .login-panel input {
       box-sizing: border-box;
@@ -93,6 +111,21 @@
       font-weight: 500;
       box-shadow: none;
       font-family: inherit;
+    }
+    .login-panel input::placeholder {
+      color: #64748b;
+      font-weight: 500;
+    }
+    .login-panel input:focus {
+      outline: none;
+      border-color: #93b4f8;
+      background-color: #fff;
+      box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.1);
+    }
+    .login-panel input.login-field-invalid {
+      border-color: #ef4444 !important;
+      background-color: #fffafa;
+      box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.1) !important;
     }
     .login-panel input[data-login-username],
     .login-panel input[name="username"] {
@@ -139,17 +172,23 @@
       border-radius: 8px;
       transform: translateY(-50%);
       background: transparent;
-      color: transparent;
+      color: #94a3b8;
       box-shadow: none;
       cursor: pointer;
       transition: background-color 0.16s ease;
     }
-    .login-eye::before {
-      content: "";
+    .login-eye svg {
       width: 18px;
       height: 18px;
       display: block;
-      background: no-repeat center / 18px 18px url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E");
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .login-eye .eye-off {
+      display: none;
     }
     .login-eye:hover {
       background-color: rgba(37, 99, 235, 0.08);
@@ -158,8 +197,19 @@
     .login-eye:active {
       transform: translateY(-50%);
     }
-    .login-eye[aria-pressed="true"]::before {
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E");
+    .login-eye:focus-visible {
+      outline: 2px solid rgba(37, 99, 235, 0.35);
+      outline-offset: 1px;
+    }
+    .login-eye[aria-pressed="true"] {
+      background-color: rgba(37, 99, 235, 0.08);
+      color: #2563eb;
+    }
+    .login-eye[aria-pressed="true"] .eye-open {
+      display: none;
+    }
+    .login-eye[aria-pressed="true"] .eye-off {
+      display: block;
     }
     .login-btn,
     .login-panel button[type="submit"] {
@@ -173,6 +223,7 @@
       color: #fff;
       font-size: 15px;
       font-weight: 800;
+      font-family: inherit;
       box-shadow: 0 10px 20px rgba(37, 99, 235, 0.2);
       cursor: pointer;
       box-sizing: border-box;
@@ -195,15 +246,6 @@
       margin: 16px 0;
       font-size: 13px;
       box-sizing: border-box;
-    }
-    .login-field-error {
-      color: #ef4444;
-      font-size: 12px;
-      margin-top: -10px;
-      margin-bottom: 2px;
-    }
-    .login-field-invalid {
-      border-color: #ef4444 !important;
     }
     @media (max-width: 640px) {
       .login-panel {
@@ -228,33 +270,35 @@
       }
     }
   </style>
-  <link rel="stylesheet" href="{{ url_for_frontend('static/app.css?v=login-validation-20260626-2') }}">
 </head>
 <body class="login-page">
   <main class="login-panel">
     <div class="login-heading">
       <div class="login-mark" aria-hidden="true">
-        <img src="{{ url_for_frontend('static/images/logo.svg') }}" alt="" width="52" height="52" style="width: 52px; height: 52px; display: block; aspect-ratio: 1 / 1;">
+        <img src="{{ login_logo_data_uri }}" alt="" width="52" height="52" decoding="sync" style="width: 52px; height: 52px; display: block; aspect-ratio: 1 / 1;">
       </div>
-      <h1>自动化运维平台</h1>
+      <h1>运维巡检平台</h1>
     </div>
-    {% if error %}
-      <div class="notice error">
-        {% if error == "mfa" %}
-          MFA / 两步验证码错误，请重新输入。
-        {% else %}
-          用户名或密码错误，请重试。
-        {% endif %}
-      </div>
-    {% endif %}
     <form method="post" action="{{ url_for_frontend('login') }}" class="form-stack" data-login-form data-public-key='{{ login_public_key | tojson }}' novalidate>
-      <input data-login-username autocomplete="username" placeholder="用户名" required>
-      <span class="login-password-wrap">
-        <input id="login-password" data-login-password type="password" autocomplete="current-password" placeholder="密码" required>
-        <button class="login-eye" type="button" aria-label="显示密码" aria-pressed="false" data-password-toggle></button>
-      </span>
+      <div class="login-field">
+        <input data-login-username autocomplete="username" placeholder="用户名" required>
+        <span class="login-field-error" aria-live="polite"></span>
+      </div>
+      <div class="login-field">
+        <span class="login-password-wrap">
+          <input id="login-password" data-login-password type="password" autocomplete="current-password" placeholder="密码" {% if error and error != 'mfa' %}class="login-field-invalid" aria-invalid="true"{% endif %} required>
+          <button class="login-eye" type="button" aria-label="显示密码" aria-pressed="false" data-password-toggle>
+            <svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg class="eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 2l20 20"/><path d="M10.6 6.1A10.8 10.8 0 0 1 12 6c6.4 0 10 6 10 6a14 14 0 0 1-4.1 4.9"/><path d="M6.1 6.6A14 14 0 0 0 2 12s3.6 6 10 6a10.8 10.8 0 0 0 4.2-.8"/><path d="M10 10a3 3 0 0 0 4 4"/></svg>
+          </button>
+        </span>
+        <span class="login-field-error" aria-live="polite">{% if error == 'rate' %}尝试次数过多，请 5 分钟后重试。{% elif error and error != 'mfa' %}用户名或密码错误，请重试。{% endif %}</span>
+      </div>
       {% if mfa_enabled %}
-        <input data-login-mfa inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="MFA / 两步验证码" required>
+        <div class="login-field">
+          <input data-login-mfa inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="MFA / 两步验证码" {% if error == 'mfa' %}class="login-field-invalid" aria-invalid="true"{% endif %} required>
+          <span class="login-field-error" aria-live="polite">{% if error == 'mfa' %}MFA 验证码错误，请重试。{% endif %}</span>
+        </div>
       {% endif %}
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="login_payload" data-login-payload>
@@ -288,12 +332,13 @@
       const submitButton = form.querySelector('button[type="submit"]');
 
       function showLoginFormError(message) {
-        const oldNotice = form.parentNode.querySelector(".login-form-error");
-        if (oldNotice) oldNotice.remove();
-        const notice = document.createElement("div");
-        notice.className = "notice error login-form-error";
-        notice.textContent = message;
-        form.parentNode.insertBefore(notice, form);
+        const input = form.querySelector("[data-login-password]");
+        const error = input?.closest(".login-field")?.querySelector(".login-field-error");
+        if (input) {
+          input.classList.add("login-field-invalid");
+          input.setAttribute("aria-invalid", "true");
+        }
+        if (error) error.textContent = message;
       }
 
       function b64url(bytes) {
@@ -355,11 +400,8 @@
         if (!input) return;
         input.classList.remove("login-field-invalid");
         input.removeAttribute("aria-invalid");
-        const anchor = input.closest(".login-password-wrap") || input;
-        const next = anchor.nextElementSibling;
-        if (next && next.classList.contains("login-field-error")) {
-          next.remove();
-        }
+        const error = input.closest(".login-field")?.querySelector(".login-field-error");
+        if (error) error.textContent = "";
       }
 
       function showLoginError(input, message) {
@@ -367,11 +409,8 @@
         clearLoginError(input);
         input.classList.add("login-field-invalid");
         input.setAttribute("aria-invalid", "true");
-        const error = document.createElement("div");
-        error.className = "login-field-error";
-        error.textContent = message;
-        const anchor = input.closest(".login-password-wrap") || input;
-        anchor.insertAdjacentElement("afterend", error);
+        const error = input.closest(".login-field")?.querySelector(".login-field-error");
+        if (error) error.textContent = message;
       }
 
       function validateLoginForm() {
@@ -425,7 +464,7 @@
           form.submit();
         } catch (error) {
           if (submitButton) submitButton.disabled = false;
-          showLoginFormError("登录加密失败，请刷新页面后重试或联系管理员开启 HTTPS 访问。");
+          showLoginFormError("登录加密失败，请刷新后重试。");
         }
       });
     })();

@@ -13,7 +13,6 @@ from docx import Document
 from app.monitoring import collect_dashboard_alerts, prometheus_alert_url, summarize_monitoring
 from app.screenshot import _GrafanaQueryTracker
 from app import report
-from app import mailer
 
 
 class _Response:
@@ -480,16 +479,3 @@ def test_template_report_keeps_failed_item_and_reason(tmp_path, monkeypatch):
     path = report.generate_docx(job, run, results)
     paragraphs = [paragraph.text for paragraph in Document(path).paragraphs]
     assert any("截图失败：服务器资源。原因：Grafana 502" in text for text in paragraphs)
-
-
-def test_error_mail_keeps_report_attachment(tmp_path, monkeypatch):
-    document = tmp_path / "报告.docx"
-    document.write_bytes(b"test report")
-    sent = []
-    monkeypatch.setattr(mailer, "_execute_send_mail", lambda _profile, message, _password, _recipients: sent.append(message))
-    profile = {"smtp_host": "smtp.local", "sender": "ops@local", "recipients": "team@local"}
-    assert mailer.send_report_mail(profile, {"name": "生产任务"}, str(document), error_msg="CPU 告警") == "sent"
-    assert len(sent) == 1
-    assert "报告已附在邮件中" in sent[0].get_body(preferencelist=("plain",)).get_content()
-    assert "未生成巡检报告" not in sent[0].get_body(preferencelist=("plain",)).get_content()
-    assert len(list(sent[0].iter_attachments())) == 1

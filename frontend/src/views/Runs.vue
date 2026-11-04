@@ -9,8 +9,8 @@ import { attempt } from '../ui'
 const runs = ref<Row[]>([])
 const total = ref(0)
 const page = ref(1)
-const pageSize = ref(10)
-const pageSizes = [10, 20, 50, 100]
+const pageSize = ref(0)
+const pageSizes = ref<number[]>([])
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
 const visiblePages = computed(() => {
   const count = Math.min(5, totalPages.value)
@@ -21,26 +21,48 @@ const rangeStart = computed(() => total.value ? (page.value - 1) * pageSize.valu
 const rangeEnd = computed(() => Math.min(page.value * pageSize.value, total.value))
 const loading = ref(true)
 const refreshing = ref(false)
+const loadError = ref(false)
 const tablePanel = ref<HTMLElement | null>(null)
 let timer: number | undefined
 let requestSeq = 0
-async function load(): Promise<boolean> {
+async function load(silent = false): Promise<boolean> {
+  if (!pageSizes.value.length) return initialize(silent)
   const seq = ++requestSeq
   if (!loading.value) refreshing.value = true
-  const data = await attempt(() => api<Row>(`/runs?page=${page.value}&page_size=${pageSize.value}`))
+  const request = () => api<Row>(`/runs?page=${page.value}&page_size=${pageSize.value}`)
+  const data = silent ? await request().catch(() => undefined) : await attempt(request)
   if (seq !== requestSeq) return false
+  loadError.value = !data
   if (data) {
     const nextTotal = data.total || 0
     if (nextTotal > 0 && page.value > Math.ceil(nextTotal / pageSize.value)) {
       page.value = Math.ceil(nextTotal / pageSize.value)
-      return load()
+      return load(silent)
     }
     runs.value = data.runs || []
     total.value = nextTotal
+  } else if (!silent) {
+    // The selected page or page size may have changed; stale rows would be mislabeled.
+    runs.value = []
+    total.value = 0
   }
   loading.value = false
   refreshing.value = false
   return Boolean(data)
+}
+async function initialize(silent = false): Promise<boolean> {
+  loading.value = true
+  const config = silent ? await api<Row>('/ui-config').catch(() => undefined) : await attempt(() => api<Row>('/ui-config'))
+  const sizes = config?.run_page_sizes
+  const defaultSize = Number(config?.run_default_page_size)
+  if (!Array.isArray(sizes) || !sizes.includes(defaultSize)) {
+    loadError.value = true
+    loading.value = false
+    return false
+  }
+  pageSizes.value = sizes.map(Number)
+  pageSize.value = defaultSize
+  return load()
 }
 async function showPageStart() {
   await nextTick()
@@ -55,14 +77,15 @@ async function changePageSize() {
   page.value = 1
   if (await load()) await showPageStart()
 }
-onMounted(() => { load(); timer = window.setInterval(() => { if (runs.value.some(run => run.status === 'running')) load() }, 5000) })
+onMounted(() => { initialize(); timer = window.setInterval(() => { if (!loading.value && !refreshing.value && (loadError.value || runs.value.some(run => run.status === 'queued' || run.status === 'running'))) load(true) }, 5000) })
 onUnmounted(() => clearInterval(timer))
 </script>
 
 <template>
-  <section class="page-intro"><div><h1>巡检记录</h1></div><ButtonGroup class="page-actions"><RefreshButton :loading="refreshing" @click="load" /></ButtonGroup></section>
+  <section class="page-intro"><div><h1>巡检记录</h1></div><ButtonGroup class="page-actions"><RefreshButton :loading="refreshing" @click="() => load()" /></ButtonGroup></section>
   <div class="section-heading"><div><h2>全部记录</h2></div><span class="count-label">共 {{ total }} 条</span></div>
   <div v-if="loading" class="loading-panel"><div class="skeleton" v-for="n in 5" :key="n"></div></div>
+  <div v-else-if="loadError && !runs.length" class="empty-state"><h3>巡检记录加载失败</h3><p>网络或服务暂时不可用，页面会自动重试。</p><ActionButton type="button" variant="primary" @click="() => load()">重试</ActionButton></div>
   <div v-else-if="!runs.length" class="empty-state"><span class="empty-icon"><History :size="30" /></span><h3>暂无巡检记录</h3><p>运行任务后，结果会显示在这里。</p><ActionButton to="/jobs"  variant="primary">查看任务</ActionButton></div>
   <div v-else ref="tablePanel" class="panel table-panel runs-table-panel">
     <div class="responsive-table">

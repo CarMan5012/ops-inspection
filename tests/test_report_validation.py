@@ -1,6 +1,7 @@
 import sqlite3
 import sys
 import types
+from pathlib import Path
 
 if "pysqlcipher3" not in sys.modules:
     sqlcipher = types.ModuleType("pysqlcipher3")
@@ -76,6 +77,39 @@ def test_word_validation_rejects_wrong_section(tmp_path):
     doc.save(path)
     with pytest.raises(RuntimeError, match="错误章节"):
         report.validate_docx(path, 4, [item])
+
+
+@pytest.mark.parametrize("item_name", ["01 CPU", "1. CPU 使用率"])
+@pytest.mark.parametrize("use_template", [False, True])
+def test_numbered_item_name_is_not_treated_as_report_section(
+    tmp_path, monkeypatch, item_name, use_template,
+):
+    import app.repository as repository
+
+    if use_template:
+        selected_template(tmp_path, monkeypatch)
+    monkeypatch.setattr(repository, "get_previous_run_today", lambda *_args: None)
+    monkeypatch.setattr(repository, "list_report_runs_for_day", lambda *_args: [])
+    monkeypatch.setattr(report, "get_report_dir", lambda _run_id: tmp_path)
+
+    screenshot = tmp_path / "numbered-item.png"
+    Image.new("RGB", (120, 90), "green").save(screenshot)
+    section = "1. 服务器资源" if use_template else "系统资源"
+    item = {
+        "id": 42, "item_name": item_name, "section": section,
+        "status": "success", "file_path": str(screenshot),
+    }
+    run = {"id": 420, "started_at": "2026-10-30T09:00:00+08:00"}
+    job = {"id": 42, "name": "系统巡检", "report_title": "巡检报告"}
+    if use_template:
+        job["template_id"] = 1
+
+    path = report.generate_docx(job, run, [item])
+    report.validate_docx(Path(path), 420, [item])
+    doc = Document(path)
+    captions = [paragraph for paragraph in doc.paragraphs if paragraph.text == item_name]
+    assert len(captions) == 1
+    assert captions[0].style.name == report.ITEM_CAPTION_STYLE
 
 
 def test_existing_template_inserts_and_validates_current_run(tmp_path, monkeypatch):

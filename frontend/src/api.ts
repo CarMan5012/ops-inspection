@@ -56,10 +56,14 @@ export async function uploadForm<T = Row>(path: string, body: FormData): Promise
 }
 
 export async function logout(): Promise<void> {
-  await fetch(frontendUrl('logout'), {
-    method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': decodeURIComponent(cookie('csrf_token')) },
-  })
-  location.assign(frontendUrl('login'))
+  try {
+    await fetch(frontendUrl('logout'), {
+      method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': safeDecode(cookie('csrf_token')) },
+    })
+  } finally {
+    try { localStorage.setItem('ops_inspection_logout_at', String(Date.now())) } catch { /* Storage may be disabled. */ }
+    location.assign(frontendUrl('login'))
+  }
 }
 
 export function dateTime(value?: string): string {
@@ -67,6 +71,21 @@ export function dateTime(value?: string): string {
   return value.replace('T', ' ').slice(0, 19)
 }
 
+// SQLite CURRENT_TIMESTAMP and Prometheus timestamps are UTC. Inspection runs
+// already store the configured local time, so they continue to use dateTime().
+export function utcDateTime(value?: string): string {
+  if (!value) return '—'
+  const input = value.trim().replace(' ', 'T')
+  const timestamp = new Date(/([zZ]|[+-]\d{2}:?\d{2})$/.test(input) ? input : `${input}Z`)
+  if (Number.isNaN(timestamp.getTime())) return dateTime(value)
+  const timeZone = config.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(timestamp).map(part => [part.type, part.value]))
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`
+}
+
 export function statusText(value?: string): string {
-  return ({ success: '成功', partial_success: '部分成功', failed: '失败', running: '运行中', pending: '等待中', skipped: '已跳过' } as Row)[value || ''] || value || '未知'
+  return ({ success: '成功', partial_success: '部分成功', failed: '失败', interrupted: '已中断', queued: '排队中', running: '运行中', pending: '等待中', waiting: '等待中', skipped: '已跳过' } as Row)[value || ''] || value || '未知'
 }

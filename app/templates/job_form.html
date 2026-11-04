@@ -88,16 +88,6 @@
       时间范围 <span style="color: var(--danger);">*</span>
       <input name="time_range_label" value="{{ job.time_range_label or '最近24小时' }}" required>
     </label>
-    <label class="span-2">
-      邮件配置
-      <select name="mail_profile_id">
-        <option value="">不发送邮件</option>
-        {% for profile in mail_profiles %}
-        <option value="{{ profile.id }}" {% if job.mail_profile_id == profile.id %}selected{% endif %}>{{ profile.name }}</option>
-        {% endfor %}
-      </select>
-    </label>
-
     <!-- 钉钉群组推送 -->
     <div class="span-2" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 16px; border-radius: 6px; margin-top: 10px;">
       <label class="check" style="margin-bottom: 0; display: block; font-weight: 600;">
@@ -130,15 +120,6 @@
         <input name="enabled" type="checkbox" {% if job.enabled is not defined or job.enabled %}checked{% endif %}>
         启用定时巡检
       </label>
-      <label class="check">
-        <input name="send_mail_on_complete" type="checkbox" {% if job.send_mail_on_complete %}checked{% endif %}>
-        巡检完成后发送邮件
-      </label>
-      <label class="check">
-        <input name="send_mail_on_error" type="checkbox" {% if job.send_mail_on_error %}checked{% endif %}>
-        巡检异常时发送邮件
-      </label>
-
     </div>
   </div>
 

@@ -4,6 +4,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from cryptography.fernet import Fernet
 
 from app.settings import settings
 
@@ -59,15 +60,14 @@ LOCAL_SECRET_PREFIX = "v1:"
 
 
 def _secret_master_key(secret_value: str | None = None) -> bytes:
-    raw_key = (secret_value or settings.secret_key or "change-me").encode("utf-8")
+    key_value = secret_value if secret_value is not None else settings.secret_key
+    if not key_value:
+        raise RuntimeError("APP secret key is missing")
+    raw_key = key_value.encode("utf-8")
     return hashlib.sha256(raw_key).digest()
 
 
 def _fernet_cipher(secret_value: str | None = None):
-    try:
-        from cryptography.fernet import Fernet  # type: ignore
-    except Exception:
-        return None
     key = base64.urlsafe_b64encode(_secret_master_key(secret_value))
     return Fernet(key)
 
@@ -95,8 +95,6 @@ def secret_uses_current_key(value: str | None) -> bool:
     text = str(value or "")
     if text.startswith(FERNET_SECRET_PREFIX):
         cipher = _fernet_cipher()
-        if cipher is None:
-            return False
         try:
             cipher.decrypt(text.removeprefix(FERNET_SECRET_PREFIX).encode("utf-8"))
             return True
@@ -120,15 +118,7 @@ def encrypt_secret(plain_text: str) -> str:
     if not plain_text:
         return ""
     cipher = _fernet_cipher()
-    if cipher is not None:
-        return FERNET_SECRET_PREFIX + cipher.encrypt(plain_text.encode("utf-8")).decode("utf-8")
-
-    nonce = os.urandom(16)
-    plain = plain_text.encode("utf-8")
-    ciphertext = _xor_bytes(plain, _keystream(nonce, len(plain)))
-    body = nonce + ciphertext
-    mac = hmac.new(_secret_master_key(), b"v1:" + body, hashlib.sha256).digest()
-    return LOCAL_SECRET_PREFIX + base64.urlsafe_b64encode(body + mac).decode("ascii")
+    return FERNET_SECRET_PREFIX + cipher.encrypt(plain_text.encode("utf-8")).decode("utf-8")
 
 
 def decrypt_secret(cipher_text: str) -> str:
@@ -140,8 +130,6 @@ def decrypt_secret(cipher_text: str) -> str:
         token = text.removeprefix(FERNET_SECRET_PREFIX).encode("utf-8")
         for secret_value in [None, *getattr(settings, "legacy_secret_keys", [])]:
             cipher = _fernet_cipher(secret_value)
-            if cipher is None:
-                continue
             try:
                 return cipher.decrypt(token).decode("utf-8")
             except Exception:
@@ -175,10 +163,12 @@ def normalize_secret_for_storage(value: str | None, legacy_base64: bool = False)
         return ""
     text = str(value)
     if is_encrypted_secret(text):
-        if secret_uses_current_key(text):
+        if text.startswith(FERNET_SECRET_PREFIX) and secret_uses_current_key(text):
             return text
         plain = decrypt_secret(text)
-        return encrypt_secret(plain) if plain else ""
+        if not plain:
+            raise ValueError("Stored secret cannot be decrypted; refusing to replace it")
+        return encrypt_secret(plain)
     plain = decrypt_secret(text) if legacy_base64 else text
     return encrypt_secret(plain) if plain else ""
 
@@ -205,13 +195,16 @@ def get_totp_code(secret: str, for_time: int | None = None, step: int = 30, digi
 
 def verify_totp_code(secret: str, code: str, window: int = 1, replay_key: str = "last_used_totp_slice") -> bool:
     normalized = "".join(str(code or "").split())
-    if not normalized.isdigit():
+    if not secret or len(normalized) != 6 or not normalized.isascii() or not normalized.isdigit():
         return False
     now = int(time.time())
     matched_time_slice = None
     for drift in range(-window, window + 1):
         target_time = now + drift * 30
-        expected = get_totp_code(secret, target_time)
+        try:
+            expected = get_totp_code(secret, target_time)
+        except (ValueError, TypeError, base64.binascii.Error):
+            return False
         if hmac.compare_digest(expected, normalized):
             matched_time_slice = target_time // 30
             break
@@ -222,7 +215,8 @@ def verify_totp_code(secret: str, code: str, window: int = 1, replay_key: str = 
     try:
         from app.db import connect
         with connect() as conn:
-            # 核对数据库，避免同周期甚至过期周期被重用
+            # 先取得写锁，让同一验证码的并发请求串行检查与写入。
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT value FROM system_settings WHERE key = ?",
                 (replay_key,),
@@ -241,8 +235,8 @@ def verify_totp_code(secret: str, code: str, window: int = 1, replay_key: str = 
             )
         return True
     except Exception:
-        # 异常容错：防止由于表未初始化或其他特殊 DB 异常卡死用户登录，降级保障通过
-        return True
+        # 无法持久化重放记录时拒绝验证码，避免数据库异常绕过 MFA。
+        return False
 
 
 def build_totp_uri(secret: str, account: str, issuer: str) -> str:
@@ -279,15 +273,3 @@ def resolve_auth_credential(profile: dict[str, Any]) -> dict[str, str]:
         password = str(profile.get("password") or "")
 
     return {"username": username, "password": password}
-
-
-def resolve_mail_credential(profile: dict[str, Any]) -> str:
-    """解析邮件 SMTP 的发信密码，统一使用页面保存的直填值"""
-    if not profile:
-        return ""
-        
-    password = decrypt_secret(str(profile.get("password_secret") or ""))
-    if not password:
-        password = str(profile.get("password") or "")
-            
-    return password

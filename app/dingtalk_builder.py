@@ -46,7 +46,6 @@ def build_inspection_report_message(
     failed_count: int,
     has_word_report: bool,
     error_summary: str = "",
-    mail_status_html: str = "",
     enable_emoji: bool = False,
     notify_time: str | None = None,
 ) -> tuple[str, str]:
@@ -62,7 +61,6 @@ def build_inspection_report_message(
     failed_count    : 失败截图数量
     has_word_report : Word 报告是否生成成功
     error_summary   : 异常摘要（失败时填写）
-    mail_status_html: 邮件状态 HTML 片段（可空）
     enable_emoji    : 是否开启 Emoji 表情（全局配置）
     notify_time     : 通知时间字符串（默认当前时间）
 
@@ -125,9 +123,6 @@ def build_inspection_report_message(
         f"- {_bold('截图数量')}: {screenshot_line}",
     ]
 
-    if mail_status_html:
-        md_lines.append(f"- {_bold('邮件状态')}: {mail_status_html}")
-
     md_lines.append(f"- {_bold('通知时间')}: {time_html}")
     md_lines.append("---")
 
@@ -154,8 +149,6 @@ def build_inspection_report_message(
 
     text = "\n".join(md_lines)
     return title, text
-
-
 # ──────────────────────────────────────────────
 # 公共：构建"周期汇总报告"消息
 # ──────────────────────────────────────────────
@@ -171,7 +164,6 @@ def build_periodic_report_message(
     zip_size_str: str = "-",
     error_summary: str = "",
     unfinished_reasons: list[str] | None = None,
-    mail_status_html: str = "",
     enable_emoji: bool = False,
     notify_time: str | None = None,
 ) -> tuple[str, str]:
@@ -234,9 +226,6 @@ def build_periodic_report_message(
         f"- {_bold('归档大小')}: `{zip_size_str}`",
     ]
 
-    if mail_status_html:
-        md_lines.append(f"- {_bold('邮件状态')}: {mail_status_html}")
-
     md_lines.append(f"- {_bold('通知时间')}: {time_html}")
     md_lines.append("---")
 
@@ -264,21 +253,3 @@ def build_periodic_report_message(
 
     text = "\n".join(md_lines)
     return title, text
-
-
-# ──────────────────────────────────────────────
-# 工具：构建邮件状态的 HTML 片段（供 runner/periodic 复用）
-# ──────────────────────────────────────────────
-def build_mail_status_html(mail_status: str) -> str:
-    """
-    将邮件发送状态字符串转换为带颜色的 HTML 片段。
-    返回空字符串表示不需要展示。
-    """
-    if not mail_status or "skipped" in mail_status.lower():
-        return ""
-    s = mail_status.lower()
-    if "sent" in s or "success" in s:
-        return _c("发送成功", _C_SUCCESS)
-    if "failed" in s or "error" in s:
-        return _c(f"发送失败 ({mail_status})", _C_FAILED)
-    return _c(mail_status, _C_MUTED)

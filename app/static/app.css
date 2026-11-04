@@ -787,7 +787,26 @@ textarea.form-field-invalid {
 
 .form-stack {
   display: grid;
-  gap: 16px;
+  gap: 0;
+}
+
+.login-field {
+  display: grid;
+  grid-template-rows: 44px 20px;
+}
+
+.login-field-error {
+  display: block;
+  position: static;
+  height: 20px;
+  margin: 0;
+  padding-left: 2px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.login-field-error::before {
+  content: none;
 }
 
 .notice.error,

@@ -6,6 +6,8 @@ import time
 import random
 import logging
 import tempfile
+import math
+from io import BytesIO
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,18 +21,18 @@ from app.repository import get_auth_profile
 from app.settings import settings
 from app.utils import safe_name, now_local, resolve_auth_credential
 from app.storage_paths import get_screenshot_dir, unique_artifact_path
-from app.watermark import DEFAULT_TIME_FORMAT, format_watermark_time
+from app.watermark import DEFAULT_TIME_FORMAT, WATERMARK_DEFAULTS, format_watermark_time, validate_watermark_alignment
 
 logger = logging.getLogger("app.screenshot")
 
-DEFAULT_WATERMARK_TEMPLATE = "{time}\n省客户服务中心\ndwangchengyi7(王诚毅)"
-DEFAULT_WATERMARK_FONT_SIZE = 24
+DEFAULT_WATERMARK_TEMPLATE = "王\n{time}"
+DEFAULT_WATERMARK_FONT_SIZE = WATERMARK_DEFAULTS["watermark_font_size"]
 DEFAULT_WATERMARK_TEXT_SPACING = 10
 DEFAULT_WATERMARK_TILE_PADDING = 45
-DEFAULT_WATERMARK_TILE_GAP_X = 140
-DEFAULT_WATERMARK_TILE_GAP_Y = 140
-DEFAULT_WATERMARK_OPACITY = 65
-DEFAULT_WATERMARK_ANGLE = -45
+DEFAULT_WATERMARK_TILE_GAP_X = WATERMARK_DEFAULTS["watermark_gap_x"]
+DEFAULT_WATERMARK_TILE_GAP_Y = WATERMARK_DEFAULTS["watermark_gap_y"]
+DEFAULT_WATERMARK_OPACITY = WATERMARK_DEFAULTS["watermark_opacity"]
+DEFAULT_WATERMARK_ANGLE = WATERMARK_DEFAULTS["watermark_angle"]
 TASKBAR_TEMPLATE_DIR = Path(__file__).resolve().parent / "static" / "images"
 TASKBAR_TEMPLATE_NAMES = ("windows-taskbar-template.png", "1.png", "2.png", "3.png")
 DEFAULT_TASKBAR_TEMPLATE_PATH = TASKBAR_TEMPLATE_DIR / "windows-taskbar-template.png"
@@ -225,6 +227,8 @@ def chrome_launch_args(scale_factor: float, real_window: bool, width: int = 0, h
         args.extend([
             f"--force-device-scale-factor={scale_factor}",
             "--high-dpi-support=1",
+            "--use-gl=angle",
+            "--use-angle=swiftshader",
             f"--window-position={left},{top}",
             f"--window-size={logical_width},{logical_height}",
         ])
@@ -292,10 +296,8 @@ def _is_login_failure_visible(page: Page) -> bool:
     ]
     for pattern in failure_patterns:
         try:
-            page.get_by_text(pattern, exact=False).wait_for(state="visible", timeout=500)
-            return True
-        except PlaywrightTimeoutError:
-            continue
+            if page.get_by_text(pattern, exact=False).first.is_visible():
+                return True
         except Exception:
             continue
     return False
@@ -508,6 +510,8 @@ def _capture_with_browser(
         _remaining_ms(deadline)
         if _is_grafana_dashboard(str(page.url)):
             content = _wait_for_grafana_panels(page, min(5_000, _remaining_ms(deadline)), query_tracker, settle_ms=0)
+        elif str(item.get("item_type") or "").lower() == "kibana":
+            content = _wait_for_kibana_panels(page, min(5_000, _remaining_ms(deadline)), settle_ms=0)
         if is_real_capture:
             _assert_real_window_viewport(page)
         fd, temp_name = tempfile.mkstemp(prefix=".capture-", suffix=".png", dir=screenshot_dir)
@@ -582,6 +586,22 @@ def _new_context(browser: Any, auth_profile: dict[str, Any] | None, width: int, 
             encrypted_bytes = state_path.read_bytes()
             decrypted_str = _decrypt_state_data(encrypted_bytes)
             kwargs["storage_state"] = json.loads(decrypted_str)
+            if encrypted_bytes.startswith(b"v1:"):
+                try:
+                    temporary_path = None
+                    with tempfile.NamedTemporaryFile(dir=state_path.parent, prefix=state_path.name + ".",
+                                                     suffix=".tmp", delete=False) as temporary_file:
+                        temporary_path = Path(temporary_file.name)
+                        temporary_file.write(_encrypt_state_data(decrypted_str))
+                    os.replace(temporary_path, state_path)
+                except Exception as exc:
+                    logger.warning(f"  ├─ 会话认证: 旧状态缓存转换失败，将在下次读取时重试: {exc}")
+                finally:
+                    if temporary_path is not None:
+                        try:
+                            temporary_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
         except Exception as e:
             logger.error(f"  ├─ 会话认证: 解密或加载状态缓存失败，将重新登录: {e}")
     return browser.new_context(**kwargs)
@@ -635,8 +655,11 @@ def _is_on_login_page(page: Page, auth_profile: dict[str, Any] | None) -> bool:
         if current_key == login_key:
             return True
 
-    # 1. URL 特征识别
-    if "/login" in current_url or "/signin" in current_url:
+    # Match a login endpoint, not dashboard slugs such as /d/uid/login-overview.
+    from urllib.parse import urlsplit
+    path_segments = urlsplit(current_url).path.strip("/").split("/")
+    if any(segment in {"login", "signin", "login.html", "login.htm", "login.php", "login.jsp"}
+           for segment in path_segments):
         return True
 
     # 2. 密码框可见性识别
@@ -904,9 +927,17 @@ class _GrafanaQueryTracker:
 
 
 _GRAFANA_PANEL_SNAPSHOT = r"""() => {
+  const isRowItem = (item) => {
+    return item.matches('.dashboard-row, [class*="dashboard-row"]') ||
+      !!item.querySelector('.dashboard-row, [class*="dashboard-row"], [data-testid*="dashboard-row"], [aria-label*="Toggle row"]');
+  };
   const gridItems = [...document.querySelectorAll('.react-grid-item')];
   const candidates = gridItems.length
-    ? gridItems.filter(item => !item.querySelector('.dashboard-row'))
+    ? gridItems.filter(item => {
+        if (isRowItem(item)) return false;
+        return item.matches('.panel-container, [class*="panel-container"], [data-testid="panel-container"]') ||
+          !!item.querySelector('.panel-container, [class*="panel-container"], [data-testid="panel-container"]');
+      })
     : [...document.querySelectorAll('.panel-container, [class*="panel-container"], [data-testid="panel-container"]')];
   const visible = candidates.filter(panel => {
     const rect = panel.getBoundingClientRect();
@@ -947,6 +978,67 @@ _GRAFANA_PANEL_SNAPSHOT = r"""() => {
 
 def _grafana_snapshot(page: Page) -> dict[str, Any]:
     return page.evaluate(_GRAFANA_PANEL_SNAPSHOT)
+
+
+_KIBANA_PANEL_SNAPSHOT = r"""() => {
+  const visible = node => {
+    const r = node.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 &&
+      r.top < innerHeight && r.left < innerWidth;
+  };
+  const selector = '[data-test-subj="dashboardPanel"], [data-test-subj="embeddablePanel"], [data-test-subj="embeddablePanelWrapper"]';
+  const panels = [...document.querySelectorAll(selector)].filter(node =>
+    visible(node) && !node.parentElement?.closest(selector));
+  return {panels: panels.map((panel, index) => {
+    const title = (panel.querySelector('[data-test-subj="embeddablePanelHeading"], [data-test-subj="dashboardPanelTitle"], .embPanel__title')?.textContent ||
+      `面板 ${index + 1}`).trim().slice(0, 80);
+    const body = panel.querySelector('[data-test-subj="embeddablePanelContent"], [data-test-subj="dashboardPanelContent"], .embPanel__content');
+    if (!body) return {title, state: 'loading'};
+    const text = (body.innerText || '').trim();
+    if (body.querySelector('[data-test-subj="embeddablePanelError"], [data-test-subj="dashboardPanelError"], .euiCallOut--danger') ||
+        /(?:^|\n)\s*(?:Error loading|Unable to load|Query error|查询失败|加载失败)(?:\b|\s|:|：|$)/i.test(text))
+      return {title, state: 'error', detail: text.slice(0, 160)};
+    if (body.querySelector('[data-test-subj="loadingIndicator"], [data-test-subj="embeddablePanelLoading"], [role="progressbar"], [aria-busy="true"], .euiLoadingSpinner'))
+      return {title, state: 'loading'};
+    if (/^(?:No results found|No data|暂无数据|无数据)(?:\s|$)/i.test(text))
+      return {title, state: 'no_data'};
+    const visual = 'canvas, svg, img, table, [role="table"], [role="img"], [data-test-subj="visualizationLoader"]';
+    return {title, state: body.querySelector(visual) || text ? 'data' : 'loading'};
+  })};
+}"""
+
+
+def _wait_for_kibana_panels(page: Page, timeout_ms: int, settle_ms: int = 1000) -> dict[str, Any]:
+    logger.info("  等待 Kibana 图表完成加载…")
+    deadline = time.monotonic() + timeout_ms / 1000
+    ready_since: float | None = None
+    last_panels: list[dict[str, str]] = []
+    while True:
+        snapshot = page.evaluate(_KIBANA_PANEL_SNAPSHOT)
+        panels = snapshot.get("panels") or []
+        last_panels = panels
+        errors = [panel for panel in panels if panel.get("state") == "error"]
+        if errors:
+            panel = errors[0]
+            raise RuntimeError(f"Kibana 图表“{panel['title']}”查询错误：{panel.get('detail') or '请检查数据源'}")
+        now = time.monotonic()
+        if panels and all(panel.get("state") in {"data", "no_data"} for panel in panels):
+            ready_since = ready_since or now
+            if (now - ready_since) * 1000 >= settle_ms:
+                no_data = [panel["title"] for panel in panels if panel["state"] == "no_data"]
+                status = "no_data" if len(no_data) == len(panels) else "partial_no_data" if no_data else "data"
+                summary = (f"全部 {len(panels)} 个图表无数据，需确认" if status == "no_data" else
+                           f"{len(no_data)} 个图表无数据：{'、'.join(no_data[:5])}" if no_data else
+                           f"{len(panels)} 个图表已显示")
+                logger.info("  Kibana 图表已加载：%s", summary)
+                return {"status": status, "summary": summary}
+        else:
+            ready_since = None
+        remaining = deadline - now
+        if remaining <= 0:
+            unfinished = [panel["title"] for panel in last_panels if panel.get("state") not in {"data", "no_data"}]
+            raise TimeoutError(f"Kibana 图表未完成加载：{'、'.join(unfinished[:5]) or '未找到可见图表'}")
+        page.wait_for_timeout(min(300, max(1, int(remaining * 1000))))
 
 
 def _wait_for_grafana_panels(
@@ -1003,7 +1095,9 @@ def _wait_for_page(
     if wait_selector:
         logger.info(f"  等待元素：{wait_selector}")
         page.wait_for_selector(wait_selector, state="visible", timeout=_remaining_ms(deadline))
-    content = _wait_for_grafana_panels(page, _remaining_ms(deadline), tracker)
+    content = (_wait_for_kibana_panels(page, _remaining_ms(deadline))
+               if str(item.get("item_type") or "").lower() == "kibana"
+               else _wait_for_grafana_panels(page, _remaining_ms(deadline), tracker))
     wait_seconds = float(item.get("wait_seconds") or 0)
     if wait_seconds > 0:
         if wait_seconds * 1000 > _remaining_ms(deadline):
@@ -1052,32 +1146,41 @@ def _watermark_int(value: Any, default: int, min_value: int, max_value: int) -> 
 
 
 def _apply_configured_watermark(image_path: Path, item: dict[str, Any]) -> None:
+    options = _configured_watermark_options(item)
+    if options:
+        _apply_watermark(image_path=image_path, **options)
+
+
+def _configured_watermark_options(item: dict[str, Any]) -> dict[str, Any] | None:
     if not _watermark_bool(item.get("watermark_enabled"), False):
-        return
+        return None
 
     custom_text = str(item.get("watermark_text") or "").strip()
     parts = []
+    time_line_index = None
+    if custom_text:
+        parts.append(custom_text)
     if _watermark_bool(item.get("watermark_time_enabled"), False):
         try:
             from zoneinfo import ZoneInfo
             now = datetime.now(ZoneInfo(settings.default_timezone))
         except Exception:
             now = datetime.now()
+        time_line_index = len("\n".join(parts).splitlines()) if parts else 0
         parts.append(format_watermark_time(now, str(item.get("watermark_time_format") or DEFAULT_TIME_FORMAT)))
-    if custom_text:
-        parts.append(custom_text)
     if not parts:
-        return
+        return None
 
-    _apply_watermark(
-        image_path=image_path,
-        text="\n".join(parts),
-        opacity=_watermark_int(item.get("watermark_opacity"), DEFAULT_WATERMARK_OPACITY, 0, 255),
-        font_size=_watermark_int(item.get("watermark_font_size"), DEFAULT_WATERMARK_FONT_SIZE, 10, 72),
-        gap_x=_watermark_int(item.get("watermark_gap_x"), DEFAULT_WATERMARK_TILE_GAP_X, 20, 800),
-        gap_y=_watermark_int(item.get("watermark_gap_y"), DEFAULT_WATERMARK_TILE_GAP_Y, 20, 800),
-        angle=_watermark_int(item.get("watermark_angle"), DEFAULT_WATERMARK_ANGLE, -90, 90),
-    )
+    return {
+        "text": "\n".join(parts),
+        "opacity": _watermark_int(item.get("watermark_opacity"), DEFAULT_WATERMARK_OPACITY, 0, 255),
+        "font_size": _watermark_int(item.get("watermark_font_size"), DEFAULT_WATERMARK_FONT_SIZE, 10, 72),
+        "gap_x": _watermark_int(item.get("watermark_gap_x"), DEFAULT_WATERMARK_TILE_GAP_X, 20, 800),
+        "gap_y": _watermark_int(item.get("watermark_gap_y"), DEFAULT_WATERMARK_TILE_GAP_Y, 20, 800),
+        "angle": _watermark_int(item.get("watermark_angle"), DEFAULT_WATERMARK_ANGLE, -90, 90),
+        "alignment": validate_watermark_alignment(str(item.get("watermark_alignment") or WATERMARK_DEFAULTS["watermark_alignment"])),
+        "time_line_index": time_line_index,
+    }
 
 
 def _taskbar_template_paths() -> list[Path]:
@@ -1287,7 +1390,32 @@ def _apply_default_watermark(image_path: Path) -> None:
         gap_x=DEFAULT_WATERMARK_TILE_GAP_X,
         gap_y=DEFAULT_WATERMARK_TILE_GAP_Y,
         angle=DEFAULT_WATERMARK_ANGLE,
+        alignment=WATERMARK_DEFAULTS["watermark_alignment"],
+        time_line_index=1,
     )
+
+
+def render_watermark_preview_png(item: dict[str, Any], image_width: int, image_height: int) -> bytes:
+    """Render a transparent preview with the screenshot watermark renderer."""
+    from PIL import Image
+
+    preview_scale = min(1.0, 1200 / image_width, 1600 / image_height)
+    preview_width = max(1, round(image_width * preview_scale))
+    preview_height = max(1, round(image_height * preview_scale))
+    render_native = image_width * image_height <= 10_000_000
+    render_size = (image_width, image_height) if render_native else (preview_width, preview_height)
+    preview = Image.new("RGBA", render_size, (0, 0, 0, 0))
+    options = _configured_watermark_options(item)
+    if options:
+        preview = _render_watermark(
+            preview, **options,
+            geometry_size=None if render_native else (image_width, image_height),
+        )
+    if render_native and preview_scale < 1:
+        preview = preview.resize((preview_width, preview_height), Image.Resampling.LANCZOS)
+    output = BytesIO()
+    preview.save(output, format="PNG")
+    return output.getvalue()
 
 
 def _apply_watermark(
@@ -1298,19 +1426,196 @@ def _apply_watermark(
     gap_x: int,
     gap_y: int,
     angle: int,
+    alignment: str = "center",
+    time_line_index: int | None = None,
 ) -> None:
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image
     except ImportError as err:
         raise RuntimeError("截图水印处理失败：未安装 Pillow，请先安装 requirements.txt 中的 Pillow 依赖") from err
 
     if not image_path.exists():
         raise FileNotFoundError(f"截图水印处理失败：图片文件不存在 {image_path}")
 
+    with Image.open(image_path) as orig_img:
+        img_rgba = orig_img.convert("RGBA")
+        img_rgba.load()
+    combined = _render_watermark(img_rgba, text, opacity, font_size, gap_x, gap_y, angle, alignment, time_line_index=time_line_index)
+    if image_path.suffix.lower() in {".jpg", ".jpeg"}:
+        combined.convert("RGB").save(image_path)
+    else:
+        combined.save(image_path)
+
+    logger.info("  ├─ 视觉增强: ✔ 已为截图添加配置的水印")
+
+
+# Measured from the four lossless reference captures. The interpolation keeps
+# width and height independent: two captures have the same width but different
+# heights, while another pair has almost the same height but different widths.
+_REFERENCE_GEOMETRY = {
+    (3840, 2088): {"angle": 36.19, "name_height": 60, "name_width": 69, "date_width": 652,
+                   "date_dx": 22.5, "date_dy": 34.5, "name_dx": -38.5, "name_dy": -75.5},
+    (1898, 2058): {"angle": 42.27, "name_height": 48, "name_width": 55, "date_width": 474,
+                   "date_dx": 18.25, "date_dy": 24, "name_dx": -36, "name_dy": -55},
+    (2489, 1470): {"angle": 37.20, "name_height": 39, "name_width": 45, "date_width": 429,
+                   "date_dx": 13.6, "date_dy": 22, "name_dx": -25, "name_dy": -49},
+    (2489, 2043): {"angle": 41.21, "name_height": 50, "name_width": 57, "date_width": 540,
+                   "date_dx": 19.6, "date_dy": 25.75, "name_dx": -36.5, "name_dy": -59},
+}
+
+
+def _reference_metric(width: int, height: int, key: str) -> float:
+    """Interpolate measured watermark geometry without treating a screenshot as a fixed bitmap."""
+    if not (1898 <= width <= 3840 and 1470 <= height <= 2088):
+        anchor_width = max(1898, min(width, 3840))
+        anchor_height = max(1470, min(height, 2088))
+        anchor_value = _reference_metric(anchor_width, anchor_height, key)
+        if key == "angle":
+            return anchor_value
+        return anchor_value * min(width / anchor_width, height / anchor_height)
+
+    short = _REFERENCE_GEOMETRY[(2489, 1470)][key]
+    tall = _REFERENCE_GEOMETRY[(2489, 2043)][key]
+    height_slope = (tall - short) / (2043 - 1470)
+    value = short + (height - 1470) * height_slope
+    if width < 2489:
+        left = _REFERENCE_GEOMETRY[(1898, 2058)][key]
+        value += (width - 2489) * (left - short - (2058 - 1470) * height_slope) / (1898 - 2489)
+    elif width > 2489:
+        right = _REFERENCE_GEOMETRY[(3840, 2088)][key]
+        value += (width - 2489) * (right - short - (2088 - 1470) * height_slope) / (3840 - 2489)
+    return value
+
+
+def _render_reference_watermark(
+    img_rgba: Any, name: str, date_text: str, opacity: int, font_size: int,
+    gap_x: int, gap_y: int, angle: int, name_font: Any, date_font: Any,
+    geometry_size: tuple[int, int] | None = None,
+) -> Any:
+    from PIL import Image, ImageDraw, ImageFont
+
+    width, height = img_rgba.size
+    geometry_width, geometry_height = geometry_size or (width, height)
+    geometry_scale = min(width / geometry_width, height / geometry_height)
+    size_scale = font_size / WATERMARK_DEFAULTS["watermark_font_size"]
+    measured_angle = _reference_metric(geometry_width, geometry_height, "angle") + angle - WATERMARK_DEFAULTS["watermark_angle"]
+    measured_angle = max(-90.0, min(90.0, measured_angle))
+    radians = math.radians(measured_angle)
+    along_x, along_y = math.cos(radians), -math.sin(radians)
+
+    measure = ImageDraw.Draw(Image.new("L", (1, 1)))
+
+    def fitted_font(base_font: Any, sample: str, target: float, axis: str) -> Any:
+        if not hasattr(base_font, "font_variant"):
+            return base_font
+        initial = measure.textbbox((0, 0), sample, font=base_font)
+        current = (initial[2] - initial[0]) if axis == "width" else (initial[3] - initial[1])
+        guess = max(1, round(base_font.size * target / max(1, current)))
+        best = base_font
+        best_error = float("inf")
+        for size in range(max(1, guess - 4), guess + 5):
+            candidate = base_font.font_variant(size=size)
+            box = measure.textbbox((0, 0), sample, font=candidate)
+            value = (box[2] - box[0]) if axis == "width" else (box[3] - box[1])
+            error = abs(value - target)
+            if error < best_error:
+                best, best_error = candidate, error
+        return best
+
+    if any(ord(character) > 127 for character in date_text):
+        for path_str in (
+            r"C:\Windows\Fonts\msyhbd.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        ):
+            if Path(path_str).exists():
+                date_font = ImageFont.truetype(path_str, date_font.size)
+                break
+
+    name_font = fitted_font(name_font, name, max(1, _reference_metric(geometry_width, geometry_height, "name_height") * size_scale), "height")
+    date_font = fitted_font(date_font, "2026-10-26 08:48:13", max(1, _reference_metric(geometry_width, geometry_height, "date_width") * size_scale), "width")
+
+    def glyph(value: str, selected_font: Any) -> Any:
+        box = measure.textbbox((0, 0), value, font=selected_font)
+        padding = 5
+        image = Image.new("RGBA", (box[2] - box[0] + padding * 2, box[3] - box[1] + padding * 2))
+        draw = ImageDraw.Draw(image)
+        draw.text((padding - box[0], padding - box[1]), value, font=selected_font,
+                  fill=(155, 155, 155, max(0, min(255, opacity))))
+        rotated = image.rotate(measured_angle, expand=True, resample=Image.Resampling.BILINEAR)
+        return rotated.crop(rotated.getchannel("A").getbbox())
+
+    name_image = glyph(name, name_font)
+    date_image = glyph(date_text, date_font)
+    layer = Image.new("RGBA", (width, height))
+
+    def place(image: Any, center_x: float, center_y: float) -> None:
+        x = round(center_x - image.width / 2)
+        y = round(center_y - image.height / 2)
+        left, top = max(0, x), max(0, y)
+        right, bottom = min(width, x + image.width), min(height, y + image.height)
+        if right > left and bottom > top:
+            part = image.crop((left - x, top - y, right - x, bottom - y))
+            layer.alpha_composite(part, (left, top))
+
+    pitch = geometry_width / 4 * geometry_scale + gap_x - WATERMARK_DEFAULTS["watermark_gap_x"] * geometry_scale
+    row_distance = geometry_height / 2 * geometry_scale + gap_y - WATERMARK_DEFAULTS["watermark_gap_y"] * geometry_scale
+    name_width = max(1, _reference_metric(geometry_width, geometry_height, "name_width") * size_scale)
+    date_width = max(1, _reference_metric(geometry_width, geometry_height, "date_width") * size_scale)
+    name_shift = max(0, width / 8 - 0.7 * name_width)
+    date_shift = name_shift - (date_width - name_width) / 2
+    date_dx = _reference_metric(geometry_width, geometry_height, "date_dx") * size_scale
+    date_dy = _reference_metric(geometry_width, geometry_height, "date_dy") * size_scale
+    name_dx = _reference_metric(geometry_width, geometry_height, "name_dx") * size_scale
+    name_dy = _reference_metric(geometry_width, geometry_height, "name_dy") * size_scale
+
+    for column, direction in enumerate((-1, 0, 1, 1)):
+        date_x = geometry_width / 8 * geometry_scale + column * pitch + date_dx
+        date_y = geometry_height * 0.75 * geometry_scale + date_dy
+        name_x = date_x + name_dx
+        name_y = date_y + name_dy
+        place(date_image, date_x, date_y)
+        place(name_image, name_x, name_y)
+        place(date_image, date_x + direction * date_shift * along_x,
+              date_y - row_distance + direction * date_shift * along_y)
+        place(name_image, name_x + direction * name_shift * along_x,
+              name_y - row_distance + direction * name_shift * along_y)
+
+    return Image.alpha_composite(img_rgba, layer)
+
+
+def _render_watermark(
+    img_rgba: Any,
+    text: str,
+    opacity: int,
+    font_size: int,
+    gap_x: int,
+    gap_y: int,
+    angle: int,
+    alignment: str,
+    scale: float = 1.0,
+    time_line_index: int | None = None,
+    geometry_size: tuple[int, int] | None = None,
+) -> Any:
+    from PIL import Image, ImageDraw, ImageFont
+
+    width, height = img_rgba.size
+    if geometry_size is not None:
+        scale *= min(width / geometry_size[0], height / geometry_size[1])
+
+    # Screenshot settings are physical pixels. The preview is rendered at the
+    # capture size first and only the completed layer is scaled for display.
+    font_size = max(1, round(font_size * scale))
+    gap_x = round(gap_x * scale)
+    gap_y = round(gap_y * scale)
+    padding = round(DEFAULT_WATERMARK_TILE_PADDING * scale)
+    line_spacing = round(DEFAULT_WATERMARK_TEXT_SPACING * scale)
+    alignment = validate_watermark_alignment(alignment)
+
     font_paths = [
+        r"C:\Windows\Fonts\msyhl.ttc",
         r"C:\Windows\Fonts\dengl.ttf",
-        r"C:\Windows\Fonts\deng.ttf",
         r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\deng.ttf",
         "/System/Library/Fonts/PingFang.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -1328,64 +1633,76 @@ def _apply_watermark(
     if font is None:
         font = ImageFont.load_default()
 
-    with Image.open(image_path) as orig_img:
-        img_rgba = orig_img.convert("RGBA")
-        img_rgba.load()
+    time_font = None
+    for path_str in (
+        r"C:\Windows\Fonts\arialbd.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        r"C:\Windows\Fonts\msyhbd.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    ):
+        font_path = Path(path_str)
+        if font_path.exists():
+            try:
+                time_font = ImageFont.truetype(str(font_path), max(1, round(font_size * 1.2)))
+                break
+            except Exception:
+                continue
+    time_font_needs_stroke = time_font is None
+    if time_font is None:
+        time_font = font
 
-    width, height = img_rgba.size
+    if alignment == "reference" and time_line_index == 1 and len(text.splitlines()) == 2:
+        name, date_text = text.splitlines()
+        return _render_reference_watermark(
+            img_rgba, name, date_text, opacity, font_size, gap_x, gap_y, angle, font, time_font,
+            geometry_size=geometry_size,
+        )
+    if alignment == "reference":
+        alignment = "center"
 
     temp_img = Image.new("RGBA", (1, 1))
     temp_draw = ImageDraw.Draw(temp_img)
-    try:
-        bbox = temp_draw.multiline_textbbox(
-            (0, 0), text, font=font, spacing=DEFAULT_WATERMARK_TEXT_SPACING, align="center"
-        )
-        offset_x = bbox[0]
-        offset_y = bbox[1]
-        txt_w = bbox[2] - bbox[0]
-        txt_h = bbox[3] - bbox[1]
-    except AttributeError:
-        offset_x = 0
-        offset_y = 0
-        txt_w = max(len(line) for line in text.split("\n")) * font_size
-        txt_h = len(text.split("\n")) * (font_size + DEFAULT_WATERMARK_TEXT_SPACING)
-
-    txt_img_w = int(txt_w + 1) + DEFAULT_WATERMARK_TILE_PADDING * 2
-    txt_img_h = int(txt_h + 1) + DEFAULT_WATERMARK_TILE_PADDING * 2
+    lines = text.splitlines()
+    fonts = [time_font if index == time_line_index else font for index in range(len(lines))]
+    boxes = [temp_draw.textbbox((0, 0), line, font=line_font) for line, line_font in zip(lines, fonts)]
+    line_widths = [box[2] - box[0] for box in boxes]
+    txt_w = max(line_widths)
+    line_advance = font_size + line_spacing
+    txt_h = (len(lines) - 1) * line_advance + max(box[3] - box[1] for box in boxes)
+    txt_img_w = txt_w + padding * 2 + 1
+    txt_img_h = txt_h + padding * 2 + 1
     txt_img = Image.new("RGBA", (txt_img_w, txt_img_h), (0, 0, 0, 0))
     draw_txt = ImageDraw.Draw(txt_img)
-    draw_txt.multiline_text(
-        (int(DEFAULT_WATERMARK_TILE_PADDING - offset_x), int(DEFAULT_WATERMARK_TILE_PADDING - offset_y)),
-        text,
-        font=font,
-        fill=(0, 0, 0, 0),
-        stroke_width=1,
-        stroke_fill=(160, 160, 160, opacity),
-        spacing=DEFAULT_WATERMARK_TEXT_SPACING,
-        align="center",
-    )
+    for index, (line, box, line_width, line_font) in enumerate(zip(lines, boxes, line_widths, fonts)):
+        offset = {"left": 0, "center": (txt_w - line_width) / 2, "right": txt_w - line_width}[alignment]
+        stroke_width = 1 if index == time_line_index and time_font_needs_stroke else 0
+        draw_txt.text(
+            (round(padding + offset - box[0]), round(padding + index * line_advance - box[1])),
+            line, font=line_font, fill=(160, 160, 160, opacity),
+            stroke_width=stroke_width, stroke_fill=(160, 160, 160, opacity),
+        )
 
     resample_bilinear = getattr(getattr(Image, "Resampling", Image), "BILINEAR", Image.BILINEAR)
     rotated_txt = txt_img.rotate(angle, expand=True, resample=resample_bilinear)
     rot_w, rot_h = rotated_txt.size
 
     watermark_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    step_x = rot_w + gap_x
-    step_y = rot_h + gap_y
-    start_x = round(width * 0.04)
-    start_y = round(height * 0.04)
+    # Keep the reference layout at four columns and roughly two rows as the
+    # capture size changes. The gap controls adjust that pitch in pixels.
+    step_x = max(1, round(width / 4 + gap_x - round(WATERMARK_DEFAULTS["watermark_gap_x"] * scale)))
+    step_y = max(1, round(height * 5 / 9 + gap_y - round(WATERMARK_DEFAULTS["watermark_gap_y"] * scale)))
+    start_x = round(width * 0.032)
+    start_y = round(height * 0.032)
 
     for y in range(start_y, height + rot_h, step_y):
         for x in range(start_x, width + rot_w, step_x):
-            watermark_layer.paste(rotated_txt, (x, y), rotated_txt)
+            right, bottom = min(width, x + rot_w), min(height, y + rot_h)
+            if right > x and bottom > y:
+                watermark_layer.alpha_composite(rotated_txt.crop((0, 0, right - x, bottom - y)), (x, y))
 
     combined = Image.alpha_composite(img_rgba, watermark_layer)
-    if image_path.suffix.lower() in {".jpg", ".jpeg"}:
-        combined.convert("RGB").save(image_path)
-    else:
-        combined.save(image_path)
-
-    logger.info("  ├─ 视觉增强: ✔ 已为截图添加配置的水印")
+    return combined
 
 
 def _browser_window_rect(page: Page, width: int, height: int, *, position: bool = True, scale_factor: float = 1.0) -> dict[str, int]:
@@ -1525,9 +1842,9 @@ def _take_screenshot(
                     f"浏览器实际截图尺寸 {rect['width']}x{rect['height']} 与配置 "
                     f"{expected_width}x{expected_height} 不一致"
                 )
-            content = _wait_for_grafana_panels(
+            content = (_wait_for_grafana_panels(
                 page, min(5_000, _remaining_ms(deadline)), query_tracker, settle_ms=0,
-            )
+            ) if _is_grafana_dashboard(str(page.url)) else None)
             _remaining_ms(deadline)
             with mss.mss() as sct:
                 if not sct.monitors:

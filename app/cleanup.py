@@ -8,6 +8,7 @@ import sqlite3
 import shutil
 import re
 from contextvars import ContextVar
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -15,9 +16,29 @@ from typing import Any
 
 from app.settings import settings
 from app.db import connect
+from app.ui_config import CLEANUP_PERIODS, CLEANUP_SCOPES
 
 logger = logging.getLogger("app.cleanup")
 _preview_items: ContextVar[list[dict[str, Any]] | None] = ContextVar("cleanup_preview_items", default=None)
+_confirmed_items: ContextVar[dict[tuple[str, str], dict[str, Any]] | None] = ContextVar("cleanup_confirmed_items", default=None)
+
+
+@contextmanager
+def confirmed_cleanup(items: list[dict[str, Any]]):
+    """Limit a manual cleanup to the exact candidates verified by the API."""
+    token = _confirmed_items.set({(item["kind"], item["path"]): item for item in items})
+    try:
+        yield
+    finally:
+        _confirmed_items.reset(token)
+
+
+def _confirmed_record(kind: str, record_id: int, started_at: str | None) -> bool:
+    confirmed = _confirmed_items.get()
+    if confirmed is None:
+        return True
+    item = confirmed.get((kind, f"{kind}/{record_id}"))
+    return item is not None and item.get("date") == (started_at or "")
 
 
 def _add_preview_item(item: dict[str, Any]) -> None:
@@ -29,6 +50,7 @@ def _add_preview_item(item: dict[str, Any]) -> None:
 def preview_cleanup(
     *, scopes: list[str], older_than_days: int | None = None,
     target_month: str | None = None, page: int = 1, page_size: int = 20,
+    include_all_items: bool = False,
 ) -> dict[str, Any]:
     """列出清理候选文件和记录，不执行删除，也不写清理历史。"""
     if not isinstance(scopes, list) or not scopes:
@@ -54,11 +76,14 @@ def preview_cleanup(
     }
     fingerprint = hashlib.sha256(json.dumps(fingerprint_source, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     offset = (page - 1) * page_size
-    return {
+    response = {
         **result, "items": ordered[offset:offset + page_size],
         "total_items": len(ordered), "page": page, "page_size": page_size,
         "fingerprint": fingerprint,
     }
+    if include_all_items:
+        response["_all_items"] = ordered
+    return response
 
 
 def get_dir_size(path: Path) -> int:
@@ -139,15 +164,22 @@ def safe_delete_file(file_path: Path, dry_run: bool = False, errors: list[str] |
     try:
         stat = file_path.stat()
         size = stat.st_size
+        resolved = file_path.resolve()
+        suffix = resolved.suffix.lower()
+        kind = {
+            ".png": "screenshot", ".docx": "report", ".zip": "periodic_file",
+        }.get(suffix, "log" if resolved.is_relative_to(settings.log_dir.resolve()) else "file")
+        relative_path = resolved.relative_to(settings.data_dir.resolve()).as_posix()
+        confirmed = _confirmed_items.get()
+        if not dry_run and confirmed is not None:
+            candidate = confirmed.get((kind, relative_path))
+            if candidate is None or candidate.get("size") != size or candidate.get("version") != stat.st_mtime_ns:
+                _record_delete_error(errors, f"待清理文件已变化，请重新预览: {file_path}")
+                return 0, 0
         if dry_run and _preview_items.get() is not None:
-            resolved = file_path.resolve()
-            suffix = resolved.suffix.lower()
-            kind = {
-                ".png": "screenshot", ".docx": "report", ".zip": "periodic_file",
-            }.get(suffix, "log" if resolved.is_relative_to(settings.log_dir.resolve()) else "file")
             _add_preview_item({
                 "kind": kind, "name": resolved.name,
-                "path": resolved.relative_to(settings.data_dir.resolve()).as_posix(),
+                "path": relative_path,
                 "date": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
                 "size": size, "version": stat.st_mtime_ns,
             })
@@ -199,7 +231,7 @@ def safe_delete_dir(dir_path: Path, dry_run: bool = False, errors: list[str] | N
 def parse_db_time(time_str: str) -> datetime:
     """兼容各种格式解析数据库时间字符串，统一转换到本地时区（支持 naive 与 timezone-aware 的混合比对）"""
     if not time_str:
-        return datetime.min
+        return datetime.max
     from zoneinfo import ZoneInfo
     from app.settings import settings
     local_tz = ZoneInfo(settings.default_timezone)
@@ -215,13 +247,25 @@ def parse_db_time(time_str: str) -> datetime:
 
     # 2. 备用原本的截取解析
     time_str = time_str.replace("T", " ")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2})?", time_str):
+        return datetime.max
     try:
-        return datetime.strptime(time_str[:19], "%Y-%m-%d %H:%M:%S")
+        return datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         try:
-            return datetime.strptime(time_str[:10], "%Y-%m-%d")
+            return datetime.strptime(time_str, "%Y-%m-%d")
         except ValueError:
-            return datetime.min
+            return datetime.max
+
+
+def _finished_run(run: dict[str, Any]) -> bool:
+    """Never treat an active or invalid run as an expired cleanup candidate."""
+    return (
+        str(run.get("status") or "").lower() not in {"queued", "running", "waiting"}
+        and bool(run.get("finished_at"))
+        and parse_db_time(run.get("started_at")) != datetime.max
+        and parse_db_time(run.get("finished_at")) != datetime.max
+    )
 
 
 def estimate_cleanup(target_month: str | None = None) -> dict[str, Any]:
@@ -244,12 +288,12 @@ def run_cleanup(
     selected_scopes: set[str] | None = None
     if scopes is not None:
         if mode != "manual" or not isinstance(scopes, list) or not scopes or any(
-            not isinstance(scope, str) or scope not in {"inspection", "periodic", "logs"}
+            not isinstance(scope, str) or scope not in {option["value"] for option in CLEANUP_SCOPES}
             for scope in scopes
         ):
             raise ValueError("清理内容无效")
         selected_scopes = set(scopes)
-        if target_month is None and (type(older_than_days) is not int or older_than_days not in {7, 30, 90, 180, 365}):
+        if target_month is None and (type(older_than_days) is not int or older_than_days not in {int(option["value"]) for option in CLEANUP_PERIODS if option["value"] != "month"}):
             raise ValueError("清理时间无效")
         if target_month is not None and older_than_days is not None:
             raise ValueError("指定月份时不能同时设置保留天数")
@@ -343,31 +387,33 @@ def run_cleanup(
         if target_month and not results["errors"] and (selected_scopes is None or "periodic" in selected_scopes):
             try:
                 with connect() as conn:
+                    rows = conn.execute(
+                        "SELECT * FROM periodic_report_runs WHERE started_at LIKE ?",
+                        (f"{target_month}%",),
+                    ).fetchall()
+                    eligible_rows = [
+                        dict(row) for row in rows
+                        if _finished_run(dict(row))
+                        and _confirmed_record("periodic_record", row["id"], row["started_at"])
+                    ]
                     if dry_run:
+                        results["deleted_periodic_run_records_count"] = len(eligible_rows)
                         if _preview_items.get() is not None:
-                            rows = conn.execute(
-                                "SELECT id, started_at FROM periodic_report_runs WHERE started_at LIKE ?",
-                                (f"{target_month}%",),
-                            ).fetchall()
-                            results["deleted_periodic_run_records_count"] = len(rows)
-                            for row in rows:
+                            for row in eligible_rows:
                                 _add_preview_item({
                                     "kind": "periodic_record", "name": f"周期报告记录 #{row['id']}",
                                     "path": f"periodic_record/{row['id']}", "date": row["started_at"] or "",
                                     "size": None,
                                 })
-                        else:
-                            row = conn.execute(
-                                "SELECT COUNT(*) FROM periodic_report_runs WHERE started_at LIKE ?",
-                                (f"{target_month}%",),
-                            ).fetchone()
-                            results["deleted_periodic_run_records_count"] = int(row[0]) if row else 0
                     else:
-                        cursor = conn.execute(
-                            "DELETE FROM periodic_report_runs WHERE started_at LIKE ?",
-                            (f"{target_month}%",),
-                        )
-                        results["deleted_periodic_run_records_count"] = max(0, cursor.rowcount)
+                        for row in eligible_rows:
+                            status_guard = " AND status NOT IN ('queued', 'running', 'waiting')" if "status" in row else ""
+                            cursor = conn.execute(
+                                "DELETE FROM periodic_report_runs WHERE id = ? AND started_at = ? AND finished_at = ?"
+                                + status_guard,
+                                (row["id"], row["started_at"], row["finished_at"]),
+                            )
+                            results["deleted_periodic_run_records_count"] += max(0, cursor.rowcount)
                         logger.info(f"清理数据库中属于 {target_month} 的周期汇总历史记录完成")
             except Exception as pe_exc:
                 results["errors"].append(f"删除周期历史记录失败: {pe_exc}")
@@ -436,11 +482,13 @@ def _cleanup_periodic_archives(sent_days: int, failed_days: int, protect_date: d
     now = datetime.now()
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, zip_path, mail_status, finished_at, started_at FROM periodic_report_runs WHERE zip_path != '' AND zip_path IS NOT NULL"
+            "SELECT * FROM periodic_report_runs WHERE zip_path != '' AND zip_path IS NOT NULL"
         ).fetchall()
 
     for row in rows:
         run = dict(row)
+        if not _finished_run(run):
+            continue
         z_path = Path(run["zip_path"])
         if not z_path.exists():
             continue
@@ -453,8 +501,15 @@ def _cleanup_periodic_archives(sent_days: int, failed_days: int, protect_date: d
             if ref_time >= protect_date:
                 continue
 
-            mail_status = str(run["mail_status"] or "").strip().lower()
-            is_success = mail_status in ("success", "sent") or mail_status.startswith("skipped")
+            status = str(run.get("status") or "").strip().lower()
+            if status:
+                # Archive retention follows report generation, not a removed
+                # delivery channel. Partial success still produced an archive.
+                is_success = status in {"success", "partial_success"}
+            else:
+                # Older test fixtures and legacy records may lack status.
+                legacy_mail_status = str(run.get("mail_status") or "").strip().lower()
+                is_success = legacy_mail_status in {"success", "sent"} or legacy_mail_status.startswith("skipped")
             
             limit_days = sent_days if is_success else failed_days
             limit_date = now - timedelta(days=limit_days)
@@ -475,10 +530,12 @@ def _cleanup_screenshot_artifacts(retention_days: int | None, protect_date: date
     limit_date = datetime.now() - timedelta(days=retention_days) if retention_days is not None else None
 
     with connect() as conn:
-        rows = conn.execute("SELECT id, started_at, finished_at FROM run_records").fetchall()
+        rows = conn.execute("SELECT * FROM run_records").fetchall()
 
     for row in rows:
         run = dict(row)
+        if not _finished_run(run):
+            continue
         if target_month:
             if not (run["started_at"] and run["started_at"].startswith(target_month)):
                 continue
@@ -529,11 +586,13 @@ def _cleanup_report_artifacts(retention_days: int | None, protect_date: datetime
     limit_date = datetime.now() - timedelta(days=retention_days) if retention_days is not None else None
 
     with connect() as conn:
-        rows = conn.execute("SELECT id, started_at, finished_at, report_path FROM run_records").fetchall()
+        rows = conn.execute("SELECT * FROM run_records").fetchall()
 
     from app.storage_paths import get_run_date, resolve_artifact_path
 
     def eligible(run: dict[str, Any]) -> bool:
+        if not _finished_run(run):
+            return False
         if target_month:
             return bool(run["started_at"] and run["started_at"].startswith(target_month))
         ref_time = parse_db_time(run["finished_at"] or run["started_at"])
@@ -811,11 +870,13 @@ def _cleanup_old_run_records(retention_days: int | None, protect_date: datetime,
     limit_date = datetime.now() - timedelta(days=retention_days) if retention_days is not None else None
 
     with connect() as conn:
-        rows = conn.execute("SELECT id, started_at, finished_at FROM run_records").fetchall()
+        rows = conn.execute("SELECT * FROM run_records").fetchall()
 
-    expired_ids = []
+    expired_rows = []
     for row in rows:
         run = dict(row)
+        if not _finished_run(run):
+            continue
         eligible = False
         if target_month:
             if run["started_at"] and run["started_at"].startswith(target_month):
@@ -825,7 +886,9 @@ def _cleanup_old_run_records(retention_days: int | None, protect_date: datetime,
             if ref_time < protect_date and ref_time < limit_date:
                 eligible = True
         if eligible:
-            expired_ids.append(run["id"])
+            if not _confirmed_record("run_record", run["id"], run["started_at"]):
+                continue
+            expired_rows.append(run)
             if dry_run:
                 _add_preview_item({
                     "kind": "run_record", "name": f"巡检记录 #{run['id']}",
@@ -833,18 +896,23 @@ def _cleanup_old_run_records(retention_days: int | None, protect_date: datetime,
                     "size": None,
                 })
 
-    if not expired_ids:
+    if not expired_rows:
         return
 
     if dry_run:
-        results["deleted_run_records_count"] += len(expired_ids)
+        results["deleted_run_records_count"] += len(expired_rows)
         return
 
     # SQLite 级联删除由 PRAGMA foreign_keys = ON 实现，这里直接 DELETE 主表。
     try:
         with connect() as conn:
-            placeholders = ", ".join("?" for _ in expired_ids)
-            deleted_count = conn.execute(f"DELETE FROM run_records WHERE id IN ({placeholders})", expired_ids).rowcount
+            deleted_count = 0
+            for run in expired_rows:
+                status_guard = " AND status NOT IN ('queued', 'running', 'waiting')" if "status" in run else ""
+                deleted_count += max(0, conn.execute(
+                    "DELETE FROM run_records WHERE id = ? AND started_at = ? AND finished_at = ?" + status_guard,
+                    (run["id"], run["started_at"], run["finished_at"]),
+                ).rowcount)
         results["deleted_run_records_count"] += deleted_count
         logger.info("清理数据库过期运行历史完成。删除了记录数: %s", deleted_count)
     except Exception as e:
@@ -857,29 +925,36 @@ def _cleanup_old_periodic_run_records(
     """手动按时间清理周期报告运行记录；文件删除出错时不会调用这里。"""
     limit_date = datetime.now() - timedelta(days=retention_days)
     with connect() as conn:
-        rows = conn.execute("SELECT id, started_at, finished_at FROM periodic_report_runs").fetchall()
-    expired_ids = []
+        rows = conn.execute("SELECT * FROM periodic_report_runs").fetchall()
+    expired_rows = []
     for row in rows:
+        if not _finished_run(dict(row)):
+            continue
         ref_time = parse_db_time(row["finished_at"] or row["started_at"])
         if ref_time < protect_date and ref_time < limit_date:
-            expired_ids.append(row["id"])
+            if not _confirmed_record("periodic_record", row["id"], row["started_at"]):
+                continue
+            expired_rows.append(dict(row))
             if dry_run:
                 _add_preview_item({
                     "kind": "periodic_record", "name": f"周期报告记录 #{row['id']}",
                     "path": f"periodic_record/{row['id']}", "date": row["started_at"] or "",
                     "size": None,
                 })
-    if not expired_ids:
+    if not expired_rows:
         return
     if dry_run:
-        results["deleted_periodic_run_records_count"] += len(expired_ids)
+        results["deleted_periodic_run_records_count"] += len(expired_rows)
         return
     try:
         with connect() as conn:
-            placeholders = ", ".join("?" for _ in expired_ids)
-            deleted_count = conn.execute(
-                f"DELETE FROM periodic_report_runs WHERE id IN ({placeholders})", expired_ids,
-            ).rowcount
+            deleted_count = 0
+            for row in expired_rows:
+                status_guard = " AND status NOT IN ('queued', 'running', 'waiting')" if "status" in row else ""
+                deleted_count += max(0, conn.execute(
+                    "DELETE FROM periodic_report_runs WHERE id = ? AND started_at = ? AND finished_at = ?" + status_guard,
+                    (row["id"], row["started_at"], row["finished_at"]),
+                ).rowcount)
         results["deleted_periodic_run_records_count"] += max(0, deleted_count)
     except Exception as e:
         results["errors"].append(f"删除周期报告记录失败: {e}")

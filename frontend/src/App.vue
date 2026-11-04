@@ -3,10 +3,12 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ClipboardList, History, FileArchive, KeyRound, Bell, Settings2, LogOut, Menu, X, CheckCircle2, AlertCircle, Info } from './icons'
 import { logout } from './api'
+import { startIdleSession } from './sessionIdle'
 import { notice, confirmState, handleConfirm } from './ui'
 import { LOGO_DATA_URL } from './assets/logo'
 
 const route = useRoute()
+const appName = window.APP_CONFIG?.appName || ''
 const menuOpen = ref(false)
 const confirmButton = ref<{ focus: () => void } | null>(null)
 let previousFocus: HTMLElement | null = null
@@ -24,8 +26,15 @@ watch(() => confirmState.open, async (open) => {
 function onEscape(event: KeyboardEvent) {
   if (event.key === 'Escape' && confirmState.open) handleConfirm(false)
 }
-onMounted(() => window.addEventListener('keydown', onEscape))
-onUnmounted(() => window.removeEventListener('keydown', onEscape))
+let stopIdleSession: (() => void) | undefined
+onMounted(() => {
+  window.addEventListener('keydown', onEscape)
+  stopIdleSession = startIdleSession()
+})
+onUnmounted(() => {
+  window.removeEventListener('keydown', onEscape)
+  stopIdleSession?.()
+})
 const navigation = [
   { path: '/jobs', label: '巡检任务', icon: ClipboardList },
   { path: '/runs', label: '巡检记录', icon: History },
@@ -38,7 +47,7 @@ const navigation = [
 const activePath = computed(() => {
   if (route.path.startsWith('/jobs')) return '/jobs'
   if (route.path.startsWith('/runs')) return '/runs'
-  if (route.path.startsWith('/notifications') || route.path.startsWith('/mail')) return '/notifications'
+  if (route.path.startsWith('/notifications')) return '/notifications'
   return route.path
 })
 </script>
@@ -50,7 +59,7 @@ const activePath = computed(() => {
         <span class="brand-symbol">
           <img :src="LOGO_DATA_URL" alt="Logo" class="brand-logo" />
         </span>
-        <span class="brand-type"><strong>自动化运维平台</strong></span>
+        <span class="brand-type"><strong>{{ appName }}</strong></span>
         <button class="icon-button mobile-only" aria-label="关闭导航" @click="menuOpen = false"><X :size="18" /></button>
       </div>
       <div class="nav-heading">工作台</div>

@@ -19,7 +19,7 @@ from app import runner
     [("success", "success"), ("failed", "failed")],
 )
 def test_run_result_is_preserved_when_notification_fails(monkeypatch, capture_status, expected_status):
-    job = {"id": 7, "name": "巡检", "send_mail_on_complete": 0, "send_mail_on_error": 0}
+    job = {"id": 7, "name": "巡检"}
     item = {"id": 8, "name": "图表", "section": "资源", "enabled": 1, "real_browser_capture": 0}
     run = {"id": 9, "started_at": "2026-10-10T09:00:00+08:00", "status": "running"}
     results = []
@@ -48,6 +48,8 @@ def test_run_result_is_preserved_when_notification_fails(monkeypatch, capture_st
     )
 
     def fail_notification(*_args, **_kwargs):
+        assert run["status"] == "running"
+        assert not run.get("finished_at")
         raise RuntimeError("通知接口超时")
 
     monkeypatch.setattr(runner, "_send_dingtalk_notification", fail_notification)
@@ -60,19 +62,21 @@ def test_run_result_is_preserved_when_notification_fails(monkeypatch, capture_st
         assert "全部 1 个截图项失败" in run["error_summary"]
 
 
-def test_single_item_unexpected_error_does_not_leave_running_record(monkeypatch):
+def test_single_item_unexpected_error_does_not_leave_running_record(monkeypatch, tmp_path):
     item = {"id": 8, "job_id": 7, "name": "图表", "section": "资源"}
     run = {"status": "running"}
+    monkeypatch.setattr(runner.settings, "data_dir", tmp_path)
     monkeypatch.setattr("app.repository.get_screenshot_item", lambda _: item)
     monkeypatch.setattr(runner, "get_job", lambda _: {"id": 7, "name": "巡检"})
-    monkeypatch.setattr(runner, "create_run", lambda *_: 9)
+    monkeypatch.setattr(runner, "create_run", lambda *_: (_ for _ in ()).throw(AssertionError("已有排队记录不应再创建")))
+    monkeypatch.setattr(runner, "start_queued_run", lambda _: True)
     monkeypatch.setattr(runner, "update_run", lambda _id, **fields: run.update(fields))
 
     def fail_capture(*_args, **_kwargs):
         raise RuntimeError("浏览器崩溃")
 
     monkeypatch.setattr(runner, "capture_item", fail_capture)
-    assert runner.test_capture_item(8) == 9
+    assert runner.test_capture_item(8, 9) == 9
     assert run["status"] == "failed"
     assert run["failed_count"] == 1
     assert "浏览器崩溃" in run["error_summary"]

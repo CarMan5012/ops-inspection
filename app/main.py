@@ -2,25 +2,26 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import base64
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.auth import COOKIE_NAME, check_password, create_token, get_session_ttl_seconds, require_login, verify_token
-from app.db import init_db
+from app.auth import COOKIE_NAME, check_password, create_idle_token, get_session_ttl_seconds, renew_idle_session, require_login, verify_token
+from app.db import init_db, sqlite3 as db_sqlite3
 from app.repository import (
     dashboard_data,
     create_run,
+    create_queued_test_run,
+    finish_active_run,
     delete_auth_profile,
     delete_job,
-    delete_mail_profile,
     delete_screenshot_item,
     get_auth_profile,
     get_job,
-    get_mail_profile,
     get_run,
     get_screenshot_item,
     list_auth_profiles,
@@ -29,25 +30,25 @@ from app.repository import (
     get_dingtalk_profile,
     save_dingtalk_profile,
     delete_dingtalk_profile,
-    list_mail_profiles,
     list_runs,
     list_runs_page,
     list_screenshot_items,
     list_screenshot_results,
     save_auth_profile,
     save_job,
-    save_mail_profile,
     save_screenshot_item,
     save_screenshot_items_batch,
     get_system_setting,
     set_system_setting,
 )
 from app.runner import run_job, test_capture_item
-from app.job_execution import JobAlreadyRunning, acquire_job_lease
+from app.screenshot import render_watermark_preview_png
+from app.job_execution import JobAlreadyRunning, acquire_job_lease, recover_interrupted_runs
 from app.scheduler import reload_jobs, shutdown_scheduler, start_scheduler
 from app.settings import settings
 from app.storage_paths import resolve_artifact_path
-from app.watermark import DEFAULT_TIME_FORMAT, WATERMARK_DEFAULTS, validate_time_format, watermark_options
+from app.watermark import DEFAULT_TIME_FORMAT, MAX_WATERMARK_TEXT_LENGTH, WATERMARK_DEFAULTS, validate_time_format, validate_watermark_alignment, watermark_options
+from app.ui_config import CLEANUP_SCHEDULE_MODES, JOB_FORM_DEFAULTS, ITEM_FORM_DEFAULTS, RUN_DEFAULT_PAGE_SIZE, RUN_PAGE_SIZES, WATERMARK_RULES, frontend_config
 from app.report import list_template_sections
 from app.report_templates import (
     MAX_TEMPLATE_BYTES, create_template, delete_template, get_template,
@@ -60,6 +61,7 @@ from app.taskbar_templates import (
 )
 from app.openapi import configure_openapi
 from app.login_crypto import LoginPayloadError, decrypt_login_payload, get_login_public_jwk
+from app.login_rate_limit import consume_login_attempt, clear_login_attempts
 import os
 import logging
 import sys
@@ -218,6 +220,8 @@ async def csrf_protect_middleware(request: Request, call_next):
 api_router = APIRouter(prefix=settings.api_prefix)
 
 templates = Jinja2Templates(directory="app/templates")
+_login_logo_svg = (Path(__file__).parent / "static/images/logo.svg").read_text(encoding="utf-8")
+LOGIN_LOGO_DATA_URI = "data:image/png;base64," + _login_logo_svg.split("base64,", 1)[1].split('"', 1)[0]
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 if settings.frontend_base_path != "/":
     app.mount(f"{settings.frontend_base_path}/static", StaticFiles(directory="app/static"), name="static_prefix")
@@ -274,26 +278,14 @@ def get_ops_logo():
 
 def status_label(value: Any) -> str:
     labels = {
+        "queued": "排队中",
         "running": "运行中",
         "success": "成功",
         "partial_success": "部分成功",
         "failed": "失败",
+        "interrupted": "已中断",
     }
     return labels.get(str(value or ""), str(value or "-"))
-
-
-def mail_status_label(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return "-"
-    labels = {
-        "skipped": "未发送",
-        "sent": "已发送",
-        "success": "已发送",
-    }
-    if raw.startswith("failed:"):
-        return "发送失败：" + raw.removeprefix("failed:").strip()
-    return labels.get(raw, raw)
 
 
 def dingtalk_status_label(value: Any) -> str:
@@ -317,7 +309,6 @@ def short_date(value: Any) -> str:
 
 
 templates.env.filters["status_label"] = status_label
-templates.env.filters["mail_status_label"] = mail_status_label
 templates.env.filters["dingtalk_status_label"] = dingtalk_status_label
 templates.env.filters["short_date"] = short_date
 
@@ -327,13 +318,11 @@ from app.utils import (
     generate_totp_secret,
     mask_value,
     resolve_auth_credential,
-    resolve_mail_credential,
     verify_totp_code,
 )
 
 templates.env.globals["mask_value"] = mask_value
 templates.env.globals["resolve_auth_credential"] = resolve_auth_credential
-templates.env.globals["resolve_mail_credential"] = resolve_mail_credential
 templates.env.globals["decrypt_secret"] = decrypt_secret
 
 
@@ -344,10 +333,6 @@ def job_form(
     cron_expression: str = Form("0 9 * * *"),
     time_range_label: str = Form("最近24小时"),
     report_title: str = Form("自动化巡检报告"),
-    mail_profile_id: str | None = Form(None),
-    send_mail: str | None = Form(None),
-    send_mail_on_complete: str | None = Form(None),
-    send_mail_on_error: str | None = Form(None),
     browser_width: int = Form(3840),
     browser_height: int = Form(2160),
     browser_scale_factor: float = Form(1.5),
@@ -386,11 +371,6 @@ def job_form(
         label_expr = "高级 Cron"
         schedule_config = ""
 
-    send_comp = parse_bool(send_mail_on_complete)
-    if send_mail is not None and send_mail_on_complete is None:
-        send_comp = parse_bool(send_mail)
-    send_err = parse_bool(send_mail_on_error) if send_mail_on_error is not None else True
-
     return {
         "name": name,
         "environment": environment,
@@ -398,10 +378,10 @@ def job_form(
         "cron_expression": cron_expr,
         "time_range_label": time_range_label,
         "report_title": report_title,
-        "mail_profile_id": parse_optional_int(mail_profile_id),
-        "send_mail": 1 if send_comp else 0,
-        "send_mail_on_complete": 1 if send_comp else 0,
-        "send_mail_on_error": 1 if send_err else 0,
+        "mail_profile_id": None,
+        "send_mail": 0,
+        "send_mail_on_complete": 0,
+        "send_mail_on_error": 0,
         "browser_width": browser_width,
         "browser_height": browser_height,
         "browser_scale_factor": browser_scale_factor,
@@ -437,12 +417,13 @@ def item_form(
     watermark_enabled: str | None = Form(None),
     watermark_time_enabled: str | None = Form(None),
     watermark_time_format: str = Form(DEFAULT_TIME_FORMAT),
-    watermark_text: str = Form(""),
-    watermark_opacity: int = Form(65),
-    watermark_font_size: int = Form(24),
-    watermark_gap_x: int = Form(140),
-    watermark_gap_y: int = Form(140),
-    watermark_angle: int = Form(-45),
+    watermark_text: str = Form(WATERMARK_DEFAULTS["watermark_text"]),
+    watermark_opacity: int = Form(WATERMARK_DEFAULTS["watermark_opacity"]),
+    watermark_font_size: int = Form(WATERMARK_DEFAULTS["watermark_font_size"]),
+    watermark_gap_x: int = Form(WATERMARK_DEFAULTS["watermark_gap_x"]),
+    watermark_gap_y: int = Form(WATERMARK_DEFAULTS["watermark_gap_y"]),
+    watermark_angle: int = Form(WATERMARK_DEFAULTS["watermark_angle"]),
+    watermark_alignment: str = Form(WATERMARK_DEFAULTS["watermark_alignment"]),
     taskbar_enabled: str | None = Form(None),
 ) -> dict[str, Any]:
     real_capture_enabled = 1 if real_browser_capture else 0
@@ -453,10 +434,13 @@ def item_form(
         normalized_css_selector = ""
     try:
         validated_time_format = validate_time_format(watermark_time_format)
+        validated_alignment = validate_watermark_alignment(watermark_alignment)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if watermark_enabled and not watermark_time_enabled and not watermark_text.strip():
         raise HTTPException(status_code=400, detail="请启用时间水印或填写自定义水印内容")
+    if len(watermark_text) > MAX_WATERMARK_TEXT_LENGTH:
+        raise HTTPException(status_code=400, detail="水印文字不能超过 200 字")
 
     return {
         "job_id": None,
@@ -486,6 +470,7 @@ def item_form(
         "watermark_gap_x": max(20, min(800, int(watermark_gap_x))),
         "watermark_gap_y": max(20, min(800, int(watermark_gap_y))),
         "watermark_angle": max(-90, min(90, int(watermark_angle))),
+        "watermark_alignment": validated_alignment,
         "taskbar_enabled": 1 if taskbar_enabled else 0,
     }
 
@@ -521,39 +506,6 @@ def auth_form(
     }
 
 
-def mail_form(
-    name: str = Form(...),
-    smtp_host: str = Form(""),
-    smtp_port: int = Form(465),
-    use_ssl: str | None = Form(None),
-    use_starttls: str | None = Form(None),
-    username: str = Form(""),
-    password: str = Form(""),
-    sender: str = Form(""),
-    recipients: str = Form(""),
-    cc: str = Form(""),
-    subject_template: str = Form("自动化巡检报告 - {date}"),
-    body_template: str = Form("巡检报告已生成，请查看附件。"),
-) -> dict[str, Any]:
-    return {
-        "name": name,
-        "smtp_host": smtp_host,
-        "smtp_port": smtp_port,
-        "use_ssl": 1 if use_ssl else 0,
-        "use_starttls": 1 if use_starttls else 0,
-        "username": username,
-        "password": password,
-        "password_source": "plain",
-        "password_env": "",
-        "sender": sender,
-        "recipients": recipients,
-        "cc": cc,
-        "subject_template": subject_template,
-        "body_template": body_template,
-    }
-
-
-
 def _ensure_chrome_policies() -> None:
     import platform
     if platform.system().lower() == "linux":
@@ -571,6 +523,12 @@ def _ensure_chrome_policies() -> None:
 def on_startup() -> None:
     _ensure_chrome_policies()
     init_db()
+    try:
+        recovered = recover_interrupted_runs(include_deleted_jobs=True, queued_grace_seconds=0)
+        if recovered:
+            app_logger.warning("已将 %s 条中断的巡检记录标记为已中断", recovered)
+    except Exception:
+        app_logger.exception("修复中断的巡检记录失败")
     start_scheduler()
 
 
@@ -594,6 +552,7 @@ def login_page(request: Request) -> HTMLResponse:
             "error": request.query_params.get("error", ""),
             "mfa_enabled": security["mfa_enabled"],
             "login_public_key": get_login_public_jwk(),
+            "login_logo_data_uri": LOGIN_LOGO_DATA_URI,
             "csrf_token": csrf_token,
         },
     )
@@ -630,6 +589,12 @@ def login(
     request: Request,
     login_payload: str = Form(""),
 ) -> RedirectResponse:
+    client_host = request.client.host if request.client else None
+    retry_after = consume_login_attempt(client_host)
+    if retry_after:
+        response = frontend_redirect("/login?error=rate")
+        response.headers["Retry-After"] = str(retry_after)
+        return response
     if not login_payload:
         return frontend_redirect("/login?error=1")
     try:
@@ -647,6 +612,7 @@ def login(
         secret = current_mfa_secret()
         if not secret or not verify_totp_code(secret, mfa_code):
             return frontend_redirect("/login?error=mfa")
+    clear_login_attempts(client_host)
     response = frontend_redirect("/")
     is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
     cookie_path = settings.frontend_base_path
@@ -663,7 +629,7 @@ def login(
     )
     response.set_cookie(
         COOKIE_NAME,
-        create_token(username),
+        create_idle_token(username),
         httponly=True,
         samesite="lax",
         secure=is_secure,
@@ -708,7 +674,6 @@ MFA_ENABLED_KEY = "mfa_enabled"
 MFA_SECRET_KEY = "mfa_totp_secret"
 MFA_PENDING_SECRET_KEY = "mfa_totp_pending_secret"
 MFA_PENDING_LAST_SLICE_KEY = "last_used_pending_totp_slice"
-SESSION_TTL_MINUTES_KEY = "session_ttl_minutes"
 DINGTALK_EMOJI_ENABLED_KEY = "dingtalk_emoji_enabled"
 
 
@@ -733,7 +698,7 @@ def security_settings() -> dict[str, Any]:
 
     return {
         "mfa_enabled": get_system_setting(MFA_ENABLED_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"},
-        "session_ttl_minutes": max(5, min(int(get_system_setting(SESSION_TTL_MINUTES_KEY, "30") or "30"), 7 * 24 * 60)),
+        "session_ttl_minutes": get_session_ttl_seconds() // 60,
         "mfa_configured": bool(get_system_setting(MFA_SECRET_KEY, "")),
         "dingtalk_emoji_enabled": get_system_setting(DINGTALK_EMOJI_ENABLED_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"},
         "dingtalk_webhook": db_webhook,
@@ -790,7 +755,6 @@ def require_api_login(request: Request) -> None:
 
 
 api_status_label = status_label
-api_mail_status_label = mail_status_label
 
 
 def bool_value(value: Any, default: bool = False) -> bool:
@@ -840,6 +804,12 @@ def clamp_int(value: Any, default: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, parsed))
 
 
+def optional_clamped_int(value: Any, min_value: int, max_value: int) -> int | None:
+    if value in (None, ""):
+        return None
+    return clamp_int(value, min_value, min_value, max_value)
+
+
 def public_auth_profile(profile: dict[str, Any]) -> dict[str, Any]:
     data = dict(profile)
     for key in ("password", "password_secret"):
@@ -872,14 +842,6 @@ def api_dingtalk_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "keyword": text_value(payload, "keyword", "").strip(),
         "emoji_enabled": int(bool_value(payload.get("emoji_enabled"), True)),
     }
-
-
-def public_mail_profile(profile: dict[str, Any]) -> dict[str, Any]:
-    data = dict(profile)
-    for key in ("password", "password_secret"):
-        data.pop(key, None)
-    data["has_password"] = bool(profile.get("password") or profile.get("password_secret"))
-    return data
 
 
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -919,14 +881,18 @@ def api_get_security_settings() -> dict[str, Any]:
 @api_router.put("/security-settings", dependencies=[Depends(require_api_login)])
 def api_update_security_settings(payload: dict[str, Any]) -> dict[str, Any]:
     current_settings = security_settings()
-    session_minutes = max(5, min(int_value(payload, "session_ttl_minutes", current_settings["session_ttl_minutes"]), 7 * 24 * 60))
     was_mfa_enabled = current_settings["mfa_enabled"]
     mfa_enabled = bool_value(payload.get("mfa_enabled"), was_mfa_enabled)
     verify_code = text_value(payload, "mfa_code", "")
-    if verify_code:
-        mfa_enabled = True
+    current_code = text_value(payload, "mfa_current_code", "")
     current_secret = current_mfa_secret()
     pending_secret = decrypt_secret(get_system_setting(MFA_PENDING_SECRET_KEY, ""))
+    if was_mfa_enabled and not mfa_enabled:
+        if not current_secret or not verify_totp_code(current_secret, current_code):
+            raise HTTPException(status_code=400, detail="当前 MFA 验证码不正确")
+    if was_mfa_enabled and pending_secret and verify_code:
+        if not current_secret or not verify_totp_code(current_secret, current_code):
+            raise HTTPException(status_code=400, detail="当前 MFA 验证码不正确")
     secret_to_verify = pending_secret if verify_code and pending_secret else current_secret
 
     if mfa_enabled and not secret_to_verify:
@@ -946,7 +912,6 @@ def api_update_security_settings(payload: dict[str, Any]) -> dict[str, Any]:
             set_system_setting("last_used_totp_slice", used_slice)
         set_system_setting(MFA_PENDING_LAST_SLICE_KEY, "")
 
-    set_system_setting(SESSION_TTL_MINUTES_KEY, str(session_minutes))
     set_system_setting(MFA_ENABLED_KEY, "1" if mfa_enabled else "0")
 
     # 更新全局钉钉消息表情开关
@@ -980,11 +945,13 @@ def api_update_security_settings(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, **security_settings()}
 
 
-@api_router.get("/security-settings/mfa-qr", dependencies=[Depends(require_api_login)])
-def api_get_current_mfa_qr() -> dict[str, Any]:
+@api_router.post("/security-settings/mfa-qr", dependencies=[Depends(require_api_login)])
+def api_get_current_mfa_qr(payload: dict[str, Any]) -> dict[str, Any]:
     secret = current_mfa_secret()
     if not secret:
         raise HTTPException(status_code=400, detail="未配置两步验证密钥")
+    if not verify_totp_code(secret, text_value(payload, "mfa_current_code", "")):
+        raise HTTPException(status_code=400, detail="当前 MFA 验证码不正确")
     otpauth_url = build_totp_uri(secret, settings.admin_username, settings.app_name)
     return {
         "ok": True,
@@ -1141,29 +1108,24 @@ def api_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         raise HTTPException(status_code=400, detail="旧定时方式已停用，请选择日期计划")
 
-    send_mail_on_complete = bool_value(payload.get("send_mail_on_complete"), True)
-    send_mail_on_error = bool_value(payload.get("send_mail_on_error"), True)
-    send_mail = bool_value(payload.get("send_mail"), False)
-    if "send_mail" in payload and "send_mail_on_complete" not in payload:
-        send_mail_on_complete = send_mail
     send_dingtalk_on_complete = bool_value(payload.get("send_dingtalk_on_complete"), True)
     send_dingtalk_on_error = bool_value(payload.get("send_dingtalk_on_error"), True)
 
     return {
         "name": text_value(payload, "name", "未命名巡检任务"),
-        "environment": text_value(payload, "environment", "生产环境"),
+        "environment": text_value(payload, "environment", JOB_FORM_DEFAULTS["environment"]),
         "enabled": bool_value(payload.get("enabled"), True),
         "cron_expression": cron_expr,
-        "time_range_label": text_value(payload, "time_range_label", "最近24小时"),
-        "report_title": text_value(payload, "report_title", "自动化巡检报告"),
+        "time_range_label": text_value(payload, "time_range_label", JOB_FORM_DEFAULTS["time_range_label"]),
+        "report_title": text_value(payload, "report_title", JOB_FORM_DEFAULTS["report_title"]),
         "template_id": template_id_from_payload(payload.get("template_id")),
-        "mail_profile_id": parse_optional_int(str(payload.get("mail_profile_id") or "")),
-        "send_mail": 1 if send_mail_on_complete else 0,
-        "send_mail_on_complete": 1 if send_mail_on_complete else 0,
-        "send_mail_on_error": 1 if send_mail_on_error else 0,
-        "browser_width": int_value(payload, "browser_width", 3840),
-        "browser_height": int_value(payload, "browser_height", 2160),
-        "browser_scale_factor": float_value(payload, "browser_scale_factor", 1.5),
+        "mail_profile_id": None,
+        "send_mail": 0,
+        "send_mail_on_complete": 0,
+        "send_mail_on_error": 0,
+        "browser_width": clamp_int(payload.get("browser_width"), JOB_FORM_DEFAULTS["browser_width"], WATERMARK_RULES["image_width"]["min"], WATERMARK_RULES["image_width"]["max"]),
+        "browser_height": clamp_int(payload.get("browser_height"), JOB_FORM_DEFAULTS["browser_height"], WATERMARK_RULES["image_height"]["min"], WATERMARK_RULES["image_height"]["max"]),
+        "browser_scale_factor": float_value(payload, "browser_scale_factor", JOB_FORM_DEFAULTS["browser_scale_factor"]),
         "headless": True,
         "schedule_mode": schedule_mode,
         "schedule_label": schedule_label,
@@ -1201,8 +1163,11 @@ def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
     legacy_time = "watermark_time_enabled" not in payload and "{time}" in watermark_text
     if legacy_time:
         watermark_text = watermark_text.replace("{time}", "").strip()
+    if len(watermark_text) > MAX_WATERMARK_TEXT_LENGTH:
+        raise HTTPException(status_code=400, detail="水印文字不能超过 200 字")
     try:
         time_format = validate_time_format(text_value(payload, "watermark_time_format", DEFAULT_TIME_FORMAT))
+        watermark_alignment = validate_watermark_alignment(text_value(payload, "watermark_alignment", WATERMARK_DEFAULTS["watermark_alignment"]))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     watermark_time_enabled = bool_value(payload.get("watermark_time_enabled"), legacy_time or "watermark_text" not in payload)
@@ -1213,30 +1178,31 @@ def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
         "job_id": job_id,
         "auth_profile_id": parse_optional_int(str(payload.get("auth_profile_id") or "")),
         "name": text_value(payload, "name", "未命名截图项"),
-        "item_type": text_value(payload, "item_type", "web"),
+        "item_type": text_value(payload, "item_type", ITEM_FORM_DEFAULTS["item_type"]),
         "url": text_value(payload, "url", ""),
-        "section": text_value(payload, "section", "巡检截图"),
+        "section": text_value(payload, "section", ITEM_FORM_DEFAULTS["section"]),
         "capture_mode": capture_mode,
         "css_selector": css_selector,
         "wait_selector": text_value(payload, "wait_selector", ""),
-        "wait_seconds": float_value(payload, "wait_seconds", 3.0),
-        "timeout_seconds": int_value(payload, "timeout_seconds", 60),
-        "total_timeout_seconds": max(1, int_value(payload, "total_timeout_seconds", 240)),
-        "retry_count": int_value(payload, "retry_count", 2),
-        "browser_width": parse_optional_int(str(payload.get("browser_width") or "")),
-        "browser_height": parse_optional_int(str(payload.get("browser_height") or "")),
-        "sort_order": int_value(payload, "sort_order", 100),
+        "wait_seconds": float_value(payload, "wait_seconds", ITEM_FORM_DEFAULTS["wait_seconds"]),
+        "timeout_seconds": int_value(payload, "timeout_seconds", ITEM_FORM_DEFAULTS["timeout_seconds"]),
+        "total_timeout_seconds": max(1, int_value(payload, "total_timeout_seconds", ITEM_FORM_DEFAULTS["total_timeout_seconds"])),
+        "retry_count": int_value(payload, "retry_count", ITEM_FORM_DEFAULTS["retry_count"]),
+        "browser_width": optional_clamped_int(payload.get("browser_width"), WATERMARK_RULES["image_width"]["min"], WATERMARK_RULES["image_width"]["max"]),
+        "browser_height": optional_clamped_int(payload.get("browser_height"), WATERMARK_RULES["image_height"]["min"], WATERMARK_RULES["image_height"]["max"]),
+        "sort_order": int_value(payload, "sort_order", ITEM_FORM_DEFAULTS["sort_order"]),
         "enabled": bool_value(payload.get("enabled"), True),
         "real_browser_capture": 1 if real_browser_capture else 0,
-        "watermark_enabled": bool_value(payload.get("watermark_enabled"), False),
+        "watermark_enabled": bool_value(payload.get("watermark_enabled"), bool(WATERMARK_DEFAULTS["watermark_enabled"])),
         "watermark_time_enabled": 1 if watermark_time_enabled else 0,
         "watermark_time_format": time_format,
         "watermark_text": watermark_text,
-        "watermark_opacity": clamp_int(payload.get("watermark_opacity"), 65, 0, 255),
-        "watermark_font_size": clamp_int(payload.get("watermark_font_size"), 24, 10, 72),
-        "watermark_gap_x": clamp_int(payload.get("watermark_gap_x"), 140, 20, 800),
-        "watermark_gap_y": clamp_int(payload.get("watermark_gap_y"), 140, 20, 800),
-        "watermark_angle": clamp_int(payload.get("watermark_angle"), -45, -90, 90),
+        "watermark_opacity": clamp_int(payload.get("watermark_opacity"), WATERMARK_DEFAULTS["watermark_opacity"], WATERMARK_RULES["opacity"]["min"], WATERMARK_RULES["opacity"]["max"]),
+        "watermark_font_size": clamp_int(payload.get("watermark_font_size"), WATERMARK_DEFAULTS["watermark_font_size"], 10, 72),
+        "watermark_gap_x": clamp_int(payload.get("watermark_gap_x"), WATERMARK_DEFAULTS["watermark_gap_x"], 20, 800),
+        "watermark_gap_y": clamp_int(payload.get("watermark_gap_y"), WATERMARK_DEFAULTS["watermark_gap_y"], 20, 800),
+        "watermark_angle": clamp_int(payload.get("watermark_angle"), WATERMARK_DEFAULTS["watermark_angle"], WATERMARK_RULES["angle"]["min"], WATERMARK_RULES["angle"]["max"]),
+        "watermark_alignment": watermark_alignment,
         "taskbar_enabled": 1 if bool_value(payload.get("taskbar_enabled"), True) else 0,
         "taskbar_template_key": taskbar_key_from_payload(payload.get("taskbar_template_key")),
     }
@@ -1264,24 +1230,13 @@ def api_auth_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def api_mail_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "name": text_value(payload, "name", "未命名邮箱"),
-        "smtp_host": text_value(payload, "smtp_host", ""),
-        "smtp_port": int_value(payload, "smtp_port", 465),
-        "use_ssl": bool_value(payload.get("use_ssl"), True),
-        "use_starttls": bool_value(payload.get("use_starttls"), False),
-        "username": text_value(payload, "username", ""),
-        "password": text_value(payload, "password", ""),
-        "password_source": text_value(payload, "password_source", "plain"),
-        "password_secret": "",
-        "password_env": text_value(payload, "password_env", ""),
-        "sender": text_value(payload, "sender", ""),
-        "recipients": text_value(payload, "recipients", ""),
-        "cc": text_value(payload, "cc", ""),
-        "subject_template": text_value(payload, "subject_template", "自动化巡检报告 - {date}"),
-        "body_template": text_value(payload, "body_template", "巡检报告已生成，请查看附件。"),
-    }
+def save_named_profile_or_http_error(save: Any, data: dict[str, Any], profile_id: int | None = None) -> int:
+    try:
+        return save(data) if profile_id is None else save(data, profile_id)
+    except db_sqlite3.IntegrityError as exc:
+        if "UNIQUE" in str(exc).upper():
+            raise HTTPException(status_code=409, detail="配置名称已存在，请更换名称") from exc
+        raise HTTPException(status_code=400, detail="配置数据不合法") from exc
 
 
 def clear_auth_state_cache(auth_profile: dict[str, Any]) -> None:
@@ -1294,8 +1249,8 @@ def dashboard_metrics(jobs: list[dict[str, Any]], runs: list[dict[str, Any]]) ->
         "jobs_total": len(jobs),
         "jobs_enabled": sum(1 for job in jobs if int(job.get("enabled") or 0)),
         "runs_success": sum(1 for run in runs if run.get("status") == "success"),
-        "runs_failed": sum(1 for run in runs if run.get("status") == "failed"),
-        "runs_running": sum(1 for run in runs if run.get("status") == "running"),
+        "runs_failed": sum(1 for run in runs if run.get("status") in {"failed", "interrupted"}),
+        "runs_running": sum(1 for run in runs if run.get("status") in {"queued", "running"}),
     }
 
 
@@ -1310,7 +1265,6 @@ def get_artifact_url(kind: str, run_id: int | str, filename: str) -> str:
 def enrich_run(run: dict[str, Any]) -> dict[str, Any]:
     data = dict(run)
     data["status_label"] = api_status_label(data.get("status"))
-    data["mail_status_label"] = api_mail_status_label(data.get("mail_status"))
     data["dingtalk_status_label"] = dingtalk_status_label(data.get("dingtalk_status"))
     if data.get("report_path"):
         filename = artifact_filename(data["report_path"])
@@ -1322,12 +1276,39 @@ def enrich_run(run: dict[str, Any]) -> dict[str, Any]:
 
 @api_router.get("/session", dependencies=[Depends(require_api_login)])
 def api_session() -> dict[str, Any]:
-    return {"authenticated": True, "app_name": settings.app_name}
+    return {"authenticated": True, "app_name": settings.app_name, "idle_timeout_seconds": get_session_ttl_seconds()}
+
+
+@api_router.get("/ui-config", dependencies=[Depends(require_api_login)])
+def api_ui_config() -> dict[str, Any]:
+    return frontend_config()
+
+
+@api_router.post("/session/renew", dependencies=[Depends(require_api_login)])
+def api_renew_session(request: Request, response: Response) -> dict[str, Any]:
+    token = request.cookies.get(COOKIE_NAME, "")
+    if len(token.split(":")) == 6:
+        if not renew_idle_session(token):
+            raise HTTPException(status_code=401, detail="登录已过期")
+    else:
+        # 旧版固定时长令牌在首次真实操作时迁移为闲置会话。
+        token = create_idle_token(settings.admin_username)
+    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    for name, value, http_only in (
+        (COOKIE_NAME, token, True),
+        ("csrf_token", request.cookies.get("csrf_token", ""), False),
+    ):
+        response.set_cookie(
+            name, value, httponly=http_only, samesite="lax", secure=is_secure,
+            path=settings.frontend_base_path, max_age=get_session_ttl_seconds(),
+        )
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True, "idle_timeout_seconds": get_session_ttl_seconds()}
 
 
 @api_router.get("/dashboard", dependencies=[Depends(require_api_login)])
 def api_dashboard() -> dict[str, Any]:
-    jobs, raw_runs, auth_profiles, mail_profiles = dashboard_data()
+    jobs, raw_runs, auth_profiles = dashboard_data()
     runs = [enrich_run(run) for run in raw_runs]
     return {
         "app_name": settings.app_name,
@@ -1335,7 +1316,6 @@ def api_dashboard() -> dict[str, Any]:
         "runs": runs,
         "metrics": dashboard_metrics(jobs, runs),
         "auth_profiles": [public_auth_profile(profile) for profile in auth_profiles],
-        "mail_profiles": [public_mail_profile(profile) for profile in mail_profiles],
     }
 
 
@@ -1361,12 +1341,10 @@ def api_list_report_templates() -> dict[str, Any]:
 
 @api_router.post("/report-templates", dependencies=[Depends(require_api_login)])
 async def api_upload_report_template(name: str = Form(...), file: UploadFile = File(...)) -> dict[str, Any]:
-    import sqlite3
-
     content = await file.read(MAX_TEMPLATE_BYTES + 1)
     try:
         template = create_template(name, file.filename or "", content)
-    except sqlite3.IntegrityError as exc:
+    except db_sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=400, detail="模板名称已存在") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1403,12 +1381,10 @@ def api_list_taskbar_templates() -> dict[str, Any]:
 
 @api_router.post("/taskbar-templates", dependencies=[Depends(require_api_login)])
 async def api_upload_taskbar_template(name: str = Form(...), file: UploadFile = File(...)) -> dict[str, Any]:
-    import sqlite3
-
     content = await file.read(MAX_TASKBAR_BYTES + 1)
     try:
         template = create_taskbar_template(name, file.filename or "", content)
-    except sqlite3.IntegrityError as exc:
+    except db_sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=400, detail="底栏名称已存在") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1435,12 +1411,10 @@ def api_delete_taskbar_template(template_id: int) -> dict[str, Any]:
 
 @api_router.post("/jobs", dependencies=[Depends(require_api_login)])
 def api_create_job(payload: dict[str, Any]) -> dict[str, Any]:
-    import sqlite3
-
     data = api_job_payload(payload)
     try:
         job_id = save_job(data)
-    except sqlite3.IntegrityError as e:
+    except db_sqlite3.IntegrityError as e:
         if "UNIQUE constraint failed" in str(e) and "report_jobs.name" in str(e):
             raise HTTPException(status_code=400, detail="任务名称已存在")
         raise HTTPException(status_code=400, detail=f"数据库约束校验失败: {e}")
@@ -1490,6 +1464,34 @@ def calculate_job_next_runs(job: dict[str, Any], limit: int = 3) -> list[str]:
     return []
 
 
+@api_router.post("/watermark/preview", dependencies=[Depends(require_api_login)])
+def api_watermark_preview(payload: dict[str, Any] = Body(...)) -> dict[str, str]:
+    text = text_value(payload, "watermark_text", WATERMARK_DEFAULTS["watermark_text"])
+    if len(text) > MAX_WATERMARK_TEXT_LENGTH:
+        raise HTTPException(status_code=400, detail="预览文字不能超过 200 字")
+    try:
+        time_format = validate_time_format(text_value(payload, "watermark_time_format", DEFAULT_TIME_FORMAT))
+        alignment = validate_watermark_alignment(text_value(payload, "watermark_alignment", WATERMARK_DEFAULTS["watermark_alignment"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    item = {
+        "watermark_enabled": bool_value(payload.get("watermark_enabled"), True),
+        "watermark_time_enabled": bool_value(payload.get("watermark_time_enabled"), True),
+        "watermark_time_format": time_format,
+        "watermark_text": text,
+        "watermark_opacity": clamp_int(payload.get("watermark_opacity"), WATERMARK_DEFAULTS["watermark_opacity"], WATERMARK_RULES["opacity"]["min"], WATERMARK_RULES["opacity"]["max"]),
+        "watermark_font_size": clamp_int(payload.get("watermark_font_size"), WATERMARK_DEFAULTS["watermark_font_size"], 10, 72),
+        "watermark_gap_x": clamp_int(payload.get("watermark_gap_x"), WATERMARK_DEFAULTS["watermark_gap_x"], 20, 800),
+        "watermark_gap_y": clamp_int(payload.get("watermark_gap_y"), WATERMARK_DEFAULTS["watermark_gap_y"], 20, 800),
+        "watermark_angle": clamp_int(payload.get("watermark_angle"), WATERMARK_DEFAULTS["watermark_angle"], WATERMARK_RULES["angle"]["min"], WATERMARK_RULES["angle"]["max"]),
+        "watermark_alignment": alignment,
+    }
+    image_width = clamp_int(payload.get("image_width"), JOB_FORM_DEFAULTS["browser_width"], WATERMARK_RULES["image_width"]["min"], WATERMARK_RULES["image_width"]["max"])
+    image_height = clamp_int(payload.get("image_height"), JOB_FORM_DEFAULTS["browser_height"], WATERMARK_RULES["image_height"]["min"], WATERMARK_RULES["image_height"]["max"])
+    png = render_watermark_preview_png(item, image_width, image_height)
+    return {"image": "data:image/png;base64," + base64.b64encode(png).decode("ascii")}
+
+
 @api_router.get("/jobs/{job_id}", dependencies=[Depends(require_api_login)])
 def api_get_job(job_id: int) -> dict[str, Any]:
     job = require_value(get_job(job_id), "任务不存在")
@@ -1501,7 +1503,6 @@ def api_get_job(job_id: int) -> dict[str, Any]:
         "items": items,
         "next_runs": next_runs,
         "last_status": api_status_label(latest.get("status") if latest else ""),
-        "mail_profiles": [public_mail_profile(profile) for profile in list_mail_profiles()],
         "auth_profiles": [public_auth_profile(profile) for profile in list_auth_profiles()],
         "template_sections": job_template_sections(job),
         "item_defaults": WATERMARK_DEFAULTS,
@@ -1511,8 +1512,6 @@ def api_get_job(job_id: int) -> dict[str, Any]:
 
 @api_router.put("/jobs/{job_id}", dependencies=[Depends(require_api_login)])
 def api_update_job(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-    import sqlite3
-
     old = require_value(get_job(job_id), "任务不存在")
     data = api_job_payload(payload)
     if not data.get("dingtalk_webhook"):
@@ -1521,7 +1520,7 @@ def api_update_job(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         data["dingtalk_secret"] = old.get("dingtalk_secret") or ""
     try:
         save_job(data, job_id)
-    except sqlite3.IntegrityError as e:
+    except db_sqlite3.IntegrityError as e:
         if "UNIQUE constraint failed" in str(e) and "report_jobs.name" in str(e):
             raise HTTPException(status_code=400, detail="任务名称已存在")
         raise HTTPException(status_code=400, detail=f"数据库约束校验失败: {e}")
@@ -1531,10 +1530,21 @@ def api_update_job(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
 
 @api_router.delete("/jobs/{job_id}", dependencies=[Depends(require_api_login)])
 def api_delete_job(job_id: int) -> dict[str, Any]:
-    require_value(get_job(job_id), "任务不存在")
-    delete_job(job_id)
-    reload_jobs()
+    delete_job_when_idle(job_id)
     return {"ok": True}
+
+
+def delete_job_when_idle(job_id: int) -> None:
+    try:
+        lease = acquire_job_lease(job_id)
+    except JobAlreadyRunning as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        require_value(get_job(job_id), "任务不存在")
+        delete_job(job_id)
+        reload_jobs()
+    finally:
+        lease.close()
 
 
 @api_router.post("/jobs/{job_id}/run", dependencies=[Depends(require_api_login)])
@@ -1549,12 +1559,20 @@ def queue_inspection_job(job: dict[str, Any], background_tasks: BackgroundTasks)
         lease = acquire_job_lease(int(job["id"]))
     except JobAlreadyRunning as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    run_id: int | None = None
     try:
-        run_id = create_run(int(job["id"]), str(job["name"]))
+        run_id = create_run(int(job["id"]), str(job["name"]), status="queued")
         background_tasks.add_task(run_job, int(job["id"]), run_id, execution_lease=lease)
         return run_id
-    except Exception:
-        lease.close()
+    except Exception as exc:
+        try:
+            if run_id is not None:
+                try:
+                    finish_active_run(run_id, "failed", f"任务提交失败：{type(exc).__name__}: {exc}")
+                except Exception:
+                    app_logger.exception("任务提交失败后写入巡检记录 #%s 失败", run_id)
+        finally:
+            lease.close()
         raise
 
 
@@ -1597,9 +1615,13 @@ def api_create_items_batch(job_id: int, payload: dict[str, Any]) -> dict[str, An
         name = str(row.get("name") or "").strip()
         if not name:
             raise HTTPException(status_code=400, detail=f"第 {index} 行请填写截图名称")
+        kibana_dashboard = (
+            parts.path.rstrip("/").lower().endswith(("/app/dashboards", "/app/kibana"))
+            and parts.fragment.lower().startswith(("/view/", "/dashboard/"))
+        )
         data = api_item_payload({
             "name": name, "url": url, "auth_profile_id": auth_id,
-            "item_type": "grafana" if "/d/" in parts.path or "/d-solo/" in parts.path else "web",
+            "item_type": "grafana" if "/d/" in parts.path or "/d-solo/" in parts.path else "kibana" if kibana_dashboard else "web",
             "section": str(row.get("section") or "巡检截图").strip() or "巡检截图",
             "real_browser_capture": bool_value(row.get("real_browser_capture"), True),
             "taskbar_enabled": True,
@@ -1644,15 +1666,27 @@ def api_delete_item(item_id: int) -> dict[str, Any]:
 
 @api_router.post("/items/{item_id}/test", dependencies=[Depends(require_api_login)])
 def api_test_item(item_id: int, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    require_value(get_screenshot_item(item_id), "截图项不存在")
-    background_tasks.add_task(test_capture_item, item_id)
-    return {"ok": True}
+    run_id = queue_test_item(item_id, background_tasks)
+    return {"ok": True, "run_id": run_id}
+
+
+def queue_test_item(item_id: int, background_tasks: BackgroundTasks) -> int:
+    item = require_value(get_screenshot_item(item_id), "截图项不存在")
+    run_id = create_queued_test_run(int(item["job_id"]), item_id, str(item["name"]))
+    if run_id is None:
+        raise HTTPException(status_code=409, detail="该截图项已有测试在排队或运行")
+    try:
+        background_tasks.add_task(test_capture_item, item_id, run_id)
+    except Exception as exc:
+        finish_active_run(run_id, "failed", f"测试提交失败：{type(exc).__name__}: {exc}")
+        raise
+    return run_id
 
 
 @api_router.get("/runs", dependencies=[Depends(require_api_login)])
-def api_list_runs(page: int = 1, page_size: int = 10) -> dict[str, Any]:
-    if page_size not in (10, 20, 30, 40, 50, 100):
-        page_size = 10
+def api_list_runs(page: int = 1, page_size: int = RUN_DEFAULT_PAGE_SIZE) -> dict[str, Any]:
+    if page_size not in RUN_PAGE_SIZES:
+        page_size = RUN_DEFAULT_PAGE_SIZE
     if page < 1:
         page = 1
     runs_list, total = list_runs_page(page, page_size)
@@ -1752,6 +1786,18 @@ def api_search_grafana_dashboards(auth_id: int, query: str = "") -> dict[str, An
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@api_router.get("/auth-profiles/{auth_id}/kibana-dashboards", dependencies=[Depends(require_api_login)])
+def api_search_kibana_dashboards(auth_id: int, query: str = "") -> dict[str, Any]:
+    from app.kibana_connections import search_dashboards
+    from app.grafana_connections import ConnectionError
+
+    profile = require_value(get_auth_profile(auth_id), "认证配置不存在")
+    try:
+        return search_dashboards(profile, query)
+    except ConnectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @api_router.get("/auth-profiles/{auth_id}/dashboards/{uid}/settings", dependencies=[Depends(require_api_login)])
 def api_grafana_dashboard_settings(auth_id: int, uid: str, params: str = "") -> dict[str, Any]:
     from app.grafana_connections import ConnectionError, dashboard_settings
@@ -1775,7 +1821,7 @@ def api_check_connection_target(payload: dict[str, Any]) -> dict[str, Any]:
 @api_router.post("/auth-profiles", dependencies=[Depends(require_api_login)])
 def api_create_auth_profile(payload: dict[str, Any]) -> dict[str, Any]:
     data = api_auth_payload(payload)
-    auth_id = save_auth_profile(data)
+    auth_id = save_named_profile_or_http_error(save_auth_profile, data)
     return {"ok": True, "profile": public_auth_profile(require_value(get_auth_profile(auth_id), "认证配置不存在"))}
 
 
@@ -1799,7 +1845,7 @@ def api_update_auth_profile(auth_id: int, payload: dict[str, Any]) -> dict[str, 
     if not data.get("username_value"):
         data["username"] = old.get("username")
         data["username_value"] = old.get("username_value")
-    save_auth_profile(data, auth_id)
+    save_named_profile_or_http_error(save_auth_profile, data, auth_id)
     if changed:
         clear_auth_state_cache(old)
     return {"ok": True, "profile": public_auth_profile(require_value(get_auth_profile(auth_id), "认证配置不存在"))}
@@ -1832,7 +1878,7 @@ def api_create_dingtalk_profile(payload: dict[str, Any]) -> dict[str, Any]:
     data = api_dingtalk_payload(payload)
     if not data["webhook"]:
         raise HTTPException(status_code=400, detail="Webhook 不能为空")
-    bot_id = save_dingtalk_profile(data)
+    bot_id = save_named_profile_or_http_error(save_dingtalk_profile, data)
     return {"ok": True, "profile": public_dingtalk_profile(require_value(get_dingtalk_profile(bot_id), "钉钉机器人不存在"))}
 
 
@@ -1844,7 +1890,7 @@ def api_update_dingtalk_profile(profile_id: int, payload: dict[str, Any]) -> dic
         data["webhook"] = old.get("webhook") or ""
     if not data["secret"]:
         data["secret"] = old.get("secret") or ""
-    save_dingtalk_profile(data, profile_id)
+    save_named_profile_or_http_error(save_dingtalk_profile, data, profile_id)
     return {"ok": True, "profile": public_dingtalk_profile(require_value(get_dingtalk_profile(profile_id), "钉钉机器人不存在"))}
 
 
@@ -1879,73 +1925,9 @@ def api_test_dingtalk_profile(profile_id: int) -> dict[str, Any]:
     return {"ok": False, "error": f"钉钉发送失败: {result}"}
 
 
-@api_router.post("/mail-profiles/{mail_id}/test", dependencies=[Depends(require_api_login)])
-def api_test_mail_profile_json(mail_id: int, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
-    profile = require_value(get_mail_profile(mail_id), "邮件配置不存在")
-    from app.mail import send_inspection_mail
-    from app.utils import decrypt_secret
-    recipient = text_value(payload, "to", "").strip() or profile.get("recipients", "").split(",")[0].strip() or profile.get("sender", "").strip()
-    if not recipient:
-        raise HTTPException(status_code=400, detail="收件人为空且无法提取默认收件人")
-
-    password = ""
-    if profile.get("password_secret"):
-        try:
-            password = decrypt_secret(profile.get("password_secret"))
-        except Exception:
-            pass
-    elif profile.get("password_env"):
-        password = os.getenv(profile.get("password_env"), "")
-
-    success, err = send_inspection_mail(
-        smtp_host=profile.get("smtp_host", ""),
-        smtp_port=int(profile.get("smtp_port") or 465),
-        use_ssl=bool(profile.get("use_ssl", 1)),
-        use_starttls=bool(profile.get("use_starttls", 0)),
-        username=profile.get("username", ""),
-        password=password,
-        sender=profile.get("sender", ""),
-        recipients=recipient,
-        subject="自动化巡检系统 - 邮件连通性测试",
-        body_text="这是一封来自自动化巡检系统的测试邮件，说明邮件服务器连接及认证配置正常。",
-    )
-    if success:
-        return {"ok": True, "message": f"测试邮件已成功发送至 {recipient}！"}
-    return {"ok": False, "error": f"邮件发送失败: {err}"}
-
-
-@api_router.get("/mail-profiles", dependencies=[Depends(require_api_login)])
-def api_list_mail_profiles() -> dict[str, Any]:
-    return {"profiles": [public_mail_profile(profile) for profile in list_mail_profiles()]}
-
-
-@api_router.post("/mail-profiles", dependencies=[Depends(require_api_login)])
-def api_create_mail_profile(payload: dict[str, Any]) -> dict[str, Any]:
-    data = api_mail_payload(payload)
-    mail_id = save_mail_profile(data)
-    return {"ok": True, "profile": public_mail_profile(require_value(get_mail_profile(mail_id), "邮件配置不存在"))}
-
-
-@api_router.put("/mail-profiles/{mail_id}", dependencies=[Depends(require_api_login)])
-def api_update_mail_profile(mail_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-    old = require_value(get_mail_profile(mail_id), "邮件配置不存在")
-    data = api_mail_payload(payload)
-    if not data.get("password"):
-        data["password_secret"] = old.get("password_secret")
-    save_mail_profile(data, mail_id)
-    return {"ok": True, "profile": public_mail_profile(require_value(get_mail_profile(mail_id), "邮件配置不存在"))}
-
-
-@api_router.delete("/mail-profiles/{mail_id}", dependencies=[Depends(require_api_login)])
-def api_delete_mail_profile(mail_id: int) -> dict[str, Any]:
-    require_value(get_mail_profile(mail_id), "邮件配置不存在")
-    delete_mail_profile(mail_id)
-    return {"ok": True}
-
-
 @api_router.get("/periodic-reports", dependencies=[Depends(require_api_login)])
 def api_periodic_reports() -> dict[str, Any]:
-    from app.repository import list_periodic_report_runs, list_periodic_report_settings, list_mail_profiles, list_dingtalk_profiles
+    from app.repository import list_periodic_report_runs, list_periodic_report_settings, list_dingtalk_profiles
     from app.scheduler import _periodic_next
     from zoneinfo import ZoneInfo
     from datetime import datetime
@@ -1990,7 +1972,6 @@ def api_periodic_reports() -> dict[str, Any]:
     return {
         "settings": settings_list,
         "runs": runs,
-        "mail_profiles": [public_mail_profile(p) for p in list_mail_profiles()],
         "dingtalk_profiles": [public_dingtalk_profile(p) for p in list_dingtalk_profiles()],
     }
 
@@ -2089,9 +2070,9 @@ def api_update_periodic_report(report_type: str, payload: dict[str, Any]) -> dic
         "schedule_label": schedule_label,
         "cron_expression": cron_expr,
         "schedule_config": schedule_config,
-        "mail_profile_id": parse_optional_int(str(payload.get("mail_profile_id") or "")),
-        "enable_email": int(bool_value(payload.get("enable_email"), False)),
-        "recipients_override": text_value(payload, "recipients_override", ""),
+        "mail_profile_id": None,
+        "enable_email": 0,
+        "recipients_override": "",
         "dingtalk_enabled": int(bool_value(payload.get("dingtalk_enabled"), False)),
         "dingtalk_profile_id": parse_optional_int(str(payload.get("dingtalk_profile_id") or "")),
         "include_docx": int(bool_value(payload.get("include_docx"), True)),
@@ -2121,6 +2102,8 @@ def index(request: Request) -> HTMLResponse:
             "url_for_frontend": url_for_frontend,
             "api_prefix": settings.api_prefix,
             "frontend_base_path": settings.frontend_base_path,
+            "app_name": settings.app_name,
+            "time_zone": settings.default_timezone,
             "vue_js": entry["file"],
             "vue_css": entry["css"][0],
         },
@@ -2139,7 +2122,6 @@ def new_job(request: Request) -> HTMLResponse:
         {
             "request": request,
             "job": {},
-            "mail_profiles": list_mail_profiles(),
             "action": url_for_frontend("/jobs/new"),
             "error": request.query_params.get("error", "")
         },
@@ -2151,7 +2133,6 @@ def create_job(form: dict[str, Any] = Depends(job_form)) -> RedirectResponse:
     from app.schedule_migration import _job_config
     from app.date_schedule import label
     from urllib.parse import quote
-    import sqlite3
     try:
         if form.get("schedule_mode") != "simple":
             raise ValueError("旧定时方式已停用，请在新页面设置日期计划")
@@ -2163,7 +2144,7 @@ def create_job(form: dict[str, Any] = Depends(job_form)) -> RedirectResponse:
 
     try:
         job_id = save_job(form)
-    except sqlite3.IntegrityError as e:
+    except db_sqlite3.IntegrityError as e:
         if "UNIQUE constraint failed" in str(e) and "report_jobs.name" in str(e):
             return frontend_redirect(f"/jobs/new?error={quote('任务名称已存在')}")
         return frontend_redirect(f"/jobs/new?error={quote(f'数据库错误: {e}')}")
@@ -2213,7 +2194,6 @@ def edit_job(request: Request, job_id: int) -> HTMLResponse:
         {
             "request": request,
             "job": job,
-            "mail_profiles": list_mail_profiles(),
             "action": url_for_frontend(f"/jobs/{job_id}/edit"),
             "error": request.query_params.get("error", "")
         },
@@ -2225,7 +2205,6 @@ def update_job(job_id: int, form: dict[str, Any] = Depends(job_form)) -> Redirec
     from app.schedule_migration import _job_config
     from app.date_schedule import label
     from urllib.parse import quote
-    import sqlite3
     old = require_value(get_job(job_id), "任务不存在")
     try:
         if form.get("schedule_mode") != "simple":
@@ -2243,7 +2222,7 @@ def update_job(job_id: int, form: dict[str, Any] = Depends(job_form)) -> Redirec
     form["template_id"] = old.get("template_id")
     try:
         save_job(form, job_id)
-    except sqlite3.IntegrityError as e:
+    except db_sqlite3.IntegrityError as e:
         if "UNIQUE constraint failed" in str(e) and "report_jobs.name" in str(e):
             return frontend_redirect(f"/jobs/{job_id}/edit?error={quote('任务名称已存在')}")
         return frontend_redirect(f"/jobs/{job_id}/edit?error={quote(f'数据库错误: {e}')}")
@@ -2253,8 +2232,7 @@ def update_job(job_id: int, form: dict[str, Any] = Depends(job_form)) -> Redirec
 
 @frontend_router.post("/jobs/{job_id}/delete", dependencies=[Depends(require_login)])
 def remove_job(job_id: int) -> RedirectResponse:
-    delete_job(job_id)
-    reload_jobs()
+    delete_job_when_idle(job_id)
     return frontend_redirect("/")
 
 
@@ -2283,7 +2261,9 @@ def new_item(request: Request, job_id: int) -> HTMLResponse:
             "job_id": job_id,
             "auth_profiles": list_auth_profiles(),
             "template_sections": job_template_sections(job),
-            "watermark_time_formats": watermark_options(),
+            "api_prefix": settings.api_prefix,
+            "preview_browser_width": job.get("browser_width") or 3840,
+            "preview_browser_height": job.get("browser_height") or 2160,
             "action": url_for_frontend(f"/jobs/{job_id}/items/new"),
         },
     )
@@ -2299,15 +2279,18 @@ def create_item(job_id: int, form: dict[str, Any] = Depends(item_form)) -> Redir
 @frontend_router.get("/items/{item_id}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def edit_item(request: Request, item_id: int) -> HTMLResponse:
     item = require_value(get_screenshot_item(item_id), "截图项不存在")
+    job = require_value(get_job(item["job_id"]), "任务不存在")
     return templates.TemplateResponse(
         "item_form.html",
         {
             "request": request,
             "item": item,
-            "watermark_time_formats": watermark_options(),
+            "api_prefix": settings.api_prefix,
+            "preview_browser_width": job.get("browser_width") or 3840,
+            "preview_browser_height": job.get("browser_height") or 2160,
             "job_id": item["job_id"],
             "auth_profiles": list_auth_profiles(),
-            "template_sections": job_template_sections(require_value(get_job(item["job_id"]), "任务不存在")),
+            "template_sections": job_template_sections(job),
             "action": url_for_frontend(f"/items/{item_id}/edit"),
         },
     )
@@ -2331,9 +2314,8 @@ def remove_item(item_id: int) -> RedirectResponse:
 
 @frontend_router.post("/items/{item_id}/test", dependencies=[Depends(require_login)])
 def test_item(item_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
-    require_value(get_screenshot_item(item_id), "截图项不存在")
-    background_tasks.add_task(test_capture_item, item_id)
-    return frontend_redirect("/runs?watch=1")
+    run_id = queue_test_item(item_id, background_tasks)
+    return frontend_redirect(f"/runs/{run_id}?watch=1")
 
 
 @frontend_router.get("/auth-profiles", dependencies=[Depends(require_login)])
@@ -2353,7 +2335,11 @@ def new_auth_profile(request: Request) -> HTMLResponse:
 
 @frontend_router.post("/auth-profiles/new", dependencies=[Depends(require_login)])
 def create_auth_profile(form: dict[str, Any] = Depends(auth_form)) -> RedirectResponse:
-    auth_id = save_auth_profile(form)
+    from urllib.parse import quote
+    try:
+        save_named_profile_or_http_error(save_auth_profile, form)
+    except HTTPException as exc:
+        return frontend_redirect(f"/auth-profiles/new?error={quote(str(exc.detail))}")
     return frontend_redirect("/auth-profiles")
 
 
@@ -2368,7 +2354,9 @@ def edit_auth_profile(request: Request, auth_id: int) -> HTMLResponse:
 
 @frontend_router.post("/auth-profiles/{auth_id}/edit", dependencies=[Depends(require_login)])
 def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form)) -> RedirectResponse:
+    from urllib.parse import quote
     old = get_auth_profile(auth_id)
+    changed = False
     if old:
         # 若留空代表不修改，沿用旧凭据
         if not form.get("password"):
@@ -2395,10 +2383,12 @@ def update_auth_profile(auth_id: int, form: dict[str, Any] = Depends(auth_form))
         if form.get("password"):
             changed = True
 
-        if changed:
-            clear_auth_state_cache(dict(old))
-
-    save_auth_profile(form, auth_id)
+    try:
+        save_named_profile_or_http_error(save_auth_profile, form, auth_id)
+    except HTTPException as exc:
+        return frontend_redirect(f"/auth-profiles/{auth_id}/edit?error={quote(str(exc.detail))}")
+    if old and changed:
+        clear_auth_state_cache(dict(old))
     return frontend_redirect("/auth-profiles")
 
 
@@ -2425,153 +2415,6 @@ def test_auth_profile_route(auth_id: int) -> RedirectResponse:
 def test_auth_profile_route_async(auth_id: int) -> dict[str, Any]:
     from app.screenshot import test_auth_profile_login
     return test_auth_profile_login(auth_id)
-
-
-@frontend_router.get("/mail-profiles", dependencies=[Depends(require_login)])
-def mail_profiles(request: Request) -> RedirectResponse:
-    params = request.query_params
-    query_str = f"?{params}" if params else ""
-    return frontend_redirect(f"/#/mail{query_str}")
-
-
-@frontend_router.get("/mail-profiles/new", response_class=HTMLResponse, dependencies=[Depends(require_login)])
-def new_mail_profile(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(
-        "mail_form.html",
-        {"request": request, "profile": {}, "action": url_for_frontend("/mail-profiles/new")},
-    )
-
-
-@frontend_router.post("/mail-profiles/new", dependencies=[Depends(require_login)])
-def create_mail_profile(form: dict[str, Any] = Depends(mail_form)) -> RedirectResponse:
-    mail_id = save_mail_profile(form)
-    return frontend_redirect("/mail-profiles")
-
-
-@frontend_router.get("/mail-profiles/{mail_id}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
-def edit_mail_profile(request: Request, mail_id: int) -> HTMLResponse:
-    profile = require_value(get_mail_profile(mail_id), "邮件配置不存在")
-    return templates.TemplateResponse(
-        "mail_form.html",
-        {"request": request, "profile": profile, "action": url_for_frontend(f"/mail-profiles/{mail_id}/edit")},
-    )
-
-
-@frontend_router.post("/mail-profiles/{mail_id}/edit", dependencies=[Depends(require_login)])
-def update_mail_profile(mail_id: int, form: dict[str, Any] = Depends(mail_form)) -> RedirectResponse:
-    old = get_mail_profile(mail_id)
-    if old:
-        if not form.get("password"):
-            form["password_secret"] = old.get("password_secret")
-    save_mail_profile(form, mail_id)
-    return frontend_redirect("/mail-profiles")
-
-
-@frontend_router.post("/mail-profiles/{mail_id}/delete", dependencies=[Depends(require_login)])
-def remove_mail_profile(mail_id: int) -> RedirectResponse:
-    delete_mail_profile(mail_id)
-    return frontend_redirect("/mail-profiles")
-
-
-@frontend_router.post("/mail-profiles/{mail_id}/test", dependencies=[Depends(require_login)])
-def test_mail_profile(mail_id: int, test_recipient: str = Form("")) -> RedirectResponse:
-    profile = require_value(get_mail_profile(mail_id), "邮件配置不存在")
-    recipient = test_recipient.strip()
-    if not recipient:
-        recipient = str(profile.get("recipients") or "").strip()
-    if not recipient:
-        recipient = str(profile.get("sender") or profile.get("username") or "").strip()
-    if not recipient:
-        from urllib.parse import quote
-        return frontend_redirect(f"/mail-profiles?error={quote('收件人为空且无法提取默认收件人，请指定测试收件邮箱')}")
-
-    import tempfile
-    from docx import Document
-    from urllib.parse import quote
-    from app.mailer import send_report_mail
-
-    temp_dir = tempfile.gettempdir()
-    test_doc_path = os.path.join(temp_dir, "test_report.docx")
-    try:
-        doc = Document()
-        doc.add_heading("邮件发送配置测试报告", level=1)
-        doc.add_paragraph("这是一封由系统自动生成的巡检报告测试附件。")
-        doc.add_paragraph("如果您收到这封邮件，说明您的 SMTP 邮件服务配置成功，且能够成功传递带附件的报告。")
-        doc.save(test_doc_path)
-
-        test_profile = dict(profile)
-        test_profile["recipients"] = recipient
-        test_profile["cc"] = ""
-
-        dummy_job = {
-            "name": "邮件配置连接测试",
-            "environment": "SRE测试环境",
-            "time_range_label": "即时"
-        }
-        send_report_mail(test_profile, dummy_job, test_doc_path)
-    except Exception as exc:
-        err_msg = f"{type(exc).__name__}: {exc}"
-        app_logger.error(f"测试发送邮件失败: {err_msg}", exc_info=True)
-        return frontend_redirect(f"/mail-profiles?error={quote(err_msg)}")
-    finally:
-        if os.path.exists(test_doc_path):
-            try:
-                os.remove(test_doc_path)
-            except Exception:
-                pass
-
-    from urllib.parse import quote
-    return frontend_redirect(f"/mail-profiles?success={quote('测试邮件已成功发出！请检查您的邮箱收件箱。')}")
-
-
-@frontend_router.post("/mail-profiles/{mail_id}/test-async", dependencies=[Depends(require_login)])
-def test_mail_profile_async(mail_id: int, test_recipient: str = Form("")) -> dict[str, Any]:
-    profile = get_mail_profile(mail_id)
-    if not profile:
-        return {"success": False, "message": "邮件配置不存在"}
-
-    recipient = test_recipient.strip()
-    if not recipient:
-        recipient = str(profile.get("recipients") or "").strip()
-    if not recipient:
-        recipient = str(profile.get("sender") or profile.get("username") or "").strip()
-    if not recipient:
-        return {"success": False, "message": "收件人为空且无法提取默认收件人，请指定测试收件邮箱"}
-
-    import tempfile
-    from docx import Document
-    from app.mailer import send_report_mail
-
-    temp_dir = tempfile.gettempdir()
-    test_doc_path = os.path.join(temp_dir, "test_report.docx")
-    try:
-        doc = Document()
-        doc.add_heading("邮件发送配置测试报告", level=1)
-        doc.add_paragraph("这是一封由系统自动生成的巡检报告测试附件。")
-        doc.add_paragraph("如果您收到这封邮件，说明您的 SMTP 邮件服务配置成功，且能够成功传递带附件的报告。")
-        doc.save(test_doc_path)
-
-        test_profile = dict(profile)
-        test_profile["recipients"] = recipient
-        test_profile["cc"] = ""
-
-        dummy_job = {
-            "name": "邮件配置连接测试",
-            "environment": "SRE测试环境",
-            "time_range_label": "即时"
-        }
-        send_report_mail(test_profile, dummy_job, test_doc_path)
-        return {"success": True, "message": "测试邮件已成功发出！请检查您的邮箱收件箱。"}
-    except Exception as exc:
-        err_msg = f"{type(exc).__name__}: {exc}"
-        app_logger.error(f"测试发送邮件失败: {err_msg}", exc_info=True)
-        return {"success": False, "message": f"测试邮件发送失败: {err_msg}"}
-    finally:
-        if os.path.exists(test_doc_path):
-            try:
-                os.remove(test_doc_path)
-            except Exception:
-                pass
 
 
 @frontend_router.get("/runs", dependencies=[Depends(require_login)])
@@ -2635,9 +2478,10 @@ def artifact(request: Request, kind: str, run_id: int, filename: str):
 
     accept = request.headers.get("accept", "")
     raw = request.query_params.get("raw", "")
+    download_requested = request.query_params.get("download") == "1"
 
     is_image = filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'))
-    if "text/html" in accept and not raw and is_image:
+    if "text/html" in accept and not raw and not download_requested and is_image:
         import html
         escaped_filename = html.escape(filename)
         escaped_raw_url = html.escape(request.url.path + "?raw=true")
@@ -2706,7 +2550,7 @@ def artifact(request: Request, kind: str, run_id: int, filename: str):
     </div>
     <div class="toolbar">
         <button class="btn" onclick="rotateImage()">↻ 旋转</button>
-        <a class="btn" href="{escaped_raw_url}" download>⬇ 下载原图</a>
+        <a class="btn" href="{html.escape(request.url.path + '?download=1')}">⬇ 下载原图</a>
         <button class="btn" onclick="window.close()">✕ 关闭</button>
     </div>
     <script>
@@ -2720,7 +2564,7 @@ def artifact(request: Request, kind: str, run_id: int, filename: str):
 </html>"""
         return HTMLResponse(content=html_content)
 
-    return FileResponse(target_path, filename=None if is_image else filename)
+    return FileResponse(target_path, filename=filename if download_requested or not is_image else None)
 
 
 def require_value(value: Any, message: str) -> Any:
@@ -2730,6 +2574,18 @@ def require_value(value: Any, message: str) -> Any:
 
 
 def with_file_url(item: dict[str, Any]) -> dict[str, Any]:
+    created_at = item.get("created_at")
+    if created_at:
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+
+        try:
+            timestamp = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            item["created_at_local"] = timestamp.astimezone(ZoneInfo(settings.default_timezone)).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
     file_path = item.get("file_path") or ""
     run_id = item.get("run_id")
     if file_path and run_id:
@@ -2781,19 +2637,8 @@ def parse_optional_int(value: str | None) -> int | None:
 # ==============================================================================
 
 @frontend_router.post("/settings/reset", dependencies=[Depends(require_login)])
-def reset_database() -> RedirectResponse:
-    from app.db import reset_database_data
-    from app.scheduler import reload_jobs
-
-    app_logger.info("用户请求一键重置所有本地测试数据")
-    try:
-        reset_database_data()
-        reload_jobs()
-    except Exception as exc:
-        app_logger.error(f"重置数据库失败: {exc}", exc_info=True)
-
-    from urllib.parse import quote
-    return frontend_redirect(f"/?success={quote('系统所有配置及历史数据已成功清空并重置！')}")
+def reset_database() -> None:
+    raise HTTPException(status_code=410, detail="旧版全量重置接口已停用，请在系统设置中使用需要 MFA 验证的历史清理功能")
 
 
 @frontend_router.get("/periodic-reports", dependencies=[Depends(require_login)])
@@ -2805,7 +2650,7 @@ def periodic_reports_list(request: Request) -> RedirectResponse:
 
 @frontend_router.get("/periodic-reports/{report_type}/edit", response_class=HTMLResponse, dependencies=[Depends(require_login)])
 def edit_periodic_report(request: Request, report_type: str) -> HTMLResponse:
-    from app.repository import get_periodic_report_setting, list_mail_profiles
+    from app.repository import get_periodic_report_setting
     from app.utils import decrypt_secret
     setting = get_periodic_report_setting(report_type)
     if not setting:
@@ -2824,7 +2669,6 @@ def edit_periodic_report(request: Request, report_type: str) -> HTMLResponse:
         {
             "request": request,
             "setting": setting,
-            "mail_profiles": list_mail_profiles(),
             "action": url_for_frontend(f"/periodic-reports/{report_type}/edit")
         }
     )
@@ -2837,14 +2681,12 @@ def update_periodic_report(
     name: str = Form(...),
     schedule_mode: str = Form("simple"),
     cron_expression: str = Form(""),
-    mail_profile_id: str | None = Form(None),
     include_docx: str | None = Form(None),
     include_screenshots: str | None = Form(None),
     send_empty_report: str | None = Form(None),
     wait_for_daily_jobs: str | None = Form(None),
     retry_until_time: str = Form("23:50"),
     retry_interval_minutes: int = Form(10),
-    recipients_override: str = Form(""),
     frequency: str = Form("weekly"),
     day_of_week: str | None = Form(None),
     day_of_month: str | None = Form(None),
@@ -2852,7 +2694,6 @@ def update_periodic_report(
     hour: list[int] = Form([]),
     minute: list[int] = Form([]),
     send_on_timeout: int = Form(1),
-    enable_email: str | None = Form(None),
     dingtalk_enabled: str | None = Form(None),
     dingtalk_webhook: str = Form(""),
     dingtalk_secret: str = Form(""),
@@ -2870,14 +2711,13 @@ def update_periodic_report(
         api_update_periodic_report(report_type, {
             "name": name, "enabled": bool(enabled), "schedule_mode": "calendar",
             "day_of_week": day_of_week or "1", "times": times,
-            "mail_profile_id": mail_profile_id, "include_docx": bool(include_docx),
+            "include_docx": bool(include_docx),
             "include_screenshots": bool(include_screenshots),
             "send_empty_report": bool(send_empty_report),
             "wait_for_daily_jobs": bool(wait_for_daily_jobs),
             "retry_until_time": retry_until_time,
             "retry_interval_minutes": retry_interval_minutes,
-            "recipients_override": recipients_override,
-            "send_on_timeout": bool(send_on_timeout), "enable_email": bool(enable_email),
+            "send_on_timeout": bool(send_on_timeout),
             "dingtalk_enabled": bool(dingtalk_enabled),
         })
     except HTTPException as exc:
@@ -2889,7 +2729,7 @@ def run_periodic_report_now(report_type: str, background_tasks: BackgroundTasks)
     from app.periodic_reporter import trigger_periodic_report
     from urllib.parse import quote
     background_tasks.add_task(trigger_periodic_report, report_type, True)
-    return frontend_redirect(f"/periodic-reports?success={quote('周期汇总报告生成任务已在后台启动，打包发信中，请稍候刷新页面查看。')}")
+    return frontend_redirect(f"/periodic-reports?success={quote('周期汇总报告生成任务已在后台启动，请稍候刷新页面查看。')}")
 
 
 @frontend_router.get("/periodic-reports/download/{run_id}", dependencies=[Depends(require_login)])
@@ -2972,7 +2812,7 @@ def api_update_storage_settings(payload: dict[str, Any]) -> dict[str, Any]:
     # 手动清理由管理员确认操作，不再由独立开关控制；保留旧列兼容现有数据库。
     allow_manual_cleanup = True
     cleanup_schedule_mode = text_value(payload, "cleanup_schedule_mode", existing.get("cleanup_schedule_mode") or "daily")
-    if cleanup_schedule_mode not in {"daily", "weekly", "monthly"}:
+    if cleanup_schedule_mode not in {option["value"] for option in CLEANUP_SCHEDULE_MODES}:
         raise HTTPException(status_code=400, detail="清理频率无效")
 
     try:
@@ -3093,7 +2933,7 @@ def api_estimate_storage(payload: dict[str, Any] | None = None) -> dict[str, Any
 
 @api_router.post("/storage/cleanup", dependencies=[Depends(require_api_login)])
 def api_run_storage_cleanup(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    from app.cleanup import preview_cleanup, run_cleanup
+    from app.cleanup import confirmed_cleanup, preview_cleanup, run_cleanup
     payload = payload or {}
     target_month = payload.get("month")
     try:
@@ -3102,14 +2942,15 @@ def api_run_storage_cleanup(payload: dict[str, Any] | None = None) -> dict[str, 
             raise HTTPException(status_code=400, detail="请先查看待清理数据")
         current = preview_cleanup(
             scopes=payload.get("scopes"), older_than_days=payload.get("older_than_days"),
-            target_month=target_month, page=1, page_size=1,
+            target_month=target_month, page=1, page_size=1, include_all_items=True,
         )
         if current.get("status") != "success" or current.get("fingerprint") != fingerprint or not current.get("total_items"):
             raise HTTPException(status_code=409, detail="待清理数据已变化，请重新查看")
-        res = run_cleanup(
-            mode="manual", dry_run=False, target_month=target_month,
-            scopes=payload.get("scopes"), older_than_days=payload.get("older_than_days"),
-        )
+        with confirmed_cleanup(current["_all_items"]):
+            res = run_cleanup(
+                mode="manual", dry_run=False, target_month=target_month,
+                scopes=payload.get("scopes"), older_than_days=payload.get("older_than_days"),
+            )
         if res.get("status") == "failed":
             detail = res.get("error_summary") or "清理失败"
             status_code = 400 if "系统策略限制" in detail else 500

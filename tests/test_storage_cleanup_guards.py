@@ -26,6 +26,9 @@ class _Rows:
     def fetchone(self):
         return self.row
 
+    def fetchall(self):
+        return []
+
 
 class _Connection:
     def __init__(self, row):
@@ -102,9 +105,15 @@ def test_month_estimate_includes_periodic_run_records(monkeypatch):
 
     class Connection(_Connection):
         def execute(self, query, params=()):
-            if "SELECT COUNT(*) FROM periodic_report_runs" in query:
+            if "SELECT * FROM periodic_report_runs" in query:
                 assert params == ("2020-10%",)
-                return _Rows((3,))
+                class Rows:
+                    def fetchall(self):
+                        return [
+                            {"id": i, "started_at": "2020-10-01 10:00:00", "finished_at": "2020-10-01 10:01:00"}
+                            for i in range(1, 4)
+                        ]
+                return Rows()
             return super().execute(query, params)
 
     monkeypatch.setattr(cleanup, "connect", lambda: nullcontext(Connection({"protect_recent_days": 3})))
@@ -128,10 +137,10 @@ def test_month_cleanup_counts_deleted_periodic_run_records(monkeypatch):
     connection.executescript("""
         CREATE TABLE storage_cleanup_settings (id INTEGER PRIMARY KEY, protect_recent_days INTEGER);
         INSERT INTO storage_cleanup_settings VALUES (1, 1);
-        CREATE TABLE periodic_report_runs (id INTEGER PRIMARY KEY, started_at TEXT);
-        INSERT INTO periodic_report_runs VALUES (1, '2020-10-01 10:00:00');
-        INSERT INTO periodic_report_runs VALUES (2, '2020-10-02 10:00:00');
-        INSERT INTO periodic_report_runs VALUES (3, '2020-11-01 10:00:00');
+        CREATE TABLE periodic_report_runs (id INTEGER PRIMARY KEY, started_at TEXT, finished_at TEXT);
+        INSERT INTO periodic_report_runs VALUES (1, '2020-10-01 10:00:00', '2020-10-01 10:01:00');
+        INSERT INTO periodic_report_runs VALUES (2, '2020-10-02 10:00:00', '2020-10-02 10:01:00');
+        INSERT INTO periodic_report_runs VALUES (3, '2020-11-01 10:00:00', '2020-11-01 10:01:00');
         CREATE TABLE storage_cleanup_runs (
             mode TEXT, status TEXT, started_at TEXT, finished_at TEXT,
             deleted_files_count INTEGER, deleted_bytes INTEGER,
@@ -319,6 +328,165 @@ def test_cleanup_preview_paginates_without_changing_fingerprint(monkeypatch, tmp
     assert len(first["items"]) == 2 and len(second["items"]) == 1
     assert first["fingerprint"] == second["fingerprint"]
     assert {item["name"] for item in first["items"]}.isdisjoint({item["name"] for item in second["items"]})
+
+
+def test_confirmed_cleanup_does_not_delete_file_added_after_preview(monkeypatch, tmp_path):
+    cleanup = _cleanup_module()
+    data_dir = tmp_path / "data"
+    log_dir = data_dir / "logs"
+    log_dir.mkdir(parents=True)
+    original = log_dir / "original.log"
+    original.write_text("original", encoding="utf-8")
+    old_time = (datetime.now() - timedelta(days=40)).timestamp()
+    os.utime(original, (old_time, old_time))
+    monkeypatch.setattr(cleanup.settings, "data_dir", data_dir)
+    monkeypatch.setattr(cleanup.settings, "log_dir", log_dir)
+    monkeypatch.setattr(cleanup.settings, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(cleanup, "connect", lambda: nullcontext(_Connection({"protect_recent_days": 3})))
+
+    preview = cleanup.preview_cleanup(scopes=["logs"], older_than_days=30, include_all_items=True)
+    added = log_dir / "added.log"
+    added.write_text("added", encoding="utf-8")
+    os.utime(added, (old_time, old_time))
+    with cleanup.confirmed_cleanup(preview["_all_items"]):
+        result = cleanup.run_cleanup(mode="manual", scopes=["logs"], older_than_days=30)
+
+    assert result["status"] == "partial_success"
+    assert result["deleted_logs_count"] == 1
+    assert not original.exists()
+    assert added.exists()
+
+
+def test_confirmed_cleanup_does_not_delete_record_added_after_preview(monkeypatch):
+    cleanup = _cleanup_module()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE storage_cleanup_settings (id INTEGER PRIMARY KEY, protect_recent_days INTEGER);
+        INSERT INTO storage_cleanup_settings VALUES (1, 1);
+        CREATE TABLE run_records (id INTEGER PRIMARY KEY, status TEXT, started_at TEXT, finished_at TEXT);
+        INSERT INTO run_records VALUES (1, 'success', '2020-10-01 10:00:00', '2020-10-01 10:01:00');
+        CREATE TABLE storage_cleanup_runs (
+            mode TEXT, status TEXT, started_at TEXT, finished_at TEXT,
+            deleted_files_count INTEGER, deleted_bytes INTEGER,
+            deleted_screenshots_count INTEGER, deleted_reports_count INTEGER,
+            deleted_periodic_archives_count INTEGER, deleted_logs_count INTEGER,
+            deleted_browser_state_count INTEGER, deleted_run_records_count INTEGER,
+            error_summary TEXT, detail_json TEXT
+        );
+    """)
+    monkeypatch.setattr(cleanup.settings, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(cleanup, "connect", lambda: conn)
+    for name in ("_cleanup_screenshot_artifacts", "_cleanup_report_artifacts", "_cleanup_orphan_files"):
+        monkeypatch.setattr(cleanup, name, lambda *args, **kwargs: None)
+    try:
+        preview = cleanup.preview_cleanup(scopes=["inspection"], older_than_days=30, include_all_items=True)
+        conn.execute("INSERT INTO run_records VALUES (2, 'success', '2020-10-02 10:00:00', '2020-10-02 10:01:00')")
+        with cleanup.confirmed_cleanup(preview["_all_items"]):
+            result = cleanup.run_cleanup(mode="manual", scopes=["inspection"], older_than_days=30)
+        assert result["deleted_run_records_count"] == 1
+        assert [row[0] for row in conn.execute("SELECT id FROM run_records")] == [2]
+    finally:
+        conn.close()
+
+
+def test_invalid_timestamps_and_unfinished_runs_are_not_cleanup_candidates():
+    cleanup = _cleanup_module()
+    assert cleanup.parse_db_time("") == datetime.max
+    assert cleanup.parse_db_time("2020-10-01 garbage") == datetime.max
+    for status, finished_at in (("running", None), ("waiting", None), ("running", "2020-10-01 10:01:00")):
+        assert not cleanup._finished_run({
+            "status": status, "started_at": "2020-10-01 10:00:00", "finished_at": finished_at,
+        })
+    assert not cleanup._finished_run({
+        "status": "success", "started_at": "broken", "finished_at": "2020-10-01 10:01:00",
+    })
+
+
+def test_month_cleanup_keeps_running_periodic_record(monkeypatch):
+    cleanup = _cleanup_module()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE storage_cleanup_settings (id INTEGER PRIMARY KEY, protect_recent_days INTEGER);
+        INSERT INTO storage_cleanup_settings VALUES (1, 1);
+        CREATE TABLE periodic_report_runs (id INTEGER PRIMARY KEY, status TEXT, started_at TEXT, finished_at TEXT);
+        INSERT INTO periodic_report_runs VALUES (1, 'success', '2020-10-01 10:00:00', '2020-10-01 10:01:00');
+        INSERT INTO periodic_report_runs VALUES (2, 'running', '2020-10-02 10:00:00', NULL);
+        INSERT INTO periodic_report_runs VALUES (3, 'waiting', '2020-10-03 10:00:00', NULL);
+        CREATE TABLE storage_cleanup_runs (
+            mode TEXT, status TEXT, started_at TEXT, finished_at TEXT,
+            deleted_files_count INTEGER, deleted_bytes INTEGER,
+            deleted_screenshots_count INTEGER, deleted_reports_count INTEGER,
+            deleted_periodic_archives_count INTEGER, deleted_logs_count INTEGER,
+            deleted_browser_state_count INTEGER, deleted_run_records_count INTEGER,
+            error_summary TEXT, detail_json TEXT
+        );
+    """)
+    monkeypatch.setattr(cleanup.settings, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(cleanup, "connect", lambda: conn)
+    for name in ("_cleanup_periodic_archives", "_cleanup_screenshot_artifacts", "_cleanup_report_artifacts", "_cleanup_old_run_records"):
+        monkeypatch.setattr(cleanup, name, lambda *args, **kwargs: None)
+    try:
+        preview = cleanup.preview_cleanup(scopes=["periodic"], target_month="2020-10")
+        assert [item["name"] for item in preview["items"]] == ["周期报告记录 #1"]
+        result = cleanup.run_cleanup(mode="manual", scopes=["periodic"], target_month="2020-10")
+        assert result["deleted_periodic_run_records_count"] == 1
+        assert [row[0] for row in conn.execute("SELECT id FROM periodic_report_runs ORDER BY id")] == [2, 3]
+    finally:
+        conn.close()
+
+
+def test_month_cleanup_keeps_active_inspection_files_and_record(monkeypatch, tmp_path):
+    cleanup = _cleanup_module()
+    from app import storage_paths
+    data_dir = tmp_path / "data"
+    screenshot_dir = data_dir / "screenshots"
+    report_dir = data_dir / "reports"
+    files = {}
+    for run_id in (1, 2):
+        screenshot = screenshot_dir / "2020" / "10" / "01" / f"run-{run_id}" / "capture.png"
+        report = report_dir / "2020" / "10" / "01" / f"run-{run_id}" / "report.docx"
+        screenshot.parent.mkdir(parents=True)
+        report.parent.mkdir(parents=True)
+        screenshot.write_bytes(b"image")
+        report.write_bytes(b"report")
+        files[run_id] = (screenshot, report)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE storage_cleanup_settings (id INTEGER PRIMARY KEY, protect_recent_days INTEGER);
+        INSERT INTO storage_cleanup_settings VALUES (1, 1);
+        CREATE TABLE run_records (id INTEGER PRIMARY KEY, status TEXT, started_at TEXT, finished_at TEXT, report_path TEXT);
+        INSERT INTO run_records VALUES (1, 'running', '2020-10-01 10:00:00', NULL, '');
+        INSERT INTO run_records VALUES (2, 'success', '2020-10-01 10:00:00', '2020-10-01 10:01:00', '');
+        CREATE TABLE screenshot_results (run_id INTEGER, file_path TEXT);
+        CREATE TABLE storage_cleanup_runs (
+            mode TEXT, status TEXT, started_at TEXT, finished_at TEXT,
+            deleted_files_count INTEGER, deleted_bytes INTEGER,
+            deleted_screenshots_count INTEGER, deleted_reports_count INTEGER,
+            deleted_periodic_archives_count INTEGER, deleted_logs_count INTEGER,
+            deleted_browser_state_count INTEGER, deleted_run_records_count INTEGER,
+            error_summary TEXT, detail_json TEXT
+        );
+    """)
+    monkeypatch.setattr(cleanup.settings, "data_dir", data_dir)
+    monkeypatch.setattr(cleanup.settings, "screenshot_dir", screenshot_dir)
+    monkeypatch.setattr(cleanup.settings, "report_dir", report_dir)
+    monkeypatch.setattr(cleanup.settings, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(cleanup, "connect", lambda: conn)
+    monkeypatch.setattr(storage_paths, "get_run_date", lambda _run_id: ("2020", "10", "01"))
+    try:
+        result = cleanup.run_cleanup(mode="manual", scopes=["inspection"], target_month="2020-10")
+        assert result["status"] == "success"
+        assert result["deleted_screenshots_count"] == 1
+        assert result["deleted_reports_count"] == 1
+        assert result["deleted_run_records_count"] == 1
+        assert all(path.exists() for path in files[1])
+        assert all(not path.exists() for path in files[2])
+        assert [row[0] for row in conn.execute("SELECT id FROM run_records")] == [1]
+    finally:
+        conn.close()
 
 
 def test_cleanup_api_rejects_stale_preview_before_deleting(monkeypatch):
@@ -742,3 +910,43 @@ def test_auto_cleanup_removes_all_configured_artifact_types(monkeypatch, tmp_pat
         assert connection.execute("SELECT COUNT(*) FROM storage_cleanup_runs").fetchone()[0] == 1
     finally:
         connection.close()
+
+
+def test_periodic_archive_retention_uses_report_status_after_mail_removal(monkeypatch, tmp_path):
+    cleanup = _cleanup_module()
+    from app import settings as settings_module
+
+    monkeypatch.setattr(settings_module.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(settings_module.settings, "log_dir", tmp_path / "logs")
+    completed_at = (datetime.now() - timedelta(days=10)).isoformat(sep=" ", timespec="seconds")
+    generated = tmp_path / "generated.zip"
+    failed = tmp_path / "failed.zip"
+    generated.write_bytes(b"generated")
+    failed.write_bytes(b"failed")
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        "CREATE TABLE periodic_report_runs (id INTEGER, zip_path TEXT, status TEXT, mail_status TEXT, "
+        "started_at TEXT, finished_at TEXT)"
+    )
+    connection.executemany(
+        "INSERT INTO periodic_report_runs VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (1, str(generated), "success", "failed: old SMTP error", completed_at, completed_at),
+            (2, str(failed), "failed", "sent", completed_at, completed_at),
+        ],
+    )
+    monkeypatch.setattr(cleanup, "connect", lambda: connection)
+    result = {"errors": [], "deleted_files_count": 0, "deleted_bytes": 0, "deleted_periodic_archives_count": 0}
+    try:
+        cleanup._cleanup_periodic_archives(
+            sent_days=5, failed_days=30, protect_date=datetime.now() - timedelta(days=1),
+            dry_run=False, results=result,
+        )
+    finally:
+        connection.close()
+
+    assert not generated.exists()
+    assert failed.exists()
+    assert result["deleted_periodic_archives_count"] == 1

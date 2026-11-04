@@ -6,7 +6,7 @@ import os
 import shutil
 import tempfile
 import zipfile
-from datetime import datetime, timedelta, time
+from datetime import date, datetime, timedelta, time
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -18,10 +18,8 @@ from app.repository import (
     get_periodic_report_setting,
     get_periodic_report_run,
     save_periodic_report_run,
-    get_mail_profile,
     list_jobs,
 )
-from app.mailer import send_periodic_report_mail
 from app.utils import safe_name
 
 logger = logging.getLogger("app.periodic_reporter")
@@ -31,6 +29,16 @@ def is_last_day_of_month(dt: datetime) -> bool:
     """判断给定日期是否是当月的最后一天"""
     tomorrow = dt + timedelta(days=1)
     return tomorrow.day == 1
+
+
+def _monthly_retry_deadline(target_date: date, setting: dict[str, Any]) -> datetime:
+    raw_time = str(setting.get("retry_until_time") or "23:50").strip()
+    try:
+        hour, minute = map(int, raw_time.split(":"))
+        limit_time = time(hour, minute)
+    except (TypeError, ValueError):
+        limit_time = time(23, 50)
+    return datetime.combine(target_date, limit_time, tzinfo=ZoneInfo(settings.default_timezone))
 
 
 def check_today_jobs_completed(now_dt: datetime) -> tuple[bool, list[str]]:
@@ -45,8 +53,10 @@ def check_today_jobs_completed(now_dt: datetime) -> tuple[bool, list[str]]:
     limit_start = (datetime.now(local_tz) - timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
     with connect() as conn:
         running_count = conn.execute(
-            "SELECT COUNT(*) FROM run_records WHERE status = 'running' AND started_at >= ?",
-            (limit_start,)
+            """SELECT COUNT(*) FROM run_records
+               WHERE status IN ('queued', 'running')
+                 AND substr(started_at, 1, 10) = ? AND started_at >= ?""",
+            (today_str, limit_start),
         ).fetchone()[0]
         if running_count > 0:
             return False, ["当前有正在执行中的巡检截图任务"]
@@ -154,28 +164,33 @@ def monthly_report_retry_check(run_id: int) -> None:
 
     local_tz = ZoneInfo(settings.default_timezone)
     now_dt = datetime.now(local_tz)
+    try:
+        target_date = date.fromisoformat(str(run["period_end"])[:10])
+    except (TypeError, ValueError):
+        run["status"] = "failed"
+        run["error_summary"] = "月报目标日期无效，无法安全完成等待检查"
+        run["finished_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        save_periodic_report_run(run, run_id)
+        logger.error("月报重试任务 %s 的 period_end 无效", run_id)
+        return
     
     # 1. 读取页面配置重试截止时间（如 23:50）与检测重试间隔
     retry_until_str = str(setting.get("retry_until_time") or "23:50").strip()
     retry_interval = int(setting.get("retry_interval_minutes") or 10)
     send_on_timeout = int(setting.get("send_on_timeout") if setting.get("send_on_timeout") is not None else 1)
     
-    try:
-        limit_h, limit_m = map(int, retry_until_str.split(":"))
-        limit_time = time(limit_h, limit_m)
-    except Exception:
-        limit_time = time(23, 50)
-        
-    current_time = now_dt.time()
-    completed, reasons = check_today_jobs_completed(now_dt)
+    retry_deadline = _monthly_retry_deadline(target_date, setting)
+    limit_time = retry_deadline.time()
+    target_check_dt = datetime.combine(target_date, time.max, tzinfo=local_tz)
+    completed, reasons = check_today_jobs_completed(target_check_dt)
     
     if completed:
-        logger.info("重试检测通过：本日所有巡检任务已完成，开始生成并发送月报！")
+        logger.info("重试检测通过：目标日 %s 的巡检任务已完成，开始生成并发送月报！", target_date)
         run["status"] = "running"
         save_periodic_report_run(run, run_id)
         execute_periodic_report_flow(run_id)
     else:
-        if current_time >= limit_time:
+        if now_dt >= retry_deadline:
             if send_on_timeout == 1:
                 logger.warning(f"已达到重试时间上限 {limit_time}，部分任务仍未完成，根据配置[强行发送已完成部分]。")
                 run["status"] = "running"
@@ -186,13 +201,12 @@ def monthly_report_retry_check(run_id: int) -> None:
                 logger.warning(f"已达到重试时间上限 {limit_time}，部分任务仍未完成，根据配置[直接标记失败且不发送]。")
                 run["status"] = "failed"
                 run["error_summary"] = f"月报生成失败：在 {retry_until_str} 截止前以下任务未完成: " + "; ".join(reasons)
-                run["mail_status"] = "failed: 巡检任务超时未完成且配置不发信"
                 run["finished_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
                 save_periodic_report_run(run, run_id)
         else:
             logger.info(f"月报仍需等待，部分任务未完成。原因: {reasons}。{retry_interval} 分钟后重试。")
             from app.scheduler import scheduler
-            run_time = datetime.now() + timedelta(minutes=retry_interval)
+            run_time = now_dt + timedelta(minutes=retry_interval)
             scheduler.add_job(
                 monthly_report_retry_check,
                 "date",
@@ -291,6 +305,10 @@ def trigger_periodic_report(report_type: str, is_manual: bool = False) -> int | 
             run_id = save_periodic_report_run(run_data)
             
             retry_interval = int(setting.get("retry_interval_minutes") or 10)
+            if now_dt >= _monthly_retry_deadline(end_dt.date(), setting):
+                logger.info("月报目标日已过重试截止时间，立即检查并结束等待：%s", reasons)
+                monthly_report_retry_check(run_id)
+                return run_id
             logger.info(f"月报已挂起，状态为 waiting。未完成原因: {reasons}。{retry_interval} 分钟后重试。")
             
             from app.scheduler import scheduler
@@ -339,7 +357,7 @@ def _unique_zip_filename(src_report: Path, run: dict[str, Any], used_names: set[
 
 
 def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfinished_reasons: list[str] | None = None) -> None:
-    """正式执行周期报告汇总打包及发信逻辑"""
+    """正式执行周期报告汇总打包及通知逻辑"""
     run = get_periodic_report_run(run_id)
     if not run:
         return
@@ -357,7 +375,7 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
         save_periodic_report_run(run, run_id)
         return
 
-    logger.info(f"正在为周期报告 '{setting['name']}' 运行打包发信流程 (ID: {run_id})")
+    logger.info(f"正在为周期报告 '{setting['name']}' 运行打包归档流程 (ID: {run_id})")
 
     # 1. 查询此时间段内所有已经生成 Word 的巡检记录。
     #    同一个任务一天可能跑多次，09:05 和 17:05 会写入同一个日报模板；
@@ -401,7 +419,6 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
     # 2. 如果没有任何报告，且配置为不发送空报告
     if not runs_in_period and not setting["send_empty_report"]:
         run["status"] = "success"
-        run["mail_status"] = "skipped: 没有可汇总的巡检报告"
         run["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         save_periodic_report_run(run, run_id)
         logger.info(f"周期报告运行 ID {run_id} 已跳过，因为没有可汇总的报告文件。")
@@ -486,69 +503,13 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
 
-    # 4. 邮件发信 (当且仅当配置了 enable_email == 1 时才进行发信)
-    if setting.get("enable_email") == 1:
-        mail_profile = get_mail_profile(setting["mail_profile_id"])
-        if not mail_profile:
-            with connect() as conn:
-                first_mail = conn.execute("SELECT * FROM mail_profiles ORDER BY id LIMIT 1").fetchone()
-                mail_profile = dict(first_mail) if first_mail else None
+    run["status"] = "success" if not force_warning else "partial_success"
 
-        if not mail_profile:
-            run["status"] = "success"
-            run["mail_status"] = "failed: 系统中没有可用的发信配置"
-            run["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            save_periodic_report_run(run, run_id)
-            logger.warning("发信失败：系统没有任何邮件配置。")
-            return
-
-        # 5. 构建邮件主题和正文
-        report_type_cn = "周报" if report_type == "weekly" else "月报"
-        subject = f"【{report_type_cn}】{setting['name']}汇总报告 ({period_start[:10]} 至 {period_end[:10]})"
-        
-        if force_warning:
-            subject = f"⚠️【{report_type_cn}告警】{setting['name']}汇总报告 (数据不完整) - {period_start[:10]}"
-            body = (
-                f"您好，这是一封自动发送的{report_type_cn}汇总邮件。\n\n"
-                f"注意：由于已达到重试的最晚时间上限({setting.get('retry_until_time', '23:50')})，部分定时巡检任务仍未完成，本期汇总报告已强行生成打包。以下任务在截止前未完成:\n"
-                f"{'; '.join(unfinished_reasons or [])}\n\n"
-                f"汇总时间范围: {period_start} 至 {period_end}\n"
-                f"本期汇总 Word 报告文件已作为附件随信发送，请查收。\n"
-            )
-        else:
-            body = (
-                f"您好，这是一封系统自动发送的{report_type_cn}汇总邮件。\n\n"
-                f"本期周期: {period_start} 至 {period_end}\n"
-                f"本期汇总的巡检 Word 报告文档及截图已压缩打包并作为附件随信发送，请查收。\n"
-            )
-
-        # 6. 发信并更新状态
-        try:
-            recipients_override = setting["recipients_override"].strip() if setting.get("recipients_override") else None
-            mail_status = send_periodic_report_mail(
-                mail_profile=mail_profile,
-                subject=subject,
-                body=body,
-                attachment_path=str(zip_filepath),
-                recipients_override=recipients_override
-            )
-            run["mail_status"] = mail_status
-            run["status"] = "success" if not force_warning else "partial_success"
-        except Exception as exc:
-            err_msg = f"发送周期报告邮件出错: {exc}"
-            logger.error(err_msg, exc_info=True)
-            run["mail_status"] = f"failed: {exc}"
-            run["status"] = "partial_success"
-            run["error_summary"] = err_msg
-    else:
-        run["mail_status"] = "skipped: 未启用邮件推送"
-        run["status"] = "success" if not force_warning else "partial_success"
-
-    # 先保存报告和邮件结果，通知异常不能让已完成的报告一直显示运行中。
+    # 先保存归档结果，通知异常不能让已完成的报告一直显示运行中。
     run["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     save_periodic_report_run(run, run_id)
 
-    # 7. 钉钉通知推送 (当配置了 dingtalk_enabled == 1 时进行推送)
+    # 4. 钉钉通知推送 (当配置了 dingtalk_enabled == 1 时进行推送)
     if setting.get("dingtalk_enabled") == 1:
         from app.utils import decrypt_secret
         from app.dingtalk import send_dingtalk_msg
@@ -556,9 +517,15 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
 
         from app.repository import get_dingtalk_profile, list_dingtalk_profiles
         bot_profile = None
-        if setting.get("dingtalk_profile_id"):
-            bot_profile = get_dingtalk_profile(setting.get("dingtalk_profile_id"))
-        if not bot_profile:
+        selected_bot_id = setting.get("dingtalk_profile_id")
+        if selected_bot_id:
+            bot_profile = get_dingtalk_profile(selected_bot_id)
+            if not bot_profile:
+                run["dingtalk_status"] = f"failed: 指定的钉钉机器人 #{selected_bot_id} 不存在，未发送通知"
+                logger.error("周期报告 %s 的%s", run_id, run["dingtalk_status"])
+                save_periodic_report_run(run, run_id)
+                return
+        else:
             all_bots = list_dingtalk_profiles()
             if all_bots:
                 bot_profile = all_bots[0]
@@ -600,11 +567,7 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
             except Exception:
                 pass
 
-            # 邮件状态 HTML
-            from app.dingtalk_builder import build_periodic_report_message, build_mail_status_html
-            mail_status_html = ""
-            if setting.get("enable_email") == 1:
-                mail_status_html = build_mail_status_html(run.get("mail_status") or "")
+            from app.dingtalk_builder import build_periodic_report_message
 
             # 构建消息
             title, text = build_periodic_report_message(
@@ -618,7 +581,6 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
                 zip_size_str=size_str,
                 error_summary=run.get("error_summary") or "",
                 unfinished_reasons=unfinished_reasons if force_warning else [],
-                mail_status_html=mail_status_html,
                 enable_emoji=emoji_enabled,
             )
 
@@ -633,4 +595,4 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
 
     run["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     save_periodic_report_run(run, run_id)
-    logger.info(f"周期报告 ID {run_id} 流程执行完毕。状态: {run['status']}，邮件状态: {run['mail_status']}，钉钉状态: {run['dingtalk_status']}")
+    logger.info(f"周期报告 ID {run_id} 流程执行完毕。状态: {run['status']}，钉钉状态: {run['dingtalk_status']}")

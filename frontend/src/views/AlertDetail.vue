@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { ArrowLeft, Info } from '../icons'
-import { api, apiUrl, dateTime, type Row } from '../api'
+import { api, apiUrl, utcDateTime, type Row } from '../api'
 import { collectRunAlerts, detailEntries } from '../monitorAlerts'
 
 const route = useRoute()
@@ -110,7 +110,7 @@ onMounted(async () => {
                 <div class="instance-body">
                   <div class="instance-metrics">
                     <div><span>当前值</span><strong>{{ item.value || '—' }}</strong></div>
-                    <div><span>触发时间</span><strong>{{ item.active_at ? dateTime(item.active_at) : '—' }}</strong></div>
+                    <div><span>触发时间</span><strong>{{ item.active_at ? utcDateTime(item.active_at) : '—' }}</strong></div>
                   </div>
                   <p v-if="item.annotations?.description && item.annotations.description !== item.summary" class="instance-description">{{ item.annotations.description }}</p>
                   <div v-if="detailEntries(item.labels).length" class="alert-labels">
@@ -133,7 +133,7 @@ onMounted(async () => {
             <div><dt>数据源</dt><dd>{{ alert.source || '—' }}</dd></div>
             <div><dt>实例数</dt><dd>{{ instances.length }} 个</dd></div>
             <div><dt>触发 / 待触发</dt><dd>{{ firingCount }} / {{ pendingCount }}</dd></div>
-            <div><dt>采集时间</dt><dd>{{ alert.observed_at ? dateTime(alert.observed_at) : '—' }}</dd></div>
+            <div><dt>采集时间</dt><dd>{{ alert.observed_at ? utcDateTime(alert.observed_at) : '—' }}</dd></div>
           </dl>
           <p>若原生页面无法打开，请确认你的浏览器可以访问 Grafana 数据源中配置的 Prometheus 地址。</p>
         </aside>

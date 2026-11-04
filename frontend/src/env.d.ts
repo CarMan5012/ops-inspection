@@ -2,7 +2,7 @@
 
 declare global {
   interface Window {
-    APP_CONFIG?: { apiBase?: string; frontendBase?: string; artifactBase?: string }
+    APP_CONFIG?: { apiBase?: string; frontendBase?: string; artifactBase?: string; appName?: string; timeZone?: string }
   }
 }
 

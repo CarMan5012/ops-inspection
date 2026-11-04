@@ -7,9 +7,10 @@ from pathlib import Path
 
 class Settings:
     def __init__(self) -> None:
-        self.app_name = os.getenv("APP_NAME", "自动化运维平台")
+        self.app_name = os.getenv("APP_NAME", "运维巡检平台")
         self.admin_username = os.getenv("ADMIN_USERNAME", "admin")
         self.admin_password = os.getenv("ADMIN_PASSWORD", "admin")
+        self.admin_password_hash = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
 
         self.data_dir = Path(os.getenv("APP_DATA_DIR", "data")).resolve()
         raw_secret_key = self._load_secret_from_file() or os.getenv("APP_SECRET_KEY", "").strip()
@@ -74,6 +75,7 @@ class Settings:
                 secret = path.read_text(encoding="utf-8").strip()
                 if secret:
                     return secret
+                raise RuntimeError(f"APP secret file is empty: {path}")
             path.parent.mkdir(parents=True, exist_ok=True)
             secret = secrets.token_urlsafe(48)
             path.write_text(secret + "\n", encoding="utf-8")
@@ -93,15 +95,19 @@ class Settings:
                 value = key_path.read_text(encoding="utf-8").strip()
                 if value:
                     return value
+                raise RuntimeError(f"APP secret file is empty: {key_path}")
             value = secrets.token_urlsafe(48)
             try:
                 with open(key_path, "x", encoding="utf-8") as f:
                     f.write(value)
             except FileExistsError:
                 pass
-            return key_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            return "change-me"
+            saved = key_path.read_text(encoding="utf-8").strip()
+            if not saved:
+                raise RuntimeError(f"APP secret file is empty: {key_path}")
+            return saved
+        except OSError as exc:
+            raise RuntimeError(f"APP secret file is not readable or writable: {key_path}") from exc
 
     def ensure_dirs(self) -> None:
         for path in (

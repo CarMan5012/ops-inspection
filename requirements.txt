@@ -9,3 +9,4 @@ apscheduler==3.11.0
 tzdata==2025.2
 mss==9.0.2
 pysqlcipher3
+cryptography==49.0.0

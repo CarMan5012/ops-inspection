@@ -105,42 +105,37 @@
       </label>
     </div>
     <div id="watermark_config" class="span-2 form-grid" style="padding: 0;">
-      <label class="check span-2">
-        <input type="checkbox" id="watermark_time_enabled" name="watermark_time_enabled" {% if item.watermark_time_enabled %}checked{% endif %} onchange="onWatermarkTimeChange(this.checked)">
-        启用时间水印
-      </label>
-      <label class="span-2" id="watermark_time_format_field">
-        时间格式
-        <select name="watermark_time_format">
-          {% for option in watermark_time_formats %}<option value="{{ option.id }}" {% if item.watermark_time_format == option.id %}selected{% endif %}>{{ option.label }}</option>{% endfor %}
-        </select>
-      </label>
+      <input type="hidden" name="watermark_time_enabled" value="1">
+      <input type="hidden" name="watermark_time_format" value="datetime_seconds">
+      <input type="hidden" name="watermark_font_size" value="53">
+      <input type="hidden" name="watermark_gap_x" value="234">
+      <input type="hidden" name="watermark_gap_y" value="594">
+      <input type="hidden" name="watermark_alignment" value="reference">
+      <input type="hidden" id="watermark_angle" name="watermark_angle" value="{{ item.watermark_angle if item.watermark_angle is not none and 6 <= item.watermark_angle <= 66 else 36 }}">
       <label class="span-2">
-        自定义水印内容
-        <textarea name="watermark_text" rows="3">{{ item.watermark_text or '' }}</textarea>
-        <span class="form-tip">可留空，仅显示时间水印。</span>
+        姓名／标识
+        <input name="watermark_text" type="text" maxlength="200" value="{{ item.watermark_text or '' }}" placeholder="例如：王">
+        <span class="form-tip">显示在时间上方；时间会在截图时自动更新。</span>
       </label>
       <label>
         透明度
-        <input name="watermark_opacity" type="number" min="0" max="255" value="{{ item.watermark_opacity if item.watermark_opacity is not none else 65 }}">
+        <input name="watermark_opacity" type="number" min="0" max="255" value="{{ item.watermark_opacity if item.watermark_opacity is not none else 20 }}">
+        <span class="form-tip">默认 20；数值越大，水印越明显。</span>
       </label>
       <label>
-        字号
-        <input name="watermark_font_size" type="number" min="10" max="72" value="{{ item.watermark_font_size if item.watermark_font_size is not none else 24 }}">
-      </label>
-      <label>
-        横向间距
-        <input name="watermark_gap_x" type="number" min="20" max="800" value="{{ item.watermark_gap_x if item.watermark_gap_x is not none else 140 }}">
-      </label>
-      <label>
-        纵向间距
-        <input name="watermark_gap_y" type="number" min="20" max="800" value="{{ item.watermark_gap_y if item.watermark_gap_y is not none else 140 }}">
-      </label>
-      <label>
-        倾斜角度
-        <input name="watermark_angle" type="number" min="-90" max="90" value="{{ item.watermark_angle if item.watermark_angle is not none else -45 }}">
+        倾斜角度微调
+        <input id="watermark_angle_offset" type="number" min="-30" max="30" step="1" value="{{ (item.watermark_angle - 36) if item.watermark_angle is not none and 6 <= item.watermark_angle <= 66 else 0 }}">
+        <span class="form-tip">默认 0°；在自动适配的角度上增减。</span>
       </label>
     </div>
+    <div id="watermark_preview_layout" class="span-2" style="margin-top: 6px; max-width: 100%; justify-self: start;">
+      <div style="display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px;"><strong>效果预览</strong><span id="watermark_preview_size" class="form-tip"></span></div>
+      <div id="watermark_preview_frame" style="position: relative; overflow: hidden; border: 1px solid #d7e0e8; border-radius: 8px; background: #fff;">
+        <img id="watermark_preview_image" alt="当前水印效果预览" style="display: none; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill;">
+        <span id="watermark_preview_status" style="position: absolute; inset: 0; display: grid; place-items: center; color: #667784; background: rgba(255,255,255,.45);">正在生成预览…</span>
+      </div>
+    </div>
+    <button type="button" id="watermark_reset" class="button secondary" style="margin-top: 4px;">恢复默认</button>
   </div>
 
   <!-- Windows 任务栏风格 -->
@@ -234,16 +229,67 @@
 
   function onWatermarkChange(checked) {
     const config = document.getElementById('watermark_config');
-    if (!config) {
-      return;
-    }
-    config.style.display = checked ? '' : 'none';
-    onWatermarkTimeChange(checked && document.getElementById('watermark_time_enabled').checked);
+    if (config) config.style.display = checked ? '' : 'none';
+    scheduleWatermarkPreview();
   }
 
-  function onWatermarkTimeChange(checked) {
-    const field = document.getElementById('watermark_time_format_field');
-    if (field) field.style.display = checked ? '' : 'none';
+  let watermarkPreviewTimer;
+  let watermarkPreviewRequestId = 0;
+  function scheduleWatermarkPreview() {
+    clearTimeout(watermarkPreviewTimer);
+    const requestId = ++watermarkPreviewRequestId;
+    const form = document.querySelector('form.form-page');
+    const enabled = document.getElementById('watermark_enabled').checked;
+    const image = document.getElementById('watermark_preview_image');
+    const status = document.getElementById('watermark_preview_status');
+    const width = Math.min(7680, Math.max(800, Number(form.elements.browser_width.value) || {{ preview_browser_width | int }}));
+    const height = Math.min(8640, Math.max(600, Number(form.elements.browser_height.value) || {{ preview_browser_height | int }}));
+    const frame = document.getElementById('watermark_preview_frame');
+    frame.style.aspectRatio = `${width} / ${height}`;
+    document.getElementById('watermark_preview_layout').style.width = `min(100%, ${Math.min(1400, Math.round(760 * width / height))}px)`;
+    document.getElementById('watermark_preview_size').textContent = `${width} × ${height}`;
+    const angle = 36 + (Number(document.getElementById('watermark_angle_offset').value) || 0);
+    document.getElementById('watermark_angle').value = String(angle);
+    if (!enabled) {
+      image.removeAttribute('src');
+      image.style.display = 'none';
+      status.textContent = '水印已关闭';
+      status.style.display = 'grid';
+      return;
+    }
+    status.textContent = '正在生成预览…';
+    status.style.display = 'grid';
+    watermarkPreviewTimer = setTimeout(async () => {
+      try {
+        const response = await fetch({{ (api_prefix ~ '/watermark/preview') | tojson }}, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            watermark_enabled: true,
+            watermark_time_enabled: true,
+            watermark_time_format: 'datetime_seconds',
+            watermark_text: form.elements.watermark_text.value,
+            watermark_opacity: Number(form.elements.watermark_opacity.value),
+            watermark_angle: angle,
+            watermark_alignment: 'reference',
+            image_width: width,
+            image_height: height,
+          }),
+        });
+        if (!response.ok) throw new Error('预览生成失败');
+        const data = await response.json();
+        if (requestId !== watermarkPreviewRequestId) return;
+        image.src = data.image;
+        image.style.display = 'block';
+        status.style.display = 'none';
+      } catch (error) {
+        if (requestId !== watermarkPreviewRequestId) return;
+        image.removeAttribute('src');
+        image.style.display = 'none';
+        status.textContent = '预览生成失败';
+        status.style.display = 'grid';
+      }
+    }, 250);
   }
 
   // Initialize state
@@ -257,6 +303,18 @@
     if (watermarkCheckbox) {
       onWatermarkChange(watermarkCheckbox.checked);
     }
+    const form = document.querySelector('form.form-page');
+    for (const name of ['watermark_text', 'watermark_opacity', 'browser_width', 'browser_height']) {
+      form.elements[name].addEventListener('input', scheduleWatermarkPreview);
+    }
+    document.getElementById('watermark_angle_offset').addEventListener('input', scheduleWatermarkPreview);
+    document.getElementById('watermark_reset').addEventListener('click', () => {
+      watermarkCheckbox.checked = true;
+      form.elements.watermark_text.value = '王';
+      form.elements.watermark_opacity.value = '20';
+      document.getElementById('watermark_angle_offset').value = '0';
+      onWatermarkChange(true);
+    });
   });
 </script>
 {% endblock %}

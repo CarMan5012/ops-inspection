@@ -4,7 +4,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ title or "自动化运维平台" }}</title>
+  <title>{{ title or "运维巡检平台" }}</title>
   <link rel="shortcut icon" href="{{ url_for_frontend('static/favicon.ico') }}" type="image/x-icon">
   <link rel="stylesheet" href="{{ url_for_frontend('static/app.css?v=20261008-notices') }}">
   <script src="{{ url_for_frontend('static/vendor/lucide.min.js') }}" defer></script>
@@ -12,13 +12,12 @@
 
 <body>
   <header class="topbar">
-    <a class="brand" href="{{ url_for_frontend('/') }}"><span class="brand-mark"><img src="{{ url_for_frontend('static/images/logo.svg') }}" alt=""></span><span>自动化运维平台</span></a>
+    <a class="brand" href="{{ url_for_frontend('/') }}"><span class="brand-mark"><img src="{{ url_for_frontend('static/images/logo.svg') }}" alt=""></span><span>运维巡检平台</span></a>
     <nav class="nav">
       <a href="{{ url_for_frontend('/') }}#/jobs"><span data-lucide="clipboard-list"></span>巡检任务</a>
       <a href="{{ url_for_frontend('/') }}#/runs"><span data-lucide="history"></span>巡检记录</a>
       <a href="{{ url_for_frontend('/') }}#/periodic"><span data-lucide="file-archive"></span>周期报告</a>
       <a href="{{ url_for_frontend('/') }}#/auth"><span data-lucide="key-round"></span>认证配置</a>
-      <a href="{{ url_for_frontend('/') }}#/mail"><span data-lucide="mail"></span>邮件配置</a>
       <a href="{{ url_for_frontend('/') }}#/storage"><span data-lucide="settings"></span>系统配置</a>
       <a href="javascript:void(0)" onclick="event.preventDefault(); document.getElementById('logout-form').submit();"><span data-lucide="log-out"></span>退出</a>
       <form id="logout-form" action="{{ url_for_frontend('logout') }}" method="post" style="display: none;"></form>
@@ -206,11 +205,6 @@
           e.preventDefault();
           submitBtn.classList.add('btn-loading');
           window.showToast('正在测试登录', 'info');
-          setTimeout(() => form.submit(), 600);
-        } else if (action.includes('/mail-profiles/') && action.includes('/test')) {
-          e.preventDefault();
-          submitBtn.classList.add('btn-loading');
-          window.showToast('正在发送测试邮件', 'info');
           setTimeout(() => form.submit(), 600);
         } else if (action.includes('/periodic-reports/') && action.includes('/run')) {
           e.preventDefault();

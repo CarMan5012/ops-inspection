@@ -128,6 +128,19 @@ def test_download_requires_file_to_belong_to_requested_run(monkeypatch, tmp_path
     request = Request({"type": "http", "method": "GET", "scheme": "http", "path": "/artifact", "headers": [], "query_string": b""})
 
     assert main.artifact(request, "screenshots", 42, picture.name).path == picture
+    download_request = Request({"type": "http", "method": "GET", "scheme": "http", "path": "/artifact", "headers": [(b"accept", b"text/html")], "query_string": b"download=1"})
+    download = main.artifact(download_request, "screenshots", 42, picture.name)
+    assert download.path == picture
+    assert "attachment" in download.headers["content-disposition"]
     with pytest.raises(HTTPException) as error:
         main.artifact(request, "screenshots", 43, picture.name)
     assert error.value.status_code == 404
+
+
+def test_screenshot_result_time_uses_configured_timezone(monkeypatch):
+    _storage_modules()
+    from app import main
+
+    monkeypatch.setattr(main.settings, "default_timezone", "Asia/Shanghai")
+    result = main.with_file_url({"created_at": "2026-10-29 09:52:37"})
+    assert result["created_at_local"] == "2026-10-29 17:52:37"

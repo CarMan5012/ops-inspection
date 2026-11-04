@@ -10,22 +10,31 @@ TIME_FORMATS = (
     {"id": "chinese_seconds", "label": "2026年10月15日 14:30:05", "strftime": "%Y年%m月%d日 %H:%M:%S"},
 )
 DEFAULT_TIME_FORMAT = TIME_FORMATS[0]["id"]
+MAX_WATERMARK_TEXT_LENGTH = 200
+WATERMARK_ALIGNMENTS = ("reference", "left", "center", "right")
 WATERMARK_DEFAULTS = {
-    "watermark_enabled": 0,
+    "watermark_enabled": 1,
     "watermark_time_enabled": 1,
     "watermark_time_format": DEFAULT_TIME_FORMAT,
-    "watermark_text": "",
-    "watermark_opacity": 65,
-    "watermark_font_size": 24,
-    "watermark_gap_x": 140,
-    "watermark_gap_y": 140,
-    "watermark_angle": -45,
+    "watermark_text": "王",
+    "watermark_opacity": 20,
+    "watermark_font_size": 53,
+    "watermark_gap_x": 234,
+    "watermark_gap_y": 594,
+    "watermark_angle": 36,
+    "watermark_alignment": "reference",
 }
 
 
 def validate_time_format(value: str) -> str:
     if value not in {option["id"] for option in TIME_FORMATS}:
         raise ValueError("水印时间格式无效")
+    return value
+
+
+def validate_watermark_alignment(value: str) -> str:
+    if value not in WATERMARK_ALIGNMENTS:
+        raise ValueError("水印文字对齐方式无效")
     return value
 
 

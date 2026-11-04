@@ -3,88 +3,120 @@ from __future__ import annotations
 from pysqlcipher3 import dbapi2 as sqlite3
 from pathlib import Path
 from typing import Any
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 
 from app.settings import settings
 
 
 def _migrate_plain_database() -> None:
     import os
+    import secrets
     import shutil
+    import sqlite3 as std_sqlite
 
     db_path = settings.db_path
-    db_key = os.getenv("SQLCIPHER_DB_KEY", settings.secret_key or "default-key-change-me")
+    db_key = os.getenv("SQLCIPHER_DB_KEY") or settings.secret_key
+    if not db_key:
+        raise RuntimeError("SQLCipher database key is missing")
     # 对密钥中的单引号进行转义，防止特殊字符导致 SQL 注入或 PRAGMA 语法解析错
     db_key = db_key.replace("'", "''")
 
     if not os.path.exists(db_path):
         return
 
-    # 2. 数据库存在，探测其是明文还是已加密
-    is_plain = False
+    # 探测是否为明文库；加密库不能由标准 SQLite 读取。
+    test_conn = None
     try:
-        import sqlite3 as std_sqlite
         test_conn = std_sqlite.connect(db_path, timeout=5.0)
         test_conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
-        test_conn.close()
         is_plain = True
     except Exception:
-        try:
+        is_plain = False
+    finally:
+        if test_conn is not None:
             test_conn.close()
-        except Exception:
-            pass
 
-    # 3. 探测到是明文，自动执行热迁移并删除原明文备份
-    if is_plain:
-        temp_encrypted_path = Path(str(db_path) + ".encrypted_tmp").as_posix()
-        backup_path = str(db_path) + ".backup_before_encrypt"
-        
-        if os.path.exists(temp_encrypted_path):
-            try:
-                os.remove(temp_encrypted_path)
-            except Exception:
-                pass
-                
+    if not is_plain:
+        return
+
+    temp_encrypted_path = Path(str(db_path) + ".encrypted_tmp")
+    backup_path = Path(str(db_path) + ".backup_before_encrypt")
+    if backup_path.exists():
+        # 上次失败留下的备份必须保留，不能被本次尝试覆盖。
+        backup_path = Path(f"{backup_path}.{os.getpid()}.{secrets.token_hex(4)}")
+    if temp_encrypted_path.exists():
+        temp_encrypted_path.unlink()
+
+    # SQLite 的 backup API 会包含尚未 checkpoint 的 WAL 数据。
+    with closing(std_sqlite.connect(db_path, timeout=5.0)) as source:
+        checkpoint = source.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if checkpoint and checkpoint[0]:
+            raise RuntimeError("明文数据库仍有未完成的 WAL 写入，已取消加密迁移")
+        with closing(std_sqlite.connect(backup_path, timeout=5.0)) as backup:
+            source.backup(backup)
+    try:
+        backup_path.chmod(0o600)
+    except OSError:
+        pass
+
+    def verify_encrypted(path: Path) -> None:
+        connection = sqlite3.connect(str(path), timeout=5.0)
         try:
-            # 复制明文备份，预防迁移中途断电等意外故障
-            shutil.copy2(db_path, backup_path)
-            
-            # 使用 ATTACH 将明文数据导入加密临时库
-            plain_conn = sqlite3.connect(str(db_path))
-            plain_conn.execute(f"ATTACH DATABASE '{temp_encrypted_path}' AS encrypted KEY '{db_key}'")
+            connection.execute(f"PRAGMA key = '{db_key}'")
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            if not result or result[0] != "ok":
+                raise RuntimeError(f"加密数据库完整性校验失败: {result}")
+        finally:
+            connection.close()
+
+    replaced = False
+    try:
+        plain_conn = sqlite3.connect(str(db_path))
+        try:
+            escaped_path = temp_encrypted_path.as_posix().replace("'", "''")
+            plain_conn.execute(f"ATTACH DATABASE '{escaped_path}' AS encrypted KEY '{db_key}'")
             plain_conn.execute("SELECT sqlcipher_export('encrypted')")
             plain_conn.execute("DETACH DATABASE encrypted")
+        finally:
             plain_conn.close()
-            
-            # 覆盖原库
-            shutil.move(temp_encrypted_path, db_path)
-            
-            # 使用新密钥验证连接和查询是否正常
-            verify_conn = sqlite3.connect(str(db_path), timeout=5.0)
-            verify_conn.execute(f"PRAGMA key = '{db_key}'")
-            verify_conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
-            verify_conn.close()
-            
-            # 验证成功，彻底物理删除明文备份
-            if os.path.exists(backup_path):
-                os.remove(backup_path)
-                
-        except Exception as e:
-            # 出错清理临时残留
-            for path in (temp_encrypted_path, backup_path):
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        pass
-            raise RuntimeError(f"自动将 SQLite 明文库加密热迁移失败: {e}")
+
+        # 先验证临时库，再以同目录原子替换原库。
+        verify_encrypted(temp_encrypted_path)
+        os.replace(temp_encrypted_path, db_path)
+        replaced = True
+        verify_encrypted(db_path)
+    except Exception as exc:
+        restore_error = None
+        if replaced:
+            try:
+                shutil.copy2(backup_path, db_path)
+            except Exception as restore_exc:
+                restore_error = restore_exc
+        if temp_encrypted_path.exists():
+            try:
+                temp_encrypted_path.unlink()
+            except OSError:
+                pass
+        detail = f"自动将 SQLite 明文库加密热迁移失败: {exc}；明文备份保留在 {backup_path}"
+        if restore_error is not None:
+            detail += f"；恢复原库失败: {restore_error}"
+        raise RuntimeError(detail) from exc
+
+    # 加密库已通过验证后才删除明文备份。
+    try:
+        backup_path.unlink()
+    except OSError as exc:
+        raise RuntimeError(f"加密迁移已完成，但无法删除明文备份 {backup_path}: {exc}") from exc
 
 @contextmanager
 def connect():
     import os
 
     db_path = settings.db_path
-    db_key = os.getenv("SQLCIPHER_DB_KEY", settings.secret_key or "default-key-change-me").replace("'", "''")
+    db_key = os.getenv("SQLCIPHER_DB_KEY") or settings.secret_key
+    if not db_key:
+        raise RuntimeError("SQLCipher database key is missing")
+    db_key = db_key.replace("'", "''")
     conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         conn.execute(f"PRAGMA key = '{db_key}'")
@@ -205,15 +237,16 @@ def init_db() -> None:
                 sort_order INTEGER NOT NULL DEFAULT 100,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 real_browser_capture INTEGER NOT NULL DEFAULT 0,
-                watermark_enabled INTEGER NOT NULL DEFAULT 0,
+                watermark_enabled INTEGER NOT NULL DEFAULT 1,
                 watermark_time_enabled INTEGER NOT NULL DEFAULT 1,
                 watermark_time_format TEXT NOT NULL DEFAULT 'datetime_seconds',
-                watermark_text TEXT DEFAULT '',
-                watermark_opacity INTEGER NOT NULL DEFAULT 65,
-                watermark_font_size INTEGER NOT NULL DEFAULT 24,
-                watermark_gap_x INTEGER NOT NULL DEFAULT 140,
-                watermark_gap_y INTEGER NOT NULL DEFAULT 140,
-                watermark_angle INTEGER NOT NULL DEFAULT -45,
+                watermark_text TEXT DEFAULT '王',
+                watermark_opacity INTEGER NOT NULL DEFAULT 20,
+                watermark_font_size INTEGER NOT NULL DEFAULT 53,
+                watermark_gap_x INTEGER NOT NULL DEFAULT 234,
+                watermark_gap_y INTEGER NOT NULL DEFAULT 594,
+                watermark_angle INTEGER NOT NULL DEFAULT 36,
+                watermark_alignment TEXT NOT NULL DEFAULT 'reference',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(job_id) REFERENCES report_jobs(id) ON DELETE CASCADE,
@@ -347,6 +380,18 @@ def init_db() -> None:
                 token TEXT PRIMARY KEY,
                 expired_at REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                token_hash TEXT PRIMARY KEY,
+                last_activity REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                client_key TEXT PRIMARY KEY,
+                window_start REAL NOT NULL,
+                attempts INTEGER NOT NULL,
+                blocked_until REAL NOT NULL DEFAULT 0
+            );
             """
         )
         
@@ -401,6 +446,7 @@ def init_db() -> None:
             ("screenshot_items", "watermark_gap_x", "INTEGER DEFAULT 140"),
             ("screenshot_items", "watermark_gap_y", "INTEGER DEFAULT 140"),
             ("screenshot_items", "watermark_angle", "INTEGER DEFAULT -45"),
+            ("screenshot_items", "watermark_alignment", "TEXT NOT NULL DEFAULT 'reference'"),
             ("screenshot_items", "taskbar_enabled", "INTEGER DEFAULT 1"),
             ("screenshot_items", "taskbar_template_key", "TEXT NOT NULL DEFAULT ''"),
             ("report_jobs", "browser_scale_factor", "REAL DEFAULT 1.5"),
@@ -429,6 +475,44 @@ def init_db() -> None:
                         ELSE trim(replace(COALESCE(watermark_text, ''), '{time}', ''), char(10) || char(13) || ' ')
                     END
             """)
+
+        # This data migration must run once. A later user-selected opacity of 26
+        # is a valid custom setting and must survive subsequent application starts.
+        preset_migration_key = "watermark_reference_preset_v2_migrated"
+        preset_migrated = conn.execute(
+            "SELECT 1 FROM system_settings WHERE key = ?", (preset_migration_key,)
+        ).fetchone()
+        if not preset_migrated:
+            conn.execute("""
+                UPDATE screenshot_items
+                SET watermark_font_size = 53, watermark_gap_x = 234,
+                    watermark_gap_y = 594, watermark_angle = 36,
+                    watermark_opacity = 20,
+                    watermark_alignment = CASE WHEN watermark_alignment IN ('right', 'center')
+                        THEN 'reference' ELSE watermark_alignment END
+                WHERE watermark_enabled = 1 AND watermark_time_enabled = 1
+                  AND trim(COALESCE(watermark_text, '')) = '王'
+                  AND ((watermark_font_size = 24 AND watermark_gap_x = 140
+                        AND watermark_gap_y = 140 AND watermark_angle = -45
+                        AND watermark_opacity = 65)
+                    OR (watermark_font_size = 52 AND watermark_gap_x = 500
+                        AND watermark_gap_y = 300 AND watermark_angle = 45
+                        AND watermark_opacity IN (52, 65)))
+            """)
+            conn.execute("""
+                UPDATE screenshot_items SET watermark_alignment = 'reference',
+                    watermark_opacity = 20
+                WHERE watermark_enabled = 1 AND watermark_time_enabled = 1
+                  AND trim(COALESCE(watermark_text, '')) = '王'
+                  AND watermark_font_size = 53 AND watermark_gap_x = 234
+                  AND watermark_gap_y = 594 AND watermark_angle = 36
+                  AND watermark_opacity IN (26, 52)
+                  AND watermark_alignment IN ('center', 'reference')
+            """)
+            conn.execute(
+                "INSERT INTO system_settings (key, value) VALUES (?, '1')",
+                (preset_migration_key,),
+            )
 
         # 兼容同步老数据中的邮件发送配置
         try:
@@ -537,6 +621,40 @@ def migrate_sensitive_values(conn: sqlite3.Connection) -> None:
                 (webhook, secret, data["id"]),
             )
 
+    # Convert secrets written by the older local cipher, and seal any old raw values.
+    for table, columns in (
+        ("dingtalk_profiles", ("webhook", "secret")),
+        ("periodic_report_settings", ("dingtalk_webhook", "dingtalk_secret")),
+    ):
+        selected = ", ".join(("id", *columns))
+        for row in conn.execute(f"SELECT {selected} FROM {table}").fetchall():
+            changes = {
+                column: normalize_secret_for_storage(str(row[column] or ""), legacy_base64=True)
+                for column in columns if row[column]
+            }
+            changes = {column: value for column, value in changes.items() if value != row[column]}
+            if changes:
+                assignments = ", ".join(f"{column} = ?" for column in changes)
+                conn.execute(f"UPDATE {table} SET {assignments} WHERE id = ?",
+                             (*changes.values(), row["id"]))
+
+    secret_setting_keys = (
+        "dingtalk_webhook", "dingtalk_secret", "mfa_totp_secret", "mfa_totp_pending_secret"
+    )
+    placeholders = ", ".join("?" for _ in secret_setting_keys)
+    for row in conn.execute(
+        f"SELECT key, value FROM system_settings WHERE key IN ({placeholders})",
+        secret_setting_keys,
+    ).fetchall():
+        if not row["value"]:
+            continue
+        encrypted = normalize_secret_for_storage(
+            str(row["value"]), legacy_base64=row["key"].startswith("dingtalk_")
+        )
+        if encrypted != row["value"]:
+            conn.execute("UPDATE system_settings SET value = ? WHERE key = ?",
+                         (encrypted, row["key"]))
+
 
 def seed_system_defaults(conn: sqlite3.Connection) -> None:
     weekly_count = conn.execute("SELECT COUNT(*) FROM periodic_report_settings WHERE report_type = 'weekly'").fetchone()[0]
@@ -612,7 +730,6 @@ def seed_system_defaults(conn: sqlite3.Connection) -> None:
         "swagger_enabled": "0",
         "mfa_enabled": "0",
         "mfa_totp_secret": "",
-        "session_ttl_minutes": "30",
         "dingtalk_emoji_enabled": "0",
     }
     for key, value in default_settings.items():
@@ -623,65 +740,3 @@ def seed_system_defaults(conn: sqlite3.Connection) -> None:
             """,
             (key, value),
         )
-def reset_database_data() -> None:
-    """一键删除重置所有本地测试数据及物理目录文件"""
-    import shutil
-    from datetime import date
-    # 1. 物理清理截图、报告和会话状态目录
-    for d in (settings.screenshot_dir, settings.report_dir, settings.browser_state_dir, settings.data_dir / "periodic-reports"):
-        if d.exists():
-            try:
-                shutil.rmtree(d)
-            except Exception:
-                pass
-    for month_dir in settings.data_dir.glob("????/??"):
-        if not month_dir.is_dir():
-            continue
-        try:
-            date(int(month_dir.parent.name), int(month_dir.name), 1)
-        except ValueError:
-            continue
-        for file_path in month_dir.glob("*.zip"):
-            if file_path.is_file():
-                file_path.unlink()
-        for day_dir in month_dir.glob("??"):
-            if not day_dir.is_dir():
-                continue
-            for file_path in day_dir.iterdir():
-                if file_path.is_file() and file_path.suffix.lower() in {".png", ".docx"}:
-                    file_path.unlink()
-            if not any(day_dir.iterdir()):
-                day_dir.rmdir()
-        if not any(month_dir.iterdir()):
-            month_dir.rmdir()
-            if not any(month_dir.parent.iterdir()):
-                month_dir.parent.rmdir()
-    settings.ensure_dirs()
-
-    # 2. 清理数据库所有数据表
-    with connect() as conn:
-        conn.execute("PRAGMA foreign_keys = OFF")
-        tables = [
-            "system_settings",
-            "storage_cleanup_runs",
-            "storage_cleanup_settings",
-            "periodic_report_runs",
-            "periodic_report_settings",
-            "screenshot_results",
-            "run_records",
-            "screenshot_items",
-            "report_jobs",
-            "mail_profiles",
-            "auth_profiles",
-        ]
-        for t in tables:
-            try:
-                conn.execute(f"DELETE FROM {t}")
-                # 清除自增序列
-                conn.execute("DELETE FROM sqlite_sequence WHERE name = ?", (t,))
-            except sqlite3.OperationalError:
-                pass  # 防御表不存在
-        conn.execute("PRAGMA foreign_keys = ON")
-        
-        # 3. 仅恢复系统级默认配置，不再导入演示任务、认证或截图项。
-        seed_system_defaults(conn)

@@ -9,8 +9,9 @@ from apscheduler.triggers.date import DateTrigger
 
 from app.repository import get_job, get_periodic_report_setting, list_jobs, list_periodic_report_settings
 from app.runner import run_job
+from app.job_execution import recover_interrupted_runs
 from app.settings import settings
-from app.periodic_reporter import trigger_periodic_report
+from app.periodic_reporter import monthly_report_retry_check, trigger_periodic_report
 
 
 scheduler = BackgroundScheduler(timezone=ZoneInfo(settings.default_timezone))
@@ -63,8 +64,32 @@ def _start_owned_scheduler() -> None:
         scheduler.start()
     scheduler.add_job(reload_jobs, "interval", seconds=15, id="scheduler-config-sync",
                       replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=60)
+    scheduler.add_job(recover_interrupted_runs, "interval", minutes=1, id="inspection-run-recovery",
+                      replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=60)
     reload_jobs()
+    _restore_waiting_monthly_reports()
     Thread(target=_refresh_holiday_calendar, daemon=True).start()
+
+
+def _restore_waiting_monthly_reports() -> None:
+    """Restore one-shot retries that the in-memory scheduler lost on restart."""
+    import logging
+    from app.db import connect
+
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id FROM periodic_report_runs WHERE report_type = 'monthly' AND status = 'waiting'"
+        ).fetchall()
+    run_date = datetime.now(ZoneInfo(settings.default_timezone)) + timedelta(seconds=1)
+    for row in rows:
+        run_id = int(row["id"])
+        scheduler.add_job(
+            monthly_report_retry_check, DateTrigger(run_date=run_date),
+            args=[run_id], id=f"monthly-retry-{run_id}", replace_existing=True,
+            max_instances=1, coalesce=True, misfire_grace_time=3600,
+        )
+    if rows:
+        logging.getLogger("app.scheduler").info("已恢复 %s 条等待中的月报重试", len(rows))
 
 
 def _refresh_holiday_calendar() -> None:

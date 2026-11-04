@@ -79,31 +79,6 @@
   <h3 style="border-left: 4px solid var(--primary); padding-left: 8px; margin-bottom: 16px; font-size: 14px;">通知与打包</h3>
     
   <div class="panel" style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 20px; border-radius: 6px; margin-bottom: 30px;">
-    <!-- 邮件推送开关 -->
-    <label class="check" style="margin-bottom: 16px; font-weight: 600; display: block;">
-      <input name="enable_email" type="checkbox" {% if setting.enable_email %}checked{% endif %} onchange="toggleMailFields(this.checked)">
-      邮件发送 ZIP 报告
-    </label>
-    
-    <div id="mail_fields_container" class="form-grid" style="margin-bottom: 24px; padding-left: 20px; border-left: 2px dashed #cbd5e1; display: none;">
-      <label class="span-2">
-        发信邮箱
-        <select name="mail_profile_id">
-          <option value="">请选择邮箱</option>
-          {% for profile in mail_profiles %}
-          <option value="{{ profile.id }}" {% if setting.mail_profile_id==profile.id %}selected{% endif %}>{{ profile.name }}</option>
-          {% endfor %}
-        </select>
-      </label>
-
-      <label class="span-2">
-        收件人（选填）
-        <input name="recipients_override" value="{{ setting.recipients_override or '' }}"
-          placeholder="ops@example.com, manager@example.com">
-        <span class="form-tip">留空使用邮箱默认收件人。多个地址用英文逗号隔开。</span>
-      </label>
-    </div>
-
     <!-- 钉钉推送开关 -->
     <label class="check" style="margin-top: 16px; margin-bottom: 16px; font-weight: 600; display: block;">
       <input name="dingtalk_enabled" type="checkbox" {% if setting.dingtalk_enabled %}checked{% endif %}>
@@ -118,7 +93,7 @@
     style="background: #f8fafc; border: 1px solid var(--panel-border); padding: 20px; border-radius: 6px; margin-bottom: 30px;">
     <label class="check" style="margin-bottom: 16px; font-weight: 600;">
       <input name="wait_for_daily_jobs" type="checkbox" {% if setting.wait_for_daily_jobs %}checked{% endif %}>
-      等待当天巡检完成后再发送
+      等待当天巡检完成后再生成
     </label>
 
     <div class="form-grid">
@@ -137,8 +112,8 @@
         等待超时后 <span style="color: var(--danger);">*</span>
         <select name="send_on_timeout">
           <option value="1" {% if setting.send_on_timeout==1 or setting.send_on_timeout is none %}selected{% endif %}>
-            发送已完成部分</option>
-          <option value="0" {% if setting.send_on_timeout==0 %}selected{% endif %}>不发送</option>
+            生成已完成部分</option>
+          <option value="0" {% if setting.send_on_timeout==0 %}selected{% endif %}>不生成</option>
         </select>
       </label>
     </div>
@@ -168,7 +143,7 @@
       </label>
       <label class="check">
         <input name="send_empty_report" type="checkbox" {% if setting.send_empty_report %}checked{% endif %}>
-        没有报告时也发送邮件
+        没有报告时也生成归档包
       </label>
     </div>
   </details>
@@ -249,16 +224,7 @@
     }
   }
 
-  function toggleMailFields(checked) {
-    const container = document.getElementById('mail_fields_container');
-    container.style.display = checked ? 'grid' : 'none';
-  }
-
   document.addEventListener('DOMContentLoaded', () => {
-    // 根据初始勾选状态显示/隐藏字段
-    const enableEmailCheckbox = document.getElementsByName('enable_email')[0];
-    toggleMailFields(enableEmailCheckbox.checked);
-
     const configStr = '{{ setting.schedule_config | safe if setting.schedule_config else "" }}';
     let config = null;
     if (configStr) {

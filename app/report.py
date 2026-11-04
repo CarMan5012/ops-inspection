@@ -13,6 +13,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -24,6 +25,7 @@ from app.storage_paths import get_report_dir, resolve_artifact_path, unique_arti
 from app.utils import safe_name
 
 logger = logging.getLogger("app.report")
+ITEM_CAPTION_STYLE = "Inspection Item Caption"
 
 
 class ReportValidationError(RuntimeError):
@@ -177,7 +179,7 @@ def is_header_paragraph(p) -> bool:
     text = p.text.strip()
     if not text:
         return False
-    if p.style.name == "Caption":
+    if p.style.name in {"Caption", ITEM_CAPTION_STYLE}:
         return False
     if p.style.name.startswith("Heading"):
         return True
@@ -186,6 +188,16 @@ def is_header_paragraph(p) -> bool:
     if text.startswith("巡检时间："):
         return True
     return False
+
+
+def _item_caption_style(doc: Document):
+    """Mark generated item names as captions without changing their appearance."""
+    try:
+        return doc.styles[ITEM_CAPTION_STYLE]
+    except KeyError:
+        style = doc.styles.add_style(ITEM_CAPTION_STYLE, WD_STYLE_TYPE.PARAGRAPH)
+        style.base_style = doc.styles["Normal"]
+        return style
 
 
 def insert_paragraph_after(paragraph, text=None, style=None):
@@ -276,7 +288,7 @@ def _fill_template(doc: Document, periods: dict[str, dict[str, Any]]) -> None:
                     anchor.runs[0].font.color.rgb = RGBColor(185, 28, 28)
                     continue
                 image_path = resolve_artifact_path(item.get("file_path") or "")
-                anchor = insert_paragraph_after(anchor, name)
+                anchor = insert_paragraph_after(anchor, name, style=_item_caption_style(doc))
                 anchor.paragraph_format.space_before = Pt(8)
                 anchor.paragraph_format.space_after = Pt(3)
                 anchor = insert_paragraph_after(anchor)
@@ -474,7 +486,7 @@ def _build_standalone_docx(
                     continue
                 image_path = resolve_artifact_path(item.get("file_path") or "")
                 try:
-                    caption = doc.add_paragraph(name)
+                    caption = doc.add_paragraph(name, style=_item_caption_style(doc))
                     caption.paragraph_format.space_before = Pt(8)
                     caption.paragraph_format.space_after = Pt(3)
                     paragraph = doc.add_paragraph()

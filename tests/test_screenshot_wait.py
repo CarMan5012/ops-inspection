@@ -2,12 +2,47 @@ import sqlite3
 import sys
 import types
 
+import pytest
+
 if "pysqlcipher3" not in sys.modules:
     sqlcipher = types.ModuleType("pysqlcipher3")
     sqlcipher.dbapi2 = sqlite3
     sys.modules["pysqlcipher3"] = sqlcipher
 
 from app import screenshot
+
+
+def test_dashboard_slug_containing_login_is_not_a_login_page():
+    class PageStub:
+        url = "https://grafana.example/d/abc/login-overview"
+
+        def locator(self, _selector):
+            return types.SimpleNamespace(count=lambda: 0)
+
+    page = PageStub()
+    profile = {"login_url": "https://grafana.example/login"}
+    assert not screenshot._is_on_login_page(page, profile)
+    page.url = "https://grafana.example/login?redirect=/d/abc/login-overview"
+    assert screenshot._is_on_login_page(page, profile)
+    page.url = "https://grafana.example/auth/login/callback"
+    assert screenshot._is_on_login_page(page, profile)
+
+
+def test_login_failure_scan_does_not_wait_for_absent_messages():
+    class TextStub:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def is_visible(self):
+            return False
+
+        def wait_for(self, **_kwargs):
+            raise AssertionError("Missing error text must not consume the login timeout")
+
+    page = types.SimpleNamespace(get_by_text=lambda *_args, **_kwargs: TextStub())
+    assert not screenshot._is_login_failure_visible(page)
 
 
 def test_grafana_refresh_is_disabled_in_capture_page():
@@ -145,6 +180,58 @@ def test_screenshot_wait_uses_only_configured_waits():
     assert page.calls[0][:3] == ("selector", "#chart", "visible")
     assert 0 < page.calls[0][3] <= 8000
     assert page.calls[1] == ("timeout", 1500)
+
+
+def test_kibana_waits_for_visible_panels_and_records_no_data():
+    class PageStub:
+        url = "http://kibana.test/app/dashboards#/view/abc"
+
+        def __init__(self):
+            self.calls = 0
+
+        def evaluate(self, expression):
+            assert 'dashboardPanel' in expression
+            self.calls += 1
+            state = "loading" if self.calls == 1 else "no_data"
+            return {"panels": [{"title": "请求量", "state": state}]}
+
+        def wait_for_timeout(self, _milliseconds):
+            pass
+
+    page = PageStub()
+    result = screenshot._wait_for_kibana_panels(page, 1000, settle_ms=0)
+    assert result == {"status": "no_data", "summary": "全部 1 个图表无数据，需确认"}
+    assert page.calls == 2
+
+
+def test_kibana_page_wait_uses_panel_check(monkeypatch):
+    class PageStub:
+        url = "http://kibana.test/app/dashboards#/view/abc"
+
+    expected = {"status": "data", "summary": "1 个图表已显示"}
+    monkeypatch.setattr(screenshot, "_wait_for_kibana_panels", lambda *_args: expected)
+    assert screenshot._wait_for_page(PageStub(), {"item_type": "kibana"}, 1000) == expected
+
+
+def test_kibana_query_error_names_panel():
+    class PageStub:
+        def evaluate(self, _expression):
+            return {"panels": [{"title": "请求量", "state": "error", "detail": "查询失败"}]}
+
+    with pytest.raises(RuntimeError, match="Kibana 图表“请求量”查询错误：查询失败"):
+        screenshot._wait_for_kibana_panels(PageStub(), 1000)
+
+
+def test_kibana_wait_timeout_names_loading_panel():
+    class PageStub:
+        def evaluate(self, _expression):
+            return {"panels": [{"title": "请求量", "state": "loading"}]}
+
+        def wait_for_timeout(self, _milliseconds):
+            pass
+
+    with pytest.raises(TimeoutError, match="Kibana 图表未完成加载：请求量"):
+        screenshot._wait_for_kibana_panels(PageStub(), 1)
 
 
 def test_grafana_waits_for_panel_loading_to_finish():
@@ -395,7 +482,11 @@ def test_real_window_scale_keeps_physical_window_at_requested_size():
     assert "--window-size=2560,1440" in real_args
     assert "--window-position=13,33" in real_args
     assert "--force-device-scale-factor=1.5" in real_args
-    assert "--force-device-scale-factor=1.5" in screenshot.chrome_launch_args(1.5, False)
+    assert "--use-gl=angle" in real_args
+    assert "--use-angle=swiftshader" in real_args
+    headless_args = screenshot.chrome_launch_args(1.5, False)
+    assert "--force-device-scale-factor=1.5" in headless_args
+    assert "--use-angle=swiftshader" not in headless_args
 
 
 def test_full_desktop_image_keeps_requested_pixel_size(tmp_path):
