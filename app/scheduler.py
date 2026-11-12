@@ -59,6 +59,7 @@ def _upsert_job(job_id: str, func, trigger: DateTrigger, *, args=(), kwargs=None
 
 def _start_owned_scheduler() -> None:
     from app.schedule_migration import migrate_legacy_schedules
+    from app.storage_alert import check_disk_alert
     migrate_legacy_schedules()
     if not scheduler.running:
         scheduler.start()
@@ -66,6 +67,9 @@ def _start_owned_scheduler() -> None:
                       replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=60)
     scheduler.add_job(recover_interrupted_runs, "interval", minutes=1, id="inspection-run-recovery",
                       replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=60)
+    scheduler.add_job(check_disk_alert, "interval", minutes=5, id="disk-space-alert",
+                      replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=60)
+    Thread(target=check_disk_alert, daemon=True).start()
     reload_jobs()
     _restore_waiting_monthly_reports()
     Thread(target=_refresh_holiday_calendar, daemon=True).start()

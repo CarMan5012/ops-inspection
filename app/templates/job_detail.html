@@ -73,7 +73,7 @@
         <th style="width: 60px;">排序</th>
         <th>截图项名称 / 目标链接</th>
         <th style="width: 100px;">应用类型</th>
-        <th style="width: 130px;">Word 关联章节</th>
+        {% if job.template_id %}<th style="width: 130px;">模板章节</th>{% endif %}
         <th style="width: 120px;">截图模式/窗口</th>
         <th>关联登录凭证</th>
         <th style="width: 80px;">状态</th>
@@ -91,7 +91,7 @@
         <td>
           <span class="badge" style="text-transform: uppercase;">{{ item.item_type }}</span>
         </td>
-        <td><code>{{ item.section }}</code></td>
+        {% if job.template_id %}<td><code>{{ item.section }}</code></td>{% endif %}
         <td>
           {% if item.real_browser_capture %}
           <span class="badge ok">真实窗口</span>

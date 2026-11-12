@@ -1,46 +1,14 @@
-name: inspection-report-local
+name: ops-inspection-local
 
 services:
-  inspection-report:
+  app:
     build: .
-    image: inspection-report:latest
-    container_name: inspection-report
+    image: ops-inspection:local
+    container_name: inspection-local
     ports:
-      - "8800:8000"
-    env_file:
-      - .env
-    environment:
-      APP_DATA_DIR: /app/data
-      APP_SECRET_KEY_FILE: /run/secrets/app_secret_key
-      DISPLAY: ":99"
-      XVFB_WIDTH: ${XVFB_WIDTH:-4000}
-      XVFB_HEIGHT: ${XVFB_HEIGHT:-2250}
-      XVFB_DEPTH: ${XVFB_DEPTH:-24}
-      TZ: Asia/Shanghai
+      - "127.0.0.1:8800:8000"
     volumes:
-      - ./data:/app/data
-      - ./secrets:/run/secrets
-    depends_on:
-      - grafana
-    restart: unless-stopped
-
-  grafana:
-    image: ${GRAFANA_IMAGE:-grafana/grafana-oss:11.4.0}
-    container_name: inspection-grafana
-    ports:
-      - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASS:-admin}
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-      GF_USERS_DEFAULT_THEME: light
-      GF_SERVER_SERVE_FROM_SUB_PATH: "false"
-      TZ: Asia/Shanghai
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-    restart: unless-stopped
+      - inspection-data:/app/data
 
 volumes:
-  grafana-data:
+  inspection-data:

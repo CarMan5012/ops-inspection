@@ -13,7 +13,7 @@ if "pysqlcipher3" not in sys.modules:
     sqlcipher.dbapi2 = sqlite3
     sys.modules["pysqlcipher3"] = sqlcipher
 
-from app.grafana_connections import ConnectionError, _rendered_dashboard_options, check_target, dashboard_settings, grafana_base_url, search_dashboards
+from app.grafana_connections import ConnectionError, _rendered_dashboard_options, _rendered_time_range, check_target, dashboard_settings, grafana_base_url, search_dashboards
 from app.repository import _SCREENSHOT_ITEM_FIELDS, save_screenshot_items_batch
 from app.screenshot import _storage_state_path
 
@@ -129,6 +129,19 @@ def test_dashboard_settings_uses_dashboard_metadata_and_rendered_options():
     assert result["time"] == {"from": "now-6h", "to": "now"}
     assert result["time_choices"] == [{"label": "最近 6 小时", "from": "now-6h", "to": "now"}]
     assert result["refresh_choices"] == ["30s", "1m"]
+
+
+def test_grafana_time_menu_labels_keep_their_original_url_ranges():
+    assert _rendered_time_range("最近 1 个小时") == {
+        "label": "最近 1 个小时", "from": "now-1h", "to": "now",
+    }
+    assert _rendered_time_range("Last 6 hours") == {
+        "label": "Last 6 hours", "from": "now-6h", "to": "now",
+    }
+    assert _rendered_time_range("上周") == {
+        "label": "上周", "from": "now-1w/w", "to": "now-1w/w",
+    }
+    assert _rendered_time_range("任意输入") is None
 
 
 def test_dashboard_settings_uses_rendered_grafana_options_for_every_variable():
@@ -363,6 +376,7 @@ def test_batch_endpoint_validates_then_passes_all_rows_to_one_transaction():
     assert result["count"] == 1
     assert captured[0]["auth_profile_id"] == 2
     assert captured[0]["item_type"] == "grafana"
+    assert captured[0]["section"] == "生产"
 
     with (
         patch("app.main.get_job", return_value={"id": 1}),

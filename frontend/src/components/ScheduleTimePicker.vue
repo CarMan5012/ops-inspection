@@ -2,19 +2,22 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { ChevronDown } from '../icons'
 
-const props = defineProps<{ modelValue: string; label: string }>()
+const props = defineProps<{ modelValue: string; label: string; minHour?: number; maxHour?: number; disabled?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 const root = ref<HTMLElement | null>(null)
 const hourColumn = ref<HTMLElement | null>(null)
 const minuteColumn = ref<HTMLElement | null>(null)
 const open = ref(false)
-const hours = Array.from({ length: 24 }, (_, index) => String(index).padStart(2, '0'))
+const hours = computed(() => Array.from({ length: 24 }, (_, index) => index)
+  .filter(index => index >= (props.minHour ?? 0) && index <= (props.maxHour ?? 23))
+  .map(index => String(index).padStart(2, '0')))
 const minutes = Array.from({ length: 60 }, (_, index) => String(index).padStart(2, '0'))
 const hour = computed(() => String(props.modelValue || '09:00').slice(0, 2))
 const minute = computed(() => String(props.modelValue || '09:00').slice(3, 5))
 const random = computed(() => props.modelValue.endsWith(':R'))
 
 async function toggle() {
+  if (props.disabled) return
   open.value = !open.value
   if (!open.value) return
   await nextTick()
@@ -46,7 +49,7 @@ onUnmounted(() => { document.removeEventListener('pointerdown', onOutside); docu
 
 <template>
   <div ref="root" class="schedule-time-picker">
-    <button type="button" class="schedule-time-trigger" :aria-label="label" aria-haspopup="dialog" :aria-expanded="open" @click="toggle">
+    <button type="button" class="schedule-time-trigger" :aria-label="label" :disabled="disabled" aria-haspopup="dialog" :aria-expanded="open" @click="toggle">
       <span class="schedule-time-number">{{ hour }}<template v-if="!random">:{{ minute }}</template></span>
       <span v-if="random" class="schedule-time-random">点 · 分钟随机</span>
       <ChevronDown :size="15" aria-hidden="true" />

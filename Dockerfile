@@ -11,9 +11,6 @@ FROM python:3.11-slim-bookworm
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
-    APP_DATA_DIR=/app/data \
-    APP_HOST=0.0.0.0 \
-    APP_PORT=8000 \
     TZ=Asia/Shanghai \
     DEBIAN_FRONTEND=noninteractive \
     DISPLAY=:99 \
@@ -67,4 +64,4 @@ RUN mkdir -p /app/data/screenshots /app/data/reports /app/data/templates /app/da
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "rm -f /tmp/.X99-lock && Xvfb ${DISPLAY:-:99} -screen 0 ${XVFB_WIDTH:-4000}x${XVFB_HEIGHT:-2250}x${XVFB_DEPTH:-24} -ac +extension GLX +render -noreset & until xdpyinfo -display ${DISPLAY:-:99} >/dev/null 2>&1; do sleep 0.2; done; openbox --sm-disable & until xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id'; do sleep 0.2; done; exec uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}"]
+CMD ["sh", "-c", "rm -f /tmp/.X99-lock && Xvfb ${DISPLAY:-:99} -screen 0 ${XVFB_WIDTH:-4000}x${XVFB_HEIGHT:-2250}x${XVFB_DEPTH:-24} -ac +extension GLX +render -noreset & until xdpyinfo -display ${DISPLAY:-:99} >/dev/null 2>&1; do sleep 0.2; done; openbox --sm-disable & until xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id'; do sleep 0.2; done; exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

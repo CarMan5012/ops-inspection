@@ -22,6 +22,25 @@ def test_api_calendar_payload_does_not_create_cron():
     assert "周二" in payload["schedule_label"]
 
 
+@pytest.mark.parametrize("times", [["09:05", "10:30"], ["13:00", "17:05"], ["09:05", "09:05"], ["08:00", "13:00", "17:00"]])
+def test_job_schedule_rejects_multiple_runs_in_one_period(times):
+    from app.main import api_job_payload
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        api_job_payload({"schedule_mode": "calendar", "frequency": "daily", "times": times})
+    assert exc.value.status_code == 400
+
+
+def test_job_schedule_allows_custom_time_in_either_period():
+    from app.main import api_job_payload
+    import json
+
+    for times in (["10:37"], ["14:22"], ["11:R", "20:45"]):
+        payload = api_job_payload({"schedule_mode": "calendar", "frequency": "daily", "times": times})
+        assert json.loads(payload["schedule_config"])["times"] == sorted(times)
+
+
 def test_calendar_schedule_uses_makeup_day_and_pauses_unknown_date(monkeypatch):
     days = {"2026-10-10": True, "2026-10-12": False}
     monkeypatch.setattr(date_schedule, "is_workday", lambda day: days.get(day.isoformat()))
@@ -81,6 +100,7 @@ def test_holiday_source_falls_back_and_caches_year(monkeypatch, tmp_path):
     rows = [{"date": (start + timedelta(days=i)).isoformat(), "rest": 0} for i in range(365)]
     monkeypatch.setattr(holiday_calendar.settings, "data_dir", tmp_path)
     monkeypatch.setattr(holiday_calendar, "_years", {})
+    monkeypatch.setattr(holiday_calendar, "get_system_setting", lambda _key, default="": default)
 
     def fetch(url):
         if "timor.tech" in url:
@@ -112,6 +132,18 @@ def test_periodic_api_saves_calendar_without_cron(monkeypatch):
     assert result == {"ok": True}
     assert saved["cron_expression"] == ""
     assert saved["schedule_mode"] == "calendar"
+
+
+def test_periodic_api_rejects_duplicate_generation_time(monkeypatch):
+    from app.main import api_update_periodic_report
+    from app import repository
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(repository, "get_periodic_report_setting", lambda kind: {"report_type": kind, "name": "周报", "enabled": 1})
+    entry = {"ampm": "am", "hour": 9, "minute": 5}
+    with pytest.raises(HTTPException) as exc:
+        api_update_periodic_report("weekly", {"include_docx": True, "times": [entry, dict(entry)]})
+    assert exc.value.status_code == 400
 
 
 def test_simple_schedules_migrate_and_legacy_expression_pauses(monkeypatch, tmp_path):

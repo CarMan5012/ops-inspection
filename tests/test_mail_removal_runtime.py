@@ -39,7 +39,7 @@ def test_old_periodic_email_flags_do_not_block_archive_or_dingtalk(monkeypatch, 
     connection.row_factory = sqlite3.Row
     connection.execute(
         "CREATE TABLE run_records (id INTEGER, job_id INTEGER, job_name TEXT, status TEXT, "
-        "report_path TEXT, started_at TEXT, finished_at TEXT, success_count INTEGER, failed_count INTEGER)"
+        "report_path TEXT, started_at TEXT, finished_at TEXT, success_count INTEGER, failed_count INTEGER, schedule_slot TEXT)"
     )
     run = {
         "id": 9, "report_type": "weekly", "period_start": "2026-10-01 00:00:00",

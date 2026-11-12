@@ -15,7 +15,7 @@ def _migrate_plain_database() -> None:
     import sqlite3 as std_sqlite
 
     db_path = settings.db_path
-    db_key = os.getenv("SQLCIPHER_DB_KEY") or settings.secret_key
+    db_key = settings.secret_key
     if not db_key:
         raise RuntimeError("SQLCipher database key is missing")
     # 对密钥中的单引号进行转义，防止特殊字符导致 SQL 注入或 PRAGMA 语法解析错
@@ -110,10 +110,8 @@ def _migrate_plain_database() -> None:
 
 @contextmanager
 def connect():
-    import os
-
     db_path = settings.db_path
-    db_key = os.getenv("SQLCIPHER_DB_KEY") or settings.secret_key
+    db_key = settings.secret_key
     if not db_key:
         raise RuntimeError("SQLCipher database key is missing")
     db_key = db_key.replace("'", "''")
@@ -130,9 +128,19 @@ def connect():
 
 
 
+def _initialize_installation_state(conn: Any, existing_database: bool) -> None:
+    row = conn.execute("SELECT state FROM installation_state WHERE id = 1").fetchone()
+    if row:
+        return
+    if existing_database:
+        raise RuntimeError("检测到未初始化的旧数据库；请使用全新数据目录部署")
+    conn.execute("INSERT INTO installation_state (id, state) VALUES (1, 'pending')")
+
+
 def init_db() -> None:
     settings.ensure_dirs()
     Path(settings.db_path).parent.mkdir(parents=True, exist_ok=True)
+    existing_database = settings.db_path.exists() and settings.db_path.stat().st_size > 0
     _migrate_plain_database()
     with connect() as conn:
         conn.executescript(
@@ -392,8 +400,18 @@ def init_db() -> None:
                 attempts INTEGER NOT NULL,
                 blocked_until REAL NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS admin_account (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                username TEXT NOT NULL,
+                password_hash TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS installation_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                state TEXT NOT NULL
+            );
             """
         )
+        _initialize_installation_state(conn, existing_database)
         
         # Database schema migrations to support frontend config & credentials source status
         old_item_columns = {row[1] for row in conn.execute("PRAGMA table_info(screenshot_items)")}

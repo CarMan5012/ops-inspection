@@ -21,6 +21,7 @@ const router = useRouter()
 const jobId = computed(() => Number(route.params.id))
 const profiles = ref<Row[]>([])
 const sections = ref<string[]>([])
+const templateSelected = ref(false)
 const rows = ref<PageRow[]>([])
 const dashboards = ref<Row[]>([])
 const selected = ref<string[]>([])
@@ -67,7 +68,7 @@ function addRow(url: string, name = '', authId: number | '' = ''): void {
   if (!clean || rows.value.some(row => row.url === clean && row.auth_profile_id === assigned)) return
   rows.value.push({
     key: nextKey++, name: name || defaultName(clean), url: clean,
-    section: sections.value[0] || '巡检截图',
+    section: templateSelected.value ? sections.value[0] || '' : name || defaultName(clean),
     auth_profile_id: assigned, checked: null, checkMessage: '', checkVersion: 0,
   })
 }
@@ -176,12 +177,13 @@ async function save(): Promise<void> {
   if (saving.value || testing.value) return
   if (!rows.value.length) { error.value = '请先添加页面'; return }
   if (rows.value.some(row => !row.name.trim())) { error.value = '请填写每个页面的截图名称'; return }
+  if (templateSelected.value && rows.value.some(row => !sections.value.includes(row.section))) { error.value = '请为每个页面选择 Word 模板章节'; return }
   saving.value = true
   try {
     const passed = await checkAll()
     if (!passed) return
     const items = rows.value.map(row => ({
-        name: row.name.trim(), url: row.url.trim(), section: row.section.trim(),
+        name: row.name.trim(), url: row.url.trim(), section: templateSelected.value ? row.section : row.name.trim(),
         auth_profile_id: row.auth_profile_id || null, real_browser_capture: true,
       }))
     const result = await attempt(() => api<Row>(`/jobs/${jobId.value}/items/batch`, 'POST', { items }), `已添加 ${items.length} 个页面`)
@@ -194,6 +196,7 @@ async function save(): Promise<void> {
 onMounted(async () => {
   const data = await attempt(() => api<Row>(`/jobs/${jobId.value}`))
   profiles.value = data?.auth_profiles || []
+  templateSelected.value = Boolean(data?.job?.template_id)
   sections.value = data?.template_sections || []
   loading.value = false
 })
@@ -236,7 +239,7 @@ onMounted(async () => {
           <label class="field"><span>截图名称</span><input v-model="row.name" :disabled="testing || saving" @input="invalidateCheck(row)" /></label>
           <label class="field"><span>页面地址</span><input v-model="row.url" type="url" :disabled="testing || saving" @input="invalidateCheck(row)" /></label>
           <label class="field"><span>网站连接</span><select v-model="row.auth_profile_id" :disabled="testing || saving" @change="invalidateCheck(row)"><option value="">无需登录 / 待选择</option><option v-for="profile in profiles" :key="profile.id" :value="Number(profile.id)">{{ profile.name }}</option></select></label>
-          <label class="field"><span>报告章节</span><select v-if="sections.length" v-model="row.section" :disabled="testing || saving" @change="invalidateCheck(row)"><option v-for="section in sections" :key="section" :value="section">{{ section }}</option></select><input v-else v-model="row.section" :disabled="testing || saving" @input="invalidateCheck(row)" /></label>
+          <label v-if="templateSelected" class="field"><span>模板章节 <b>*</b></span><select v-model="row.section" :disabled="testing || saving" @change="invalidateCheck(row)"><option value="" disabled>请选择模板章节</option><option v-for="section in sections" :key="section" :value="section">{{ section }}</option></select></label>
         </div>
         <div class="connection-row-bottom"><span class="connection-row-url">{{ row.url }}</span><span v-if="row.checkMessage" class="connection-check" :class="row.checked === false ? 'is-error' : row.checked ? 'is-ok' : ''">{{ row.checkMessage }}</span><div class="connection-row-actions"><IconButton type="button" class="table-icon-action" :disabled="testing || saving" title="检查页面" aria-label="检查页面" @click="check(row)" label="检查页面"><CircleCheck :size="16" /></IconButton><IconButton type="button" class="table-icon-action danger-hover" :disabled="testing || saving" title="移除页面" aria-label="移除页面" @click="rows = rows.filter(item => item.key !== row.key)" label="移除页面"><Trash2 :size="16" /></IconButton></div></div>
       </div>

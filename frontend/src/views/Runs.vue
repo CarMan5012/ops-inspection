@@ -3,8 +3,10 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { ArrowUpRight, History, Download, Eye } from '../icons'
 import RefreshButton from '../components/RefreshButton.vue'
-import { api, dateTime, statusText, type Row } from '../api'
-import { attempt } from '../ui'
+import MonthMultiPicker from '../components/MonthMultiPicker.vue'
+import PeriodPicker from '../components/PeriodPicker.vue'
+import { api, apiUrl, dateTime, statusText, type Row } from '../api'
+import { attempt, notify } from '../ui'
 
 const runs = ref<Row[]>([])
 const total = ref(0)
@@ -25,6 +27,62 @@ const loadError = ref(false)
 const tablePanel = ref<HTMLElement | null>(null)
 let timer: number | undefined
 let requestSeq = 0
+type ExportMode = 'month' | 'range'
+const today = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+}).formatToParts(new Date())
+const dateParts = Object.fromEntries(today.map(part => [part.type, part.value]))
+const todayText = `${dateParts.year}-${dateParts.month}-${dateParts.day}`
+const exportMode = ref<ExportMode>('month')
+const exportMonths = ref<string[]>([todayText.slice(0, 7)])
+const exportStart = ref(`${todayText.slice(0, 7)}-01`)
+const exportEnd = ref(todayText)
+const exportBusy = ref(false)
+const exportError = ref('')
+
+async function downloadReports() {
+  if (exportBusy.value) return
+  exportError.value = ''
+  const query = new URLSearchParams()
+  if (exportMode.value === 'month') {
+    if (!exportMonths.value.length || exportMonths.value.length > 12 ||
+        exportMonths.value.some(value => !/^\d{4}-(0[1-9]|1[0-2])$/.test(value))) {
+      exportError.value = '请选择 1–12 个月份'
+      return
+    }
+    query.set('months', [...new Set(exportMonths.value)].sort().join(','))
+  } else {
+    const start = exportStart.value
+    const end = exportEnd.value
+    if (!start || !end) {
+      exportError.value = '请选择开始日期和结束日期'
+      return
+    }
+    if (start > end) {
+      exportError.value = '结束日期不能早于开始日期'
+      return
+    }
+    query.set('start_date', start)
+    query.set('end_date', end)
+  }
+
+  exportBusy.value = true
+  try {
+    const info = await api<Row>(`/runs/reports/archive-info?${query}`)
+    if (!info.count) throw new Error('所选日期内没有可下载的日报')
+    const link = document.createElement('a')
+    link.href = apiUrl(`/runs/reports/archive?${query}`)
+    link.download = String(info.filename || '巡检日报.zip')
+    document.body.append(link)
+    link.click()
+    link.remove()
+    notify('日报压缩包已开始下载')
+  } catch (error) {
+    exportError.value = error instanceof Error ? error.message : '下载失败，请稍后重试'
+  } finally {
+    exportBusy.value = false
+  }
+}
 async function load(silent = false): Promise<boolean> {
   if (!pageSizes.value.length) return initialize(silent)
   const seq = ++requestSeq
@@ -83,6 +141,26 @@ onUnmounted(() => clearInterval(timer))
 
 <template>
   <section class="page-intro"><div><h1>巡检记录</h1></div><ButtonGroup class="page-actions"><RefreshButton :loading="refreshing" @click="() => load()" /></ButtonGroup></section>
+  <section class="runs-export" aria-labelledby="runs-export-title">
+    <div class="runs-export-intro"><h2 id="runs-export-title">批量下载日报</h2><p>每个任务每天仅打包最终合并的 Word。</p></div>
+    <div class="runs-export-controls">
+      <div class="runs-export-field"><span>范围</span>
+        <div class="runs-export-modes" role="group" aria-label="下载范围">
+          <button type="button" :class="{ active: exportMode === 'month' }" :aria-pressed="exportMode === 'month'" @click="exportMode = 'month'; exportError = ''">按月份</button>
+          <button type="button" :class="{ active: exportMode === 'range' }" :aria-pressed="exportMode === 'range'" @click="exportMode = 'range'; exportError = ''">自定义日期</button>
+        </div>
+      </div>
+      <div v-if="exportMode === 'month'" class="runs-export-field"><span>月份（可多选）</span>
+        <MonthMultiPicker v-model="exportMonths" label="选择下载月份" @update:model-value="exportError = ''" />
+      </div>
+      <template v-else>
+        <div class="runs-export-field"><span>开始日期</span><PeriodPicker v-model="exportStart" mode="date" label="选择开始日期" @update:model-value="exportError = ''" /></div>
+        <div class="runs-export-field"><span>结束日期</span><PeriodPicker v-model="exportEnd" mode="date" label="选择结束日期" @update:model-value="exportError = ''" /></div>
+      </template>
+      <ActionButton variant="primary" :loading="exportBusy" :disabled="exportBusy" @click="downloadReports"><Download :size="15" />下载 ZIP</ActionButton>
+    </div>
+    <p v-if="exportError" class="runs-export-error" role="alert">{{ exportError }}</p>
+  </section>
   <div class="section-heading"><div><h2>全部记录</h2></div><span class="count-label">共 {{ total }} 条</span></div>
   <div v-if="loading" class="loading-panel"><div class="skeleton" v-for="n in 5" :key="n"></div></div>
   <div v-else-if="loadError && !runs.length" class="empty-state"><h3>巡检记录加载失败</h3><p>网络或服务暂时不可用，页面会自动重试。</p><ActionButton type="button" variant="primary" @click="() => load()">重试</ActionButton></div>
@@ -141,3 +219,19 @@ onUnmounted(() => clearInterval(timer))
     </div>
   </div>
 </template>
+
+<style scoped>
+.runs-export{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px 24px;padding:17px 20px;margin-bottom:26px;background:rgba(229,245,250,.64);border:1px solid rgba(169,202,214,.58);border-radius:8px;backdrop-filter:blur(16px) saturate(112%);-webkit-backdrop-filter:blur(16px) saturate(112%)}
+.runs-export-intro h2{margin:0 0 4px;font-size:15px;color:#263e4c}
+.runs-export-intro p{margin:0;color:#758b97;font-size:12px}
+.runs-export-controls{display:flex;align-items:end;flex-wrap:wrap;gap:10px}
+.runs-export-field{display:flex;flex-direction:column;gap:5px;color:#506677;font-size:11px;font-weight:700}
+.runs-export-modes{display:flex;align-items:center;gap:2px;height:34px;padding:3px;border:1px solid rgba(164,197,209,.57);border-radius:6px;background:rgba(221,239,245,.68)}
+.runs-export-modes button{height:26px;padding:0 10px;border:0;border-radius:4px;background:transparent;color:#667f8b;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.runs-export-modes button:hover:not(.active){color:#176b84;background:#e8f2f5}
+.runs-export-modes button.active{background:rgba(255,255,255,.82);color:#176b84;box-shadow:0 1px 4px rgba(31,83,103,.11)}
+.runs-export-modes button:focus-visible{outline:2px solid #2285a1;outline-offset:2px}
+.runs-export-controls .btn{height:34px;min-height:34px;align-self:flex-end}
+.runs-export-controls :deep(.action-button-label){display:inline-flex;align-items:center;justify-content:center;gap:5px;line-height:1}
+.runs-export-error{width:100%;margin:0;color:#b7484c;font-size:12px}
+</style>

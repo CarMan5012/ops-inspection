@@ -97,6 +97,8 @@ def test_login_attempt_limit_is_atomic_and_resets_on_success(monkeypatch):
 
 
 def test_login_rejects_blocked_request_before_decrypt(monkeypatch):
+    monkeypatch.setattr(main, "installation_state", lambda: "initialized")
+    monkeypatch.setattr(main, "public_base_path", lambda: "/ops")
     monkeypatch.setattr(main, "consume_login_attempt", lambda _: 123)
     monkeypatch.setattr(main, "decrypt_login_payload", lambda _: pytest.fail("decryption reached"))
     request = Request({"type": "http", "method": "POST", "scheme": "http", "path": "/ops/login",
@@ -107,15 +109,14 @@ def test_login_rejects_blocked_request_before_decrypt(monkeypatch):
     assert "error=rate" in response.headers["Location"]
 
 
-def test_admin_hash_takes_priority_and_plaintext_still_works(monkeypatch):
-    monkeypatch.setattr(auth.settings, "admin_password_hash", "")
-    assert auth.check_password(auth.settings.admin_username, auth.settings.admin_password)
+def test_admin_credentials_are_read_from_database(monkeypatch):
     encoded = auth.hash_admin_password("different-secret")
-    monkeypatch.setattr(auth.settings, "admin_password_hash", encoded)
-    assert auth.check_password(auth.settings.admin_username, "different-secret")
-    assert not auth.check_password(auth.settings.admin_username, auth.settings.admin_password)
+    monkeypatch.setattr(auth, "admin_account", lambda: ("admin", encoded))
+    monkeypatch.setattr(auth, "is_token_revoked", lambda _: False)
+    assert auth.check_password("admin", "different-secret")
+    assert not auth.check_password("admin", "admin")
     assert not auth.check_password("wrong", "different-secret")
-    token = auth.create_token(auth.settings.admin_username)
+    token = auth.create_token("admin")
     assert auth.verify_token(token)
 
 

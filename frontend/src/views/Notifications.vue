@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { Bell, Pencil, Trash2, ArrowLeft, Send } from '../icons'
 import { api, type Row } from '../api'
 import { attempt, notify, confirmModal } from '../ui'
+import PasswordInput from '../components/PasswordInput.vue'
 
 function bool(value: unknown): boolean {
   return value === true || value === 1 || value === '1'
@@ -172,7 +173,7 @@ onMounted(loadDingtalkProfiles)
               </label>
               <label class="field">
                 <span>加签安全密钥</span>
-                <input v-model="dingtalkForm.secret" type="password" :placeholder="hasDingtalkSecret ? '已配置加签密钥，留空则保持不变' : '请输入加签密钥（可选）'" />
+                <PasswordInput v-model="dingtalkForm.secret" :placeholder="hasDingtalkSecret ? '已配置加签密钥，留空则保持不变' : '请输入加签密钥（可选）'" />
               </label>
               <label class="field">
                 <span>自定义关键词</span>

@@ -6,11 +6,10 @@ from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
 from app.grafana_connections import ConnectionError, _ExpiredSession, _with_login
-from app.screenshot import resolve_env_placeholders
 
 
 def _kibana_base_url(profile: dict[str, Any]) -> str:
-    login_url = resolve_env_placeholders(str(profile.get("login_url") or "").strip())
+    login_url = str(profile.get("login_url") or "").strip()
     parts = urlsplit(login_url)
     if parts.scheme not in {"http", "https"} or not parts.netloc:
         raise ConnectionError("请先填写有效的 Kibana 登录地址")

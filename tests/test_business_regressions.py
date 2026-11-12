@@ -51,20 +51,37 @@ def test_custom_morning_is_preserved_when_afternoon_uses_template(tmp_path, monk
     image = tmp_path / "morning.png"
     Image.new("RGB", (120, 90), "blue").save(image)
     job = {"id": 7, "name": "生产巡检", "report_title": "生产日报"}
-    morning = {"id": 201, "started_at": "2026-10-10T09:05:00+08:00"}
+    morning = {"id": 201, "started_at": "2026-10-10T09:05:00+08:00", "schedule_slot": "calendar-0905"}
     first = {"id": 11, "item_name": "上午业务看板", "section": "自定义业务章节", "status": "success", "file_path": str(image)}
     path = report.generate_docx(job, morning, [first])
     snapshots[201] = [first]
     previous.append({**morning, "report_path": path})
-    afternoon = {"id": 202, "started_at": "2026-10-10T17:05:00+08:00"}
+    afternoon = {"id": 202, "started_at": "2026-10-10T17:05:00+08:00", "schedule_slot": "calendar-1705"}
     second = {"id": 12, "item_name": "下午看板", "section": "服务器资源",
               "status": "failed", "error_message": "Grafana 返回 502", "file_path": ""}
     assert report.generate_docx(job, afternoon, [second]) == path
     doc = Document(path)
     text = "\n".join(p.text for p in doc.paragraphs)
-    assert "自定义业务章节" in text and "上午业务看板" in text
+    assert "自定义业务章节" not in text and text.count("上午业务看板") == 1
     assert "截图失败：下午看板。原因：Grafana 返回 502" in text
     assert len(doc.inline_shapes) == 1
+
+
+def test_manual_run_keeps_separate_word_and_does_not_replace_daily(tmp_path, monkeypatch):
+    history = []
+    monkeypatch.setattr(report, "get_report_dir", lambda _: tmp_path)
+    monkeypatch.setattr(repository, "list_report_runs_for_day", lambda *_: history)
+    monkeypatch.setattr(repository, "get_previous_run_today", lambda *_: history[-1] if history else None)
+    monkeypatch.setattr(repository, "list_screenshot_results", lambda _: [])
+    job = {"id": 7, "name": "巡检", "report_title": "巡检日报"}
+    morning = {"id": 1, "started_at": "2026-11-10T09:05:00+08:00", "schedule_slot": "calendar-0905"}
+    canonical = report.generate_docx(job, morning, [])
+    history.append({**morning, "report_path": canonical})
+    manual = {"id": 2, "started_at": "2026-11-10T10:00:00+08:00", "schedule_slot": ""}
+    snapshot = report.generate_docx(job, manual, [])
+    assert snapshot != canonical
+    assert "手动巡检-2" in snapshot
+    assert Document(canonical).paragraphs[0].text == Document(snapshot).paragraphs[0].text
 
 
 def test_empty_job_sends_dingtalk_failure_notification_and_keeps_failed_status(tmp_path, monkeypatch):
@@ -101,6 +118,43 @@ def test_same_job_lock_rejects_duplicate_and_releases(tmp_path, monkeypatch):
         lease.close()
     replacement = job_execution.acquire_job_lease(1)
     replacement.close()
+
+
+def test_changed_morning_time_does_not_run_twice_in_one_day(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE run_records (job_id INTEGER, schedule_slot TEXT, started_at TEXT, status TEXT)")
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    conn.execute("INSERT INTO run_records VALUES (7, 'calendar-0905', ?, 'success')", (f"{today}T09:05:00+08:00",))
+    monkeypatch.setattr(repository, "connect", lambda: conn)
+    monkeypatch.setattr(runner, "get_job", lambda _: {"id": 7, "name": "巡检", "schedule_mode": "calendar"})
+    monkeypatch.setattr(runner, "create_run", lambda *_: pytest.fail("不应新建上午的第二次定时运行"))
+    assert runner._execute_job(7, schedule_type="calendar-1037", is_scheduled=True) == 0
+    conn.close()
+
+
+def test_monthly_wait_accepts_completed_morning_after_time_change(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE run_records (id INTEGER PRIMARY KEY, job_id INTEGER, status TEXT, started_at TEXT, schedule_slot TEXT)")
+    now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(hour=23, minute=59)
+    conn.execute("INSERT INTO run_records(job_id,status,started_at,schedule_slot) VALUES (7,'success',?,'calendar-0905')",
+                 (f"{now.date().isoformat()}T09:05:00+08:00",))
+    monkeypatch.setattr(periodic_reporter, "connect", lambda: conn)
+    monkeypatch.setattr(periodic_reporter, "list_jobs", lambda: [{"id": 7, "name": "巡检", "enabled": 1,
+        "schedule_mode": "calendar", "schedule_config": json.dumps({"frequency": "daily", "times": ["10:37"]})}])
+    assert periodic_reporter.check_today_jobs_completed(now) == (True, [])
+    conn.close()
+
+
+def test_periodic_report_skips_concurrent_generation(tmp_path, monkeypatch):
+    monkeypatch.setattr(job_execution.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(periodic_reporter, "_trigger_periodic_report_unlocked", lambda *_: pytest.fail("不应生成第二份周报"))
+    lease = job_execution.acquire_job_lease(-1)
+    try:
+        assert periodic_reporter.trigger_periodic_report("weekly", True) is None
+    finally:
+        lease.close()
 
 
 def test_job_cannot_be_deleted_while_its_run_is_active(tmp_path, monkeypatch):

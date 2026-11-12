@@ -14,6 +14,7 @@ const loadFailed = ref(false)
 const saving = ref(false)
 const legacySchedule = ref(false)
 const legacyConfirmed = ref(false)
+const timeError = ref('')
 const dingtalkProfiles = ref<Row[]>([])
 const form = reactive<Row>({
   name: '', enabled: true, schedule_mode: 'calendar', cron_expression: '', day_of_week: '1',
@@ -51,10 +52,17 @@ onMounted(async () => {
   loading.value = false
 })
 function addTime() {
-  if (form.times.length < 4) form.times.push({ ampm: 'am', hour: 9, minute: 0 })
+  if (form.times.length < 4) {
+    const options = [{ ampm: 'am', hour: 9 }, { ampm: 'pm', hour: 3 }, { ampm: 'pm', hour: 6 }, { ampm: 'am', hour: 6 }]
+    const candidate = options.find(value => !form.times.some((entry: Row) => entry.ampm === value.ampm && Number(entry.hour) === value.hour && Number(entry.minute) === 0)) || options[0]
+    form.times.push({ ...candidate, minute: 0 })
+  }
 }
 async function save() {
   if (legacySchedule.value && !legacyConfirmed.value) return
+  const keys = form.times.map((entry: Row) => `${entry.ampm}:${entry.hour}:${entry.minute}`)
+  if (new Set(keys).size !== keys.length) { timeError.value = '生成时间不能重复'; return }
+  timeError.value = ''
   saving.value = true
   const result = await attempt(() => api(`/periodic-reports/${type.value}`, 'PUT', {
     ...form,
@@ -77,7 +85,7 @@ async function save() {
     <section class="form-section"><div class="form-section-head"><div><h2>基本信息</h2></div></div><div class="form-grid"><label class="field field-full"><span>计划名称 <b>*</b></span><input v-model="form.name" required placeholder="例如：每周巡检报告" /></label><label class="switch-row field-full"><input v-model="form.enabled" type="checkbox" /><strong>启用定时生成</strong></label></div></section>
     <section class="form-section"><div class="form-section-head"><div><h2>生成时间</h2><p>{{ type === 'monthly' ? '月报在每月最后一天生成。' : '周报按所选星期生成。' }}</p></div></div><div class="form-grid">
       <label v-if="legacySchedule" class="field field-full"><span>原定时规则</span><small>此计划使用旧规则。请核对下面的时间，确认后再保存。</small><label class="switch-row"><input v-model="legacyConfirmed" type="checkbox" />我已核对新的生成时间</label></label>
-      <label v-if="type === 'weekly'" class="field field-full"><span>执行星期</span><select v-model="form.day_of_week"><option v-for="day in 7" :key="day" :value="String(day)">星期{{ ['一','二','三','四','五','六','日'][day - 1] }}</option></select></label><div class="field-full time-list"><div v-for="(time, index) in form.times" :key="index" class="time-line"><select v-model="time.ampm" aria-label="上午或下午"><option value="am">上午</option><option value="pm">下午</option></select><select v-model.number="time.hour" aria-label="小时"><option v-for="hour in 12" :key="hour" :value="hour">{{ hour }} 点</option></select><select v-model.number="time.minute" aria-label="分钟"><option v-for="minute in 60" :key="minute" :value="minute - 1">{{ String(minute - 1).padStart(2, '0') }} 分</option></select><button v-if="form.times.length > 1" type="button" class="icon-button danger-hover" aria-label="删除时间" @click="form.times.splice(index, 1)"><Trash2 :size="16" /></button></div><ActionButton v-if="form.times.length < 4" type="button"  class="btn-small" @click="addTime" variant="secondary">添加时间</ActionButton></div>
+      <label v-if="type === 'weekly'" class="field field-full"><span>执行星期</span><select v-model="form.day_of_week"><option v-for="day in 7" :key="day" :value="String(day)">星期{{ ['一','二','三','四','五','六','日'][day - 1] }}</option></select></label><div class="field-full time-list"><div v-for="(time, index) in form.times" :key="index" class="time-line"><select v-model="time.ampm" aria-label="上午或下午"><option value="am">上午</option><option value="pm">下午</option></select><select v-model.number="time.hour" aria-label="小时"><option v-for="hour in 12" :key="hour" :value="hour">{{ hour }} 点</option></select><select v-model.number="time.minute" aria-label="分钟"><option v-for="minute in 60" :key="minute" :value="minute - 1">{{ String(minute - 1).padStart(2, '0') }} 分</option></select><button v-if="form.times.length > 1" type="button" class="icon-button danger-hover" aria-label="删除时间" @click="form.times.splice(index, 1)"><Trash2 :size="16" /></button></div><ActionButton v-if="form.times.length < 4" type="button"  class="btn-small" @click="addTime" variant="secondary">添加时间</ActionButton><small v-if="timeError" class="schedule-warning" role="alert">{{ timeError }}</small></div>
     </div></section>
     <section class="form-section"><div class="form-section-head"><div><h2>报告内容</h2></div></div><div class="form-grid"><label class="switch-row field-full"><input v-model="form.include_docx" type="checkbox" />ZIP 包含 Word 报告</label><label class="switch-row field-full"><input v-model="form.include_screenshots" type="checkbox" />ZIP 包含截图</label><label class="switch-row field-full"><input v-model="form.send_empty_report" type="checkbox" />没有报告时也生成归档包</label></div></section>
     <section class="form-section"><div class="form-section-head"><div><h2>发送通知</h2></div></div><div class="form-grid"><label class="switch-row field-full"><input v-model="form.dingtalk_enabled" type="checkbox" />发送钉钉通知（使用通知配置）</label><template v-if="form.dingtalk_enabled && dingtalkProfiles.length"><label class="field field-full"><span>指定钉钉机器人</span><select v-model="form.dingtalk_profile_id"><option value="">默认首个机器人</option><option v-for="bot in dingtalkProfiles" :key="bot.id" :value="bot.id">{{ bot.name }}</option></select></label></template></div></section>

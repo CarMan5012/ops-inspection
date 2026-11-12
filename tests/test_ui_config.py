@@ -29,6 +29,27 @@ def test_ui_config_matches_job_item_and_watermark_defaults():
     assert config["watermark_rules"]["opacity"]["max"] == 255
 
 
+def test_report_section_follows_item_name_without_template():
+    data = main.api_item_payload({"name": "CPU 看板", "section": "旧的手填章节"}, 1)
+    main.assign_item_report_section(data, {"id": 1, "template_id": None})
+    assert data["section"] == "CPU 看板"
+
+
+def test_report_section_must_come_from_selected_template():
+    from fastapi import HTTPException
+
+    data = main.api_item_payload({"name": "CPU 看板", "section": "1. 服务器资源"}, 1)
+    main.assign_item_report_section(data, {"id": 1, "template_id": 5}, ["1. 服务器资源"])
+    assert data["section"] == "1. 服务器资源"
+    data["section"] = "手填章节"
+    try:
+        main.assign_item_report_section(data, {"id": 1, "template_id": 5}, ["1. 服务器资源"])
+    except HTTPException as exc:
+        assert exc.status_code == 400
+    else:
+        raise AssertionError("模板外章节应被拒绝")
+
+
 def test_ui_choices_match_backend_supported_values():
     config = main.api_ui_config()
     assert tuple(config["run_page_sizes"]) == RUN_PAGE_SIZES

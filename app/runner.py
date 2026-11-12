@@ -99,26 +99,29 @@ def _execute_job(
         logger.error(f"任务不存在: {job_id}")
         raise RuntimeError(f"任务不存在：{job_id}")
 
-    # 如果是简单巡检定时模式，且是自动定时触发的，增加“同天同时间段只成功执行一次”的判定，
-    # 防止由于执行完洗牌重新调度、手动保存任务配置或升级重启容器重新洗牌导致的重复执行。
-    if is_scheduled and job.get("schedule_mode") == "simple" and schedule_type in ("morning", "afternoon"):
+    # 同一计划时间当天已有成功记录时跳过重复触发；失败记录允许重试。
+    if is_scheduled and schedule_type and (schedule_type in ("morning", "afternoon") or schedule_type.startswith("calendar-")):
         from app.repository import connect
+        from app.report import _run_period, is_daily_schedule_slot
         
         local_tz = ZoneInfo(settings.default_timezone)
         now_dt = datetime.now(local_tz)
         today_str = now_dt.strftime("%Y-%m-%d")
+        expected_period = _run_period({"schedule_slot": schedule_type, "started_at": now_dt.isoformat()}, local_tz)
         
         with connect() as conn:
-            has_run = conn.execute(
+            earlier_runs = conn.execute(
                 """
-                SELECT 1 FROM run_records
-                WHERE job_id = ? AND schedule_slot = ?
+                SELECT schedule_slot, started_at FROM run_records
+                WHERE job_id = ?
                   AND substr(started_at, 1, 10) = ?
                   AND status IN ('success', 'partial_success')
-                LIMIT 1
                 """,
-                (job_id, schedule_type, today_str),
-            ).fetchone()
+                (job_id, today_str),
+            ).fetchall()
+        has_run = any(is_daily_schedule_slot(row[0]) and
+                      _run_period({"schedule_slot": row[0], "started_at": row[1]}, local_tz) == expected_period
+                      for row in earlier_runs)
         if has_run:
             logger.info("任务 %s 今天的 %s 时段已成功执行，跳过重复触发。", job_id, schedule_type)
             if run_id is not None:
@@ -471,15 +474,15 @@ def _send_dingtalk_notification(
                 db_webhook = decrypt_secret(db_webhook)
             except Exception:
                 pass
-        webhook = db_webhook or settings.dingtalk_webhook
+        webhook = db_webhook
         db_secret = get_system_setting("dingtalk_secret", "")
         if db_secret:
             try:
                 db_secret = decrypt_secret(db_secret)
             except Exception:
                 pass
-        secret = db_secret or settings.dingtalk_secret
-        keyword = get_system_setting("dingtalk_keyword", "") or settings.dingtalk_keyword
+        secret = db_secret
+        keyword = get_system_setting("dingtalk_keyword", "")
         emoji_enabled = get_system_setting("dingtalk_emoji_enabled", "0") == "1"
 
     if not webhook:

@@ -72,19 +72,6 @@ class BrowserSession:
             logger.debug("关闭浏览器失败", exc_info=True)
 
 
-def resolve_env_placeholders(text: str) -> str:
-    if not text:
-        return text
-    def replace_match(match):
-        var_name = match.group(1)
-        val = os.getenv(var_name)
-        if val is not None:
-            return val
-        return match.group(0)
-    return re.sub(r"\{([A-Za-z0-9_]+)\}", replace_match, text)
-
-
-
 def capture_item(
     item: dict[str, Any],
     job: dict[str, Any],
@@ -389,7 +376,7 @@ def _capture_once(
     output_path = unique_artifact_path(screenshot_dir, stem, ".png")
 
     raw_url = str(item["url"])
-    resolved_url = resolve_env_placeholders(raw_url)
+    resolved_url = raw_url
 
     capture_mode = str(item.get("capture_mode") or "viewport")
     if is_real_capture and capture_mode == "full_page":
@@ -629,7 +616,7 @@ def _legacy_storage_state_path(auth_profile: dict[str, Any] | None) -> Path | No
     if auth_profile.get("auth_type") in {"form", "state"}:
         name = safe_name(str(auth_profile.get("name") or f"auth_{auth_profile['id']}"))
         raw_login_url = str(auth_profile.get("login_url") or "").strip()
-        login_url = resolve_env_placeholders(raw_login_url)
+        login_url = raw_login_url
         if login_url:
             from urllib.parse import urlparse
             parsed = urlparse(login_url)
@@ -644,7 +631,7 @@ def _is_on_login_page(page: Page, auth_profile: dict[str, Any] | None) -> bool:
     current_url = str(page.url).lower()
 
     raw_login_url = str(auth_profile.get("login_url") or "").strip() if auth_profile else ""
-    login_url = resolve_env_placeholders(raw_login_url).strip().lower()
+    login_url = raw_login_url.lower()
     if login_url:
         from urllib.parse import urlsplit
 
@@ -744,7 +731,7 @@ def _ensure_logged_in(
         return
 
     raw_login_url = str(auth_profile.get("login_url") or "").strip()
-    login_url = resolve_env_placeholders(raw_login_url)
+    login_url = raw_login_url
     
     creds = resolve_auth_credential(auth_profile)
     username = creds["username"]
@@ -1184,9 +1171,6 @@ def _configured_watermark_options(item: dict[str, Any]) -> dict[str, Any] | None
 
 
 def _taskbar_template_paths() -> list[Path]:
-    configured = os.getenv("TASKBAR_TEMPLATE_PATH", "").strip()
-    if configured:
-        return [Path(configured).resolve()]
     return [(TASKBAR_TEMPLATE_DIR / name).resolve() for name in TASKBAR_TEMPLATE_NAMES if (TASKBAR_TEMPLATE_DIR / name).exists()]
 
 
@@ -1278,7 +1262,6 @@ def _taskbar_now() -> datetime:
 
 
 def _taskbar_font_paths() -> list[Path]:
-    configured = os.getenv("TASKBAR_CLOCK_FONT_PATH", "").strip()
     paths = [
         settings.data_dir / "fonts" / "msyh.ttc",
         Path(__file__).resolve().parent / "static" / "fonts" / "msyh.ttc",
@@ -1287,8 +1270,6 @@ def _taskbar_font_paths() -> list[Path]:
         Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     ]
-    if configured:
-        paths.insert(0, Path(configured))
     return paths
 
 
@@ -1893,7 +1874,7 @@ def test_auth_profile_login(auth_profile_id: int) -> dict[str, Any]:
     creds = resolve_auth_credential(auth_profile)
     username = creds["username"]
     password = creds["password"]
-    login_url = resolve_env_placeholders(str(auth_profile.get("login_url") or "").strip())
+    login_url = str(auth_profile.get("login_url") or "").strip()
     
     if not login_url:
         return {"success": False, "message": "登录 URL 不能为空"}

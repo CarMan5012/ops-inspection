@@ -6,11 +6,11 @@ import base64
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.auth import COOKIE_NAME, check_password, create_idle_token, get_session_ttl_seconds, renew_idle_session, require_login, verify_token
+from app.auth import COOKIE_NAME, admin_username, check_password, create_idle_token, get_session_ttl_seconds, renew_idle_session, require_login, verify_token
 from app.db import init_db, sqlite3 as db_sqlite3
 from app.repository import (
     dashboard_data,
@@ -62,6 +62,8 @@ from app.taskbar_templates import (
 from app.openapi import configure_openapi
 from app.login_crypto import LoginPayloadError, decrypt_login_payload, get_login_public_jwk
 from app.login_rate_limit import consume_login_attempt, clear_login_attempts
+from app.installation import change_admin_password, change_admin_username, complete_setup, ensure_setup_code, installation_state, verify_setup_code
+from app.access_context import cookie_path, normalize_access_context, public_api_prefix, public_base_path
 import os
 import logging
 import sys
@@ -69,9 +71,8 @@ from logging.handlers import RotatingFileHandler
 from app.logging_config import AppLogFormatter, is_color_supported
 
 
-# 获取并规范化 LOG_LEVEL
-log_level_str = os.getenv("LOG_LEVEL", "INFO").upper().strip()
-log_level = getattr(logging, log_level_str, logging.INFO)
+log_level_str = "INFO"
+log_level = logging.INFO
 
 app_logger = logging.getLogger("app")
 app_logger.setLevel(log_level)
@@ -118,6 +119,27 @@ configure_openapi(app, settings.api_prefix, settings.app_name)
 
 @app.middleware("http")
 async def csrf_protect_middleware(request: Request, call_next):
+    external_path = request.scope["path"]
+    state = installation_state()
+    base = public_base_path()
+    if state == "pending":
+        if external_path == "/":
+            return RedirectResponse("/setup", status_code=303)
+        if external_path not in {"/setup", "/setup/verify-code"} and not external_path.startswith("/static/"):
+            return Response(status_code=404)
+        internal_path = settings.frontend_base_path + external_path
+    else:
+        if external_path == "/" and base:
+            return RedirectResponse(base + "/", status_code=303)
+        if base and external_path == base:
+            return RedirectResponse(base + "/", status_code=303)
+        if base and not external_path.startswith(base + "/"):
+            return Response(status_code=404)
+        relative_path = external_path[len(base):] if base else external_path
+        internal_path = settings.frontend_base_path + relative_path
+    request.scope["path"] = internal_path
+    request.scope["raw_path"] = internal_path.encode("utf-8")
+
     # 豁免登出接口，防止由于会话超时、Token 丢失导致登出操作被 CSRF 403 拦截，确保用户能顺利退回登录页
     path = request.url.path
     logout_path = settings.frontend_base_path + "/logout"
@@ -210,7 +232,7 @@ async def csrf_protect_middleware(request: Request, call_next):
                 httponly=False,
                 samesite="lax",
                 secure=is_secure,
-                path=settings.frontend_base_path,
+                path=cookie_path(),
                 max_age=get_session_ttl_seconds(),
             )
 
@@ -241,8 +263,8 @@ def get_root_logo():
 
 
 def url_for_frontend(path: str) -> str:
-    base = settings.frontend_base_path
-    if base == "/":
+    base = public_base_path()
+    if not base:
         if not path.startswith("/"):
             return "/" + path
         return path
@@ -257,6 +279,38 @@ def url_for_frontend(path: str) -> str:
 
 def frontend_redirect(path: str, status_code: int = 303) -> RedirectResponse:
     return RedirectResponse(url_for_frontend(path), status_code=status_code)
+
+
+def display_name() -> str:
+    return get_system_setting("app_name", settings.app_name).strip() or settings.app_name
+
+
+def system_preferences() -> dict[str, str]:
+    return {
+        "app_name": display_name(),
+        "admin_username": admin_username(),
+        "access_context": public_base_path(),
+        "holiday_primary_url": get_system_setting("holiday_primary_url", settings.holiday_primary_url),
+        "holiday_backup_url": get_system_setting("holiday_backup_url", settings.holiday_backup_url),
+    }
+
+
+def validate_holiday_url(value: str) -> str:
+    from urllib.parse import urlsplit
+
+    value = value.strip()
+    if not value or len(value) > 500 or value.count("{year}") != 1:
+        raise HTTPException(status_code=400, detail="节假日地址必须包含一个 {year} 占位符")
+    if "{" in value.replace("{year}", "") or "}" in value.replace("{year}", ""):
+        raise HTTPException(status_code=400, detail="节假日地址包含无效占位符")
+    try:
+        parts = urlsplit(value)
+        valid = parts.scheme in {"http", "https"} and bool(parts.hostname) and not parts.username and not parts.password and not parts.fragment
+    except ValueError:
+        valid = False
+    if not valid:
+        raise HTTPException(status_code=400, detail="节假日地址必须是有效的 HTTP 或 HTTPS URL")
+    return value
 
 
 templates.env.globals["url_for_frontend"] = url_for_frontend
@@ -523,6 +577,10 @@ def _ensure_chrome_policies() -> None:
 def on_startup() -> None:
     _ensure_chrome_policies()
     init_db()
+    app.title = display_name()
+    setup_code = ensure_setup_code()
+    if setup_code:
+        print(f"SETUP_CODE={setup_code}", flush=True)
     try:
         recovered = recover_interrupted_runs(include_deleted_jobs=True, queued_grace_seconds=0)
         if recovered:
@@ -537,8 +595,100 @@ def on_shutdown() -> None:
     shutdown_scheduler()
 
 
+@frontend_router.get("/setup", response_class=HTMLResponse)
+def setup_page(request: Request) -> Response:
+    if installation_state() != "pending":
+        return frontend_redirect("/login")
+    import secrets
+    import shlex
+    import socket
+
+    csrf_token = secrets.token_urlsafe(32)
+    log_target = shlex.quote(socket.gethostname()) if Path("/.dockerenv").exists() else "<容器名或ID>"
+    response = templates.TemplateResponse(
+        request,
+        "setup.html",
+        {"request": request, "csrf_token": csrf_token,
+         "error": request.query_params.get("error", ""),
+         "default_holiday_primary_url": settings.holiday_primary_url,
+         "default_holiday_backup_url": settings.holiday_backup_url,
+         "setup_log_command": f"docker logs {log_target} 2>&1 | grep '^SETUP_CODE='",
+         "login_logo_data_uri": LOGIN_LOGO_DATA_URI},
+    )
+    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    response.set_cookie("csrf_token", csrf_token, httponly=False, samesite="lax",
+                        secure=is_secure, path="/",
+                        max_age=get_session_ttl_seconds())
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@frontend_router.post("/setup/verify-code")
+def setup_verify_code(request: Request, setup_code: str = Form("")) -> dict[str, bool]:
+    client_host = request.client.host if request.client else None
+    retry_after = consume_login_attempt(client_host)
+    if retry_after:
+        raise HTTPException(status_code=429, detail="尝试次数过多，请稍后重试", headers={"Retry-After": str(retry_after)})
+    if not verify_setup_code(setup_code.strip()):
+        raise HTTPException(status_code=400, detail="初始化码不正确")
+    return {"ok": True}
+
+
+@frontend_router.post("/setup")
+def setup_submit(
+    request: Request,
+    username: str = Form(""),
+    password: str = Form(""),
+    password_confirm: str = Form(""),
+    setup_code: str = Form(""),
+    app_name: str = Form("运维巡检平台"),
+    access_context: str = Form(""),
+    holiday_primary_url: str = Form(""),
+    holiday_backup_url: str = Form(""),
+) -> RedirectResponse:
+    import re
+
+    if installation_state() != "pending":
+        return frontend_redirect("/login")
+    client_host = request.client.host if request.client else None
+    retry_after = consume_login_attempt(client_host)
+    if retry_after:
+        response = frontend_redirect("/setup?error=rate")
+        response.headers["Retry-After"] = str(retry_after)
+        return response
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
+        return frontend_redirect("/setup?error=username")
+    if len(password) < 12 or len(password) > 128 or password != password_confirm:
+        return frontend_redirect("/setup?error=password")
+    name = app_name.strip()
+    if not name or len(name) > 40 or any(ord(char) < 32 for char in name):
+        return frontend_redirect("/setup?error=app_name")
+    try:
+        access_context = normalize_access_context(access_context)
+    except ValueError:
+        return frontend_redirect("/setup?error=access_context")
+    try:
+        primary = validate_holiday_url(holiday_primary_url or settings.holiday_primary_url)
+        backup = validate_holiday_url(holiday_backup_url or settings.holiday_backup_url)
+    except HTTPException:
+        return frontend_redirect("/setup?error=holiday_url")
+    if not complete_setup(username, password, setup_code.strip(), preferences={
+        "app_name": name,
+        "access_context": access_context,
+        "holiday_primary_url": primary,
+        "holiday_backup_url": backup,
+    }):
+        return frontend_redirect("/setup?error=code")
+    clear_login_attempts(client_host)
+    app.title = name
+    app.openapi_schema = None
+    return frontend_redirect("/login")
+
+
 @frontend_router.get("/login", response_class=HTMLResponse)
-def login_page(request: Request) -> HTMLResponse:
+def login_page(request: Request) -> Response:
+    if installation_state() == "pending":
+        return frontend_redirect("/setup")
     security = security_settings()
     
     # 每次渲染登录页面时，主动生成并下发一个新的强随机 csrf_token，确保页面表单与 Cookie 状态保持一致
@@ -546,6 +696,7 @@ def login_page(request: Request) -> HTMLResponse:
     csrf_token = secrets.token_urlsafe(32)
     
     response = templates.TemplateResponse(
+        request,
         "login.html",
         {
             "request": request,
@@ -553,13 +704,19 @@ def login_page(request: Request) -> HTMLResponse:
             "mfa_enabled": security["mfa_enabled"],
             "login_public_key": get_login_public_jwk(),
             "login_logo_data_uri": LOGIN_LOGO_DATA_URI,
+            "app_name": display_name(),
             "csrf_token": csrf_token,
         },
     )
     
     # 动态识别请求协议，自适应设置 secure 属性
     is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
-    cookie_path = settings.frontend_base_path
+    current_cookie_path = cookie_path()
+    # The setup form uses a root-scoped CSRF cookie. After choosing /ops (or
+    # another context), keeping it would send two cookies with this name and
+    # Starlette could read the stale root value during the first login.
+    if current_cookie_path != "/":
+        response.delete_cookie("csrf_token", path="/")
     
     response.set_cookie(
         "csrf_token",
@@ -567,14 +724,14 @@ def login_page(request: Request) -> HTMLResponse:
         httponly=False,
         samesite="lax",
         secure=is_secure,
-        path=cookie_path,
+        path=current_cookie_path,
         max_age=get_session_ttl_seconds(),
     )
     
     # 检查请求中是否带有旧的且已经失效的会话 Cookie。如果是，主动从浏览器中清理它，避免干扰
     token = request.cookies.get(COOKIE_NAME)
     if token and not verify_token(token):
-        response.delete_cookie(COOKIE_NAME, path=cookie_path)
+        response.delete_cookie(COOKIE_NAME, path=current_cookie_path)
         
     # 添加防缓存头部，避免浏览器或代理缓存登录页面
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -589,6 +746,8 @@ def login(
     request: Request,
     login_payload: str = Form(""),
 ) -> RedirectResponse:
+    if installation_state() == "pending":
+        return frontend_redirect("/setup")
     client_host = request.client.host if request.client else None
     retry_after = consume_login_attempt(client_host)
     if retry_after:
@@ -615,7 +774,7 @@ def login(
     clear_login_attempts(client_host)
     response = frontend_redirect("/")
     is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
-    cookie_path = settings.frontend_base_path
+    current_cookie_path = cookie_path()
     import secrets
     csrf_token = secrets.token_urlsafe(32)
     response.set_cookie(
@@ -624,7 +783,7 @@ def login(
         httponly=False,
         samesite="lax",
         secure=is_secure,
-        path=cookie_path,
+        path=current_cookie_path,
         max_age=get_session_ttl_seconds(),
     )
     response.set_cookie(
@@ -633,7 +792,7 @@ def login(
         httponly=True,
         samesite="lax",
         secure=is_secure,
-        path=cookie_path,
+        path=current_cookie_path,
         max_age=get_session_ttl_seconds(),
     )
     # 添加防缓存头部，防止代理缓存登录状态
@@ -650,9 +809,9 @@ def logout(request: Request) -> RedirectResponse:
         from app.auth import revoke_token
         revoke_token(token)
     response = frontend_redirect("/login")
-    cookie_path = settings.frontend_base_path
-    response.delete_cookie(COOKIE_NAME, path=cookie_path)
-    response.delete_cookie("csrf_token", path=cookie_path)
+    current_cookie_path = cookie_path()
+    response.delete_cookie(COOKIE_NAME, path=current_cookie_path)
+    response.delete_cookie("csrf_token", path=current_cookie_path)
     # 添加防缓存头部
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
@@ -663,9 +822,9 @@ def logout(request: Request) -> RedirectResponse:
 @frontend_router.get("/app-config.json")
 def get_app_config() -> dict[str, str]:
     return {
-        "apiBase": settings.api_prefix,
-        "frontendBase": settings.frontend_base_path,
-        "artifactBase": "/artifact"
+        "apiBase": public_api_prefix(),
+        "frontendBase": public_base_path() or "/",
+        "artifactBase": url_for_frontend("artifact")
     }
 
 
@@ -724,14 +883,21 @@ def require_swagger_access(request: Request) -> None:
 
 @frontend_router.get("/openapi.json", include_in_schema=False)
 def openapi_json(_: None = Depends(require_swagger_access)) -> dict[str, Any]:
-    return app.openapi()
+    from copy import deepcopy
+
+    schema = deepcopy(app.openapi())
+    schema["paths"] = {
+        public_api_prefix() + path[len(settings.api_prefix):]: item
+        for path, item in schema["paths"].items()
+    }
+    return schema
 
 
 @frontend_router.get("/docs", include_in_schema=False)
 def swagger_docs(_: None = Depends(require_swagger_access)) -> HTMLResponse:
     return get_swagger_ui_html(
         openapi_url=url_for_frontend("/openapi.json"),
-        title=f"{settings.app_name} API 文档",
+        title=f"{display_name()} API 文档",
     )
 
 
@@ -739,7 +905,7 @@ def swagger_docs(_: None = Depends(require_swagger_access)) -> HTMLResponse:
 def redoc_docs(_: None = Depends(require_swagger_access)) -> HTMLResponse:
     return get_redoc_html(
         openapi_url=url_for_frontend("/openapi.json"),
-        title=f"{settings.app_name} API 文档",
+        title=f"{display_name()} API 文档",
     )
 
 
@@ -878,6 +1044,84 @@ def api_get_security_settings() -> dict[str, Any]:
     return data
 
 
+@api_router.get("/system-preferences", dependencies=[Depends(require_api_login)])
+def api_get_system_preferences() -> dict[str, str]:
+    return system_preferences()
+
+
+@api_router.put("/system-preferences", dependencies=[Depends(require_api_login)])
+def api_save_system_preferences(payload: dict[str, Any], background_tasks: BackgroundTasks,
+                                request: Request, response: Response) -> dict[str, Any]:
+    name = text_value(payload, "app_name", "").strip()
+    if not name or len(name) > 40 or any(ord(char) < 32 for char in name):
+        raise HTTPException(status_code=400, detail="系统名称需为 1–40 个可见字符")
+    primary = validate_holiday_url(text_value(payload, "holiday_primary_url", ""))
+    backup = validate_holiday_url(text_value(payload, "holiday_backup_url", ""))
+    old_cookie_path = cookie_path()
+    try:
+        access_context = normalize_access_context(text_value(payload, "access_context", public_base_path()))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from app.db import connect
+    with connect() as conn:
+        for key, value in (("app_name", name), ("access_context", access_context),
+                           ("holiday_primary_url", primary), ("holiday_backup_url", backup)):
+            conn.execute(
+                "REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (key, value),
+            )
+    from app.holiday_calendar import refresh_current_year
+    background_tasks.add_task(refresh_current_year)
+    if old_cookie_path != cookie_path():
+        is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+        token = request.cookies.get(COOKIE_NAME)
+        csrf_token = request.cookies.get("csrf_token")
+        response.delete_cookie(COOKIE_NAME, path=old_cookie_path)
+        response.delete_cookie("csrf_token", path=old_cookie_path)
+        if token:
+            response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", secure=is_secure,
+                                path=cookie_path(), max_age=get_session_ttl_seconds())
+        if csrf_token:
+            response.set_cookie("csrf_token", csrf_token, httponly=False, samesite="lax", secure=is_secure,
+                                path=cookie_path(), max_age=get_session_ttl_seconds())
+    app.title = name
+    app.openapi_schema = None
+    return {"ok": True, **system_preferences()}
+
+
+@api_router.put("/admin/username", dependencies=[Depends(require_api_login)])
+def api_change_admin_username(request: Request, payload: dict[str, Any]) -> dict[str, bool]:
+    import re
+
+    username = text_value(payload, "username", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username) or username == admin_username():
+        raise HTTPException(status_code=400, detail="新账号需为 3–32 位字母、数字、下划线、点或连字符，且不能与旧账号相同")
+    client_host = request.client.host if request.client else None
+    retry_after = consume_login_attempt(client_host)
+    if retry_after:
+        raise HTTPException(status_code=429, detail="尝试次数过多，请稍后重试", headers={"Retry-After": str(retry_after)})
+    if not change_admin_username(text_value(payload, "current_password", ""), username):
+        raise HTTPException(status_code=400, detail="当前密码不正确")
+    clear_login_attempts(client_host)
+    return {"ok": True}
+
+
+@api_router.put("/admin/password", dependencies=[Depends(require_api_login)])
+def api_change_admin_password(request: Request, payload: dict[str, Any]) -> dict[str, bool]:
+    current_password = text_value(payload, "current_password", "")
+    new_password = text_value(payload, "new_password", "")
+    if len(new_password) < 12 or len(new_password) > 128 or new_password == current_password:
+        raise HTTPException(status_code=400, detail="新密码需为 12–128 位，且不能与旧密码相同")
+    client_host = request.client.host if request.client else None
+    retry_after = consume_login_attempt(client_host)
+    if retry_after:
+        raise HTTPException(status_code=429, detail="尝试次数过多，请稍后重试", headers={"Retry-After": str(retry_after)})
+    if not change_admin_password(current_password, new_password):
+        raise HTTPException(status_code=400, detail="当前密码不正确")
+    clear_login_attempts(client_host)
+    return {"ok": True}
+
+
 @api_router.put("/security-settings", dependencies=[Depends(require_api_login)])
 def api_update_security_settings(payload: dict[str, Any]) -> dict[str, Any]:
     current_settings = security_settings()
@@ -952,7 +1196,7 @@ def api_get_current_mfa_qr(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="未配置两步验证密钥")
     if not verify_totp_code(secret, text_value(payload, "mfa_current_code", "")):
         raise HTTPException(status_code=400, detail="当前 MFA 验证码不正确")
-    otpauth_url = build_totp_uri(secret, settings.admin_username, settings.app_name)
+    otpauth_url = build_totp_uri(secret, admin_username(), display_name())
     return {
         "ok": True,
         "mfa_secret": secret,
@@ -969,7 +1213,7 @@ def api_generate_mfa_secret() -> dict[str, Any]:
     secret = generate_totp_secret()
     set_system_setting(MFA_PENDING_SECRET_KEY, encrypt_secret(secret))
     set_system_setting(MFA_PENDING_LAST_SLICE_KEY, "")
-    otpauth_url = build_totp_uri(secret, settings.admin_username, settings.app_name)
+    otpauth_url = build_totp_uri(secret, admin_username(), display_name())
     return {
         "ok": True,
         "mfa_enabled": security_settings()["mfa_enabled"],
@@ -1099,7 +1343,7 @@ def api_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(status_code=400, detail=str(e))
     elif schedule_mode == "calendar":
         try:
-            config = normalize_schedule(payload)
+            config = normalize_schedule(payload, enforce_daily_slots=True)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         cron_expr = ""
@@ -1208,6 +1452,16 @@ def api_item_payload(payload: dict[str, Any], job_id: int) -> dict[str, Any]:
     }
 
 
+def assign_item_report_section(data: dict[str, Any], job: dict[str, Any], template_sections: list[str] | None = None) -> None:
+    """Auto layout follows the screenshot name; templates use their own headings."""
+    if not job.get("template_id"):
+        data["section"] = data["name"]
+        return
+    sections = template_sections if template_sections is not None else job_template_sections(job)
+    if data.get("section") not in sections:
+        raise HTTPException(status_code=400, detail="请选择 Word 模板中的报告章节")
+
+
 def api_auth_payload(payload: dict[str, Any]) -> dict[str, Any]:
     username = text_value(payload, "username_value", text_value(payload, "username", ""))
     return {
@@ -1276,7 +1530,7 @@ def enrich_run(run: dict[str, Any]) -> dict[str, Any]:
 
 @api_router.get("/session", dependencies=[Depends(require_api_login)])
 def api_session() -> dict[str, Any]:
-    return {"authenticated": True, "app_name": settings.app_name, "idle_timeout_seconds": get_session_ttl_seconds()}
+    return {"authenticated": True, "app_name": display_name(), "idle_timeout_seconds": get_session_ttl_seconds()}
 
 
 @api_router.get("/ui-config", dependencies=[Depends(require_api_login)])
@@ -1292,7 +1546,7 @@ def api_renew_session(request: Request, response: Response) -> dict[str, Any]:
             raise HTTPException(status_code=401, detail="登录已过期")
     else:
         # 旧版固定时长令牌在首次真实操作时迁移为闲置会话。
-        token = create_idle_token(settings.admin_username)
+        token = create_idle_token(admin_username())
     is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
     for name, value, http_only in (
         (COOKIE_NAME, token, True),
@@ -1300,7 +1554,7 @@ def api_renew_session(request: Request, response: Response) -> dict[str, Any]:
     ):
         response.set_cookie(
             name, value, httponly=http_only, samesite="lax", secure=is_secure,
-            path=settings.frontend_base_path, max_age=get_session_ttl_seconds(),
+            path=cookie_path(), max_age=get_session_ttl_seconds(),
         )
     response.headers["Cache-Control"] = "no-store"
     return {"ok": True, "idle_timeout_seconds": get_session_ttl_seconds()}
@@ -1311,7 +1565,7 @@ def api_dashboard() -> dict[str, Any]:
     jobs, raw_runs, auth_profiles = dashboard_data()
     runs = [enrich_run(run) for run in raw_runs]
     return {
-        "app_name": settings.app_name,
+        "app_name": display_name(),
         "jobs": public_jobs(jobs),
         "runs": runs,
         "metrics": dashboard_metrics(jobs, runs),
@@ -1374,7 +1628,7 @@ def api_delete_report_template(template_id: int) -> dict[str, Any]:
 @api_router.get("/taskbar-templates", dependencies=[Depends(require_api_login)])
 def api_list_taskbar_templates() -> dict[str, Any]:
     return {"templates": [
-        {**template, "image_url": f"{settings.api_prefix}/taskbar-templates/{template['key']}/image"}
+        {**template, "image_url": f"{public_api_prefix()}/taskbar-templates/{template['key']}/image"}
         for template in all_taskbar_templates()
     ]}
 
@@ -1578,8 +1832,9 @@ def queue_inspection_job(job: dict[str, Any], background_tasks: BackgroundTasks)
 
 @api_router.post("/jobs/{job_id}/items", dependencies=[Depends(require_api_login)])
 def api_create_item(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-    require_value(get_job(job_id), "任务不存在")
+    job = require_value(get_job(job_id), "任务不存在")
     data = api_item_payload(payload, job_id)
+    assign_item_report_section(data, job)
     validate_item_connection(data)
     item_id = save_screenshot_item(data)
     return {"ok": True, "item": get_screenshot_item(item_id)}
@@ -1589,7 +1844,8 @@ def api_create_item(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
 def api_create_items_batch(job_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     from urllib.parse import urlsplit
 
-    require_value(get_job(job_id), "任务不存在")
+    job = require_value(get_job(job_id), "任务不存在")
+    template_sections = job_template_sections(job) if job.get("template_id") else []
     rows = payload.get("items")
     if not isinstance(rows, list) or not 1 <= len(rows) <= 100:
         raise HTTPException(status_code=400, detail="请添加 1 到 100 个页面")
@@ -1631,6 +1887,7 @@ def api_create_items_batch(job_id: int, payload: dict[str, Any]) -> dict[str, An
             "wait_seconds": 3,
             "sort_order": 100 + index,
         }, job_id)
+        assign_item_report_section(data, job, template_sections)
         validated.append(data)
     ids = save_screenshot_items_batch(validated)
     return {"ok": True, "count": len(ids), "item_ids": ids}
@@ -1651,7 +1908,9 @@ def validate_item_connection(data: dict[str, Any]) -> None:
 @api_router.put("/items/{item_id}", dependencies=[Depends(require_api_login)])
 def api_update_item(item_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     current = require_value(get_screenshot_item(item_id), "截图项不存在")
+    job = require_value(get_job(int(current["job_id"])), "任务不存在")
     data = api_item_payload(payload, int(current["job_id"]))
+    assign_item_report_section(data, job)
     validate_item_connection(data)
     save_screenshot_item(data, item_id)
     return {"ok": True, "item": get_screenshot_item(item_id)}
@@ -1698,6 +1957,71 @@ def api_list_runs(page: int = 1, page_size: int = RUN_DEFAULT_PAGE_SIZE) -> dict
     }
 
 
+def _daily_archive_selection(
+    start_date: str | None = None, end_date: str | None = None, months: str | None = None,
+) -> tuple[list[tuple[str, Path, int]], str]:
+    from app.batch_reports import (
+        archive_name_for_months, archive_name_for_range,
+        daily_reports, monthly_reports, parse_months, parse_range,
+    )
+
+    try:
+        if months is not None:
+            if start_date is not None or end_date is not None:
+                raise ValueError("请选择月份或自定义日期，不要同时填写")
+            selected_months = parse_months(months)
+            reports = monthly_reports(selected_months)
+            filename = archive_name_for_months(selected_months)
+        else:
+            if not start_date or not end_date:
+                raise ValueError("请选择开始日期和结束日期")
+            start, end = parse_range(start_date, end_date)
+            reports = daily_reports(start, end)
+            filename = archive_name_for_range(start, end)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if not reports:
+        raise HTTPException(status_code=404, detail="所选月份内没有可下载的日报" if months is not None else "所选日期内没有可下载的日报")
+    return reports, filename
+
+
+@api_router.get("/runs/reports/archive-info", dependencies=[Depends(require_api_login)])
+def api_daily_archive_info(
+    start_date: str | None = None, end_date: str | None = None, months: str | None = None,
+) -> dict[str, Any]:
+    reports, filename = _daily_archive_selection(start_date, end_date, months)
+    return {"count": len(reports), "filename": filename}
+
+
+@api_router.get("/runs/reports/archive", dependencies=[Depends(require_api_login)])
+def api_download_daily_reports(
+    start_date: str | None = None, end_date: str | None = None, months: str | None = None,
+) -> StreamingResponse:
+    from urllib.parse import quote
+    from app.batch_reports import build_archive
+
+    reports, filename = _daily_archive_selection(start_date, end_date, months)
+    archive = build_archive(reports)
+    archive_size = archive.seek(0, 2)
+    archive.seek(0)
+
+    def chunks():
+        try:
+            while chunk := archive.read(1024 * 1024):
+                yield chunk
+        finally:
+            archive.close()
+
+    return StreamingResponse(
+        chunks(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename=inspection-reports.zip; filename*=UTF-8''{quote(filename, safe='')}",
+            "Content-Length": str(archive_size),
+        },
+    )
+
+
 @api_router.get("/runs/{run_id}", dependencies=[Depends(require_api_login)])
 def api_get_run(run_id: int) -> dict[str, Any]:
     run = enrich_run(require_value(get_run(run_id), "运行记录不存在"))
@@ -1741,9 +2065,8 @@ def api_open_prometheus_alerts(run_id: int, result_id: int, source_uid: str) -> 
         raise HTTPException(status_code=404, detail="原截图项已删除，无法查找 Prometheus 地址")
 
     from app.grafana_connections import ConnectionError, _with_login
-    from app.screenshot import resolve_env_placeholders
 
-    location = _dashboard_api_base(resolve_env_placeholders(str(item.get("url") or "")))
+    location = _dashboard_api_base(str(item.get("url") or ""))
     if location is None:
         raise HTTPException(status_code=404, detail="原截图项不是 Grafana 看板")
     base, _ = location
@@ -2048,6 +2371,8 @@ def api_update_periodic_report(report_type: str, payload: dict[str, Any]) -> dic
         if not 1 <= hour <= 12 or not 0 <= minute <= 59 or ampm not in ("am", "pm"):
             raise HTTPException(status_code=400, detail="生成时间超出范围")
         times.append({"ampm": ampm, "hour": hour, "minute": minute})
+    if len({(entry["ampm"], entry["hour"], entry["minute"]) for entry in times}) != len(times):
+        raise HTTPException(status_code=400, detail="生成时间不能重复")
 
     if report_type == "monthly":
         labels = []
@@ -2100,9 +2425,9 @@ def index(request: Request) -> HTMLResponse:
         {
             "request": request,
             "url_for_frontend": url_for_frontend,
-            "api_prefix": settings.api_prefix,
-            "frontend_base_path": settings.frontend_base_path,
-            "app_name": settings.app_name,
+            "api_prefix": public_api_prefix(),
+            "frontend_base_path": public_base_path() or "/",
+            "app_name": display_name(),
             "time_zone": settings.default_timezone,
             "vue_js": entry["file"],
             "vue_css": entry["css"][0],
@@ -2261,7 +2586,8 @@ def new_item(request: Request, job_id: int) -> HTMLResponse:
             "job_id": job_id,
             "auth_profiles": list_auth_profiles(),
             "template_sections": job_template_sections(job),
-            "api_prefix": settings.api_prefix,
+            "template_selected": bool(job.get("template_id")),
+            "api_prefix": public_api_prefix(),
             "preview_browser_width": job.get("browser_width") or 3840,
             "preview_browser_height": job.get("browser_height") or 2160,
             "action": url_for_frontend(f"/jobs/{job_id}/items/new"),
@@ -2271,7 +2597,9 @@ def new_item(request: Request, job_id: int) -> HTMLResponse:
 
 @frontend_router.post("/jobs/{job_id}/items/new", dependencies=[Depends(require_login)])
 def create_item(job_id: int, form: dict[str, Any] = Depends(item_form)) -> RedirectResponse:
+    job = require_value(get_job(job_id), "任务不存在")
     form["job_id"] = job_id
+    assign_item_report_section(form, job)
     item_id = save_screenshot_item(form)
     return frontend_redirect(f"/jobs/{job_id}")
 
@@ -2285,12 +2613,13 @@ def edit_item(request: Request, item_id: int) -> HTMLResponse:
         {
             "request": request,
             "item": item,
-            "api_prefix": settings.api_prefix,
+            "api_prefix": public_api_prefix(),
             "preview_browser_width": job.get("browser_width") or 3840,
             "preview_browser_height": job.get("browser_height") or 2160,
             "job_id": item["job_id"],
             "auth_profiles": list_auth_profiles(),
             "template_sections": job_template_sections(job),
+            "template_selected": bool(job.get("template_id")),
             "action": url_for_frontend(f"/items/{item_id}/edit"),
         },
     )
@@ -2299,8 +2628,10 @@ def edit_item(request: Request, item_id: int) -> HTMLResponse:
 @frontend_router.post("/items/{item_id}/edit", dependencies=[Depends(require_login)])
 def update_item(item_id: int, form: dict[str, Any] = Depends(item_form)) -> RedirectResponse:
     current = require_value(get_screenshot_item(item_id), "截图项不存在")
+    job = require_value(get_job(int(current["job_id"])), "任务不存在")
     form["job_id"] = current["job_id"]
     form["taskbar_template_key"] = current.get("taskbar_template_key") or ""
+    assign_item_report_section(form, job)
     save_screenshot_item(form, item_id)
     return frontend_redirect(f"/jobs/{current['job_id']}")
 
@@ -2764,6 +3095,7 @@ def delete_periodic_report_run_route(run_id: int) -> RedirectResponse:
 @api_router.get("/storage", dependencies=[Depends(require_api_login)])
 def api_get_storage() -> dict[str, Any]:
     from app.cleanup import get_storage_usage
+    from app.storage_alert import alert_settings, disk_status
     from app.db import connect
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
@@ -2792,10 +3124,35 @@ def api_get_storage() -> dict[str, Any]:
     current_month_start = datetime.now(ZoneInfo(settings.default_timezone)).replace(day=1)
     return {
         "usage": usage,
+        "disk": disk_status(),
+        "disk_alert": alert_settings(),
         "config": config,
         "latest_run": latest_run,
         "latest_completed_month": (current_month_start - timedelta(days=1)).strftime("%Y-%m"),
     }
+
+
+@api_router.put("/storage/disk-alert", dependencies=[Depends(require_api_login)])
+def api_update_disk_alert(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.storage_alert import ENABLED_KEY, PROFILE_KEY, SENT_KEY, THRESHOLD_KEY, alert_settings
+
+    enabled = bool_value(payload.get("enabled"), False)
+    try:
+        threshold = int(payload.get("threshold", 80))
+        profile_id = int(payload.get("profile_id") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="告警阈值或钉钉机器人无效") from exc
+    if not 1 <= threshold <= 99:
+        raise HTTPException(status_code=400, detail="告警阈值需为 1–99%")
+    if enabled and (not profile_id or not get_dingtalk_profile(profile_id)):
+        raise HTTPException(status_code=400, detail="请先选择已配置的钉钉机器人")
+    previous = alert_settings()
+    set_system_setting(ENABLED_KEY, "1" if enabled else "0")
+    set_system_setting(THRESHOLD_KEY, str(threshold))
+    set_system_setting(PROFILE_KEY, str(profile_id))
+    if previous != {"enabled": enabled, "threshold": threshold, "profile_id": profile_id}:
+        set_system_setting(SENT_KEY, "0")
+    return {"ok": True, "disk_alert": alert_settings()}
 
 
 @api_router.put("/storage/settings", dependencies=[Depends(require_api_login)])

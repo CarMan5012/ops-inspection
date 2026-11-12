@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { KeyRound, Pencil, Trash2, ShieldCheck, ArrowLeft } from '../icons'
 import { api, type Row } from '../api'
 import { attempt, confirmModal, notify } from '../ui'
+import PasswordInput from '../components/PasswordInput.vue'
 
 const profiles = ref<Row[]>([])
 const editing = ref(false)
@@ -72,7 +73,7 @@ onMounted(load)
     <div class="editor-top"><button class="back-link back-button" @click="editing = false"><ArrowLeft :size="16" />返回</button></div>
     <section class="page-intro editor-intro"><div><h1>{{ currentId ? '编辑' : '新增' }}认证</h1></div></section>
     <form class="editor-layout" @submit.prevent="save"><div class="editor-main">
-      <section class="form-section"><div class="form-section-head"><div><h2>基本信息</h2></div></div><div class="form-grid"><label class="field"><span>配置名称 <b>*</b></span><input v-model="form.name" required placeholder="例如：生产 Grafana" /></label><label class="field"><span>认证方式</span><select v-model="form.auth_type"><option value="form">网页登录</option><option value="none">无需登录</option></select></label><label class="field field-full"><span>登录地址</span><input v-model="form.login_url" type="url" placeholder="https://grafana.example.com/login" /><small>Grafana 填写登录页地址；同一网站的不同账号分别建立连接。</small></label><label class="field"><span>用户名</span><input v-model="form.username_value" autocomplete="username" /></label><label class="field"><span>密码</span><input v-model="form.password" type="password" autocomplete="new-password" :placeholder="currentId ? '留空则保持原密码' : '请输入密码'" /></label></div></section>
+      <section class="form-section"><div class="form-section-head"><div><h2>基本信息</h2></div></div><div class="form-grid"><label class="field"><span>配置名称 <b>*</b></span><input v-model="form.name" required placeholder="例如：生产 Grafana" /></label><label class="field"><span>认证方式</span><select v-model="form.auth_type"><option value="form">网页登录</option><option value="none">无需登录</option></select></label><label class="field field-full"><span>登录地址</span><input v-model="form.login_url" type="url" placeholder="https://grafana.example.com/login" /><small>Grafana 填写登录页地址；同一网站的不同账号分别建立连接。</small></label><label class="field"><span>用户名</span><input v-model="form.username_value" autocomplete="username" /></label><label class="field"><span>密码</span><PasswordInput v-model="form.password" autocomplete="new-password" :placeholder="currentId ? '留空则保持原密码' : '请输入密码'" /></label></div></section>
       <section class="form-section"><div class="form-section-head"><div><h2>登录页面元素</h2><p>目标网站使用特殊登录表单时再填写。</p></div></div><div class="form-grid"><label class="field"><span>用户名输入框</span><input v-model="form.username_selector" placeholder="自动识别" /></label><label class="field"><span>密码输入框</span><input v-model="form.password_selector" placeholder="自动识别" /></label><label class="field"><span>登录按钮</span><input v-model="form.submit_selector" placeholder="自动识别" /></label><label class="field"><span>登录成功标记</span><input v-model="form.success_selector" placeholder="可留空" /></label></div></section>
       <ButtonGroup class="editor-footer"><ActionButton type="button" @click="editing = false" variant="secondary">取消</ActionButton><ActionButton type="submit" :disabled="saving" variant="primary" :loading="saving">保存配置</ActionButton></ButtonGroup>
     </div></form>

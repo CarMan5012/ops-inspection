@@ -543,6 +543,7 @@ def list_report_runs_for_day(job_id: int, current_run_id: int, day: str) -> list
             SELECT * FROM run_records
             WHERE job_id = ? AND id < ?
               AND report_path IS NOT NULL AND report_path != ''
+              AND (schedule_slot IN ('morning', 'afternoon') OR schedule_slot LIKE 'calendar-%')
               AND substr(started_at, 1, 10) IN (?, ?, ?)
             ORDER BY id DESC
             """,

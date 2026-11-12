@@ -102,8 +102,8 @@ def test_same_job_updates_one_daily_report(monkeypatch, tmp_path):
     monkeypatch.setattr(repository, "list_report_runs_for_day", lambda *_args: [previous["run"]] if previous["run"] else [])
     monkeypatch.setattr(repository, "list_screenshot_results", lambda _run_id: [])
     job = {"id": 7, "name": "production", "report_title": "获取标题"}
-    first = {"id": 42, "started_at": "2020-01-01T09:05:00+08:00", "status": "success"}
-    second = {"id": 43, "started_at": "2020-01-01T17:05:00+08:00", "status": "success"}
+    first = {"id": 42, "started_at": "2020-01-01T09:05:00+08:00", "status": "success", "schedule_slot": "calendar-0905"}
+    second = {"id": 43, "started_at": "2020-01-01T17:05:00+08:00", "status": "success", "schedule_slot": "calendar-1705"}
 
     first_path = report.generate_docx(job, first, [])
     previous["run"] = {"id": 42, "started_at": first["started_at"], "report_path": first_path}

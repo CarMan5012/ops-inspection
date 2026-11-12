@@ -75,39 +75,37 @@ playwright install chromium
 # 4. 运行后台服务 (本地调试默认会在数据目录自动创建 app-secret.key)
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
-访问系统：`http://localhost:8000/ops`
+首次访问系统：`http://localhost:8000/`；初始化后使用页面中设置的访问路径前缀。
 
 ---
 
 ## 4. 容器化部署
 
-### 4.1 使用一键运行脚本 (单容器模式)
-系统提供了 [docker-run.sh](docker-run.sh) 脚本，可快速在 Linux 生产服务器上部署。
+### 本地重复测试（Docker Compose）
+
+`compose.local.yml` 只启动应用容器，无需 `.env`。在项目目录运行：
+
+```powershell
+docker compose -f compose.local.yml up -d --build
+docker logs inspection-local 2>&1 | Select-String '^SETUP_CODE='
+```
+
+访问 `http://127.0.0.1:8800/`。后续更新重复执行第一条命令；Compose 管理的数据卷会保留初始化设置和测试数据。若 8800 端口被占用，可修改 `compose.local.yml` 中的主机端口。`docker compose -f compose.local.yml down` 只停止并删除本地容器；仅在确定要清空测试数据时使用 `down -v`。
+
+### 单容器部署（无 `.env`）
+只部署巡检系统。Grafana、Kibana 是外部网站，在登录后通过“网站连接”配置，无需随本系统启动。
 
 ```bash
-# 1. 复制配置文件模板并根据需要更改
-cp .env.example .env
-
-# 2. 构建 Docker 镜像
 docker build -t ops-inspection:latest .
-
-# 3. 运行部署脚本（自动停止旧容器，启动新容器并做安全加固）
-bash docker-run.sh
+docker volume create inspection-data
+docker run -d --name inspection-report --restart unless-stopped \
+  -p 8800:8000 -v inspection-data:/app/data ops-inspection:latest
+docker logs inspection-report 2>&1 | grep '^SETUP_CODE='
 ```
+首次访问 `http://localhost:8800/`，页面会进入分步初始化。输入上述命令获取的一次性码，设置管理员账号、系统名称和访问路径前缀。前缀留空时继续使用根路径；填入 `/ops` 时，完成后跳转到 `/ops/login`。根路径始终可以进入系统。初始化前重启会再次打印同一个码；初始化后该码失效。命名卷包含加密数据库、截图、报告和自动生成的主密钥，必须持久化并备份。端口映射中的 `8800` 可按部署环境调整。
 
-### 4.2 使用 Docker Compose 部署 (多容器模式)
-如果您需要启动系统自带的本地测试 Grafana，可以使用 Docker Compose。
-
-```bash
-# 1. 生成加密主密钥（建议长度 48 字节的随机 Token）
-mkdir -p secrets
-python -c "import secrets; print(secrets.token_urlsafe(48))" > secrets/app_secret_key
-chmod 600 secrets/app_secret_key
-
-# 2. 启动 Compose
-docker compose up -d --build
-```
-访问系统：`http://localhost:8000/ops`
+生产镜像不读取 `.env`；应用配置在页面完成。首次初始化只支持全新数据目录。检测到没有安装记录的旧数据库时，应用会拒绝启动，不会开放初始化入口。
+管理员用户名和密码、系统名称、访问路径前缀、节假日接口地址可在“系统设置”修改；钉钉机器人、网站连接、截图尺寸及任务计划也在页面配置。应用时区固定为北京时间（`Asia/Shanghai`）。容器端口和数据卷属于 Docker 启动参数；加密主密钥由程序在数据卷中自动生成。
 
 ---
 
@@ -115,22 +113,14 @@ docker compose up -d --build
 
 登录接口按 ASGI 服务提供的客户端 IP 限制尝试次数：5 分钟内最多 8 次，超出后暂停 5 分钟；成功登录会清除计数。反向代理部署时，若未配置可信代理转发，限速按代理的连接地址计算。
 
-管理员密码可继续通过 `ADMIN_PASSWORD` 配置，兼容本地测试；需要避免明文密码留在环境变量时，可设置优先级更高的 `ADMIN_PASSWORD_HASH`。生成 scrypt 哈希：
-
-```bash
-python -c "from app.auth import hash_admin_password; import getpass; print(hash_admin_password(getpass.getpass()))"
-```
-
-把输出放入 `.env` 的 `ADMIN_PASSWORD_HASH`。切换哈希配置后，原登录会话会失效，需要重新登录。应用敏感字段的新写入必须使用 `cryptography` 的 Fernet；启动时会把数据库中的旧格式密文转换为 Fernet，浏览器登录状态缓存会在下次读取或重新登录时转换。
+新部署在首次访问时设置管理员密码，只保存 scrypt 哈希。此后可在“设置 → 安全设置”中修改密码；修改后原登录会话失效。应用敏感字段使用 `cryptography` 的 Fernet 加密。
 
 为了保障生产环境下各项凭证（目标系统密码、钉钉密钥）的安全，系统设计了双重密钥体系：
 
-1. **数据库物理加密 (`SQLCIPHER_DB_KEY`)**：
-   * 在启动脚本 [docker-run.sh](docker-run.sh) 中设置，用于开启 SQLCipher 对 SQLite 数据库文件在磁盘上的物理级加密，强防库文件物理泄漏。
-2. **应用敏感字段加密 (`APP_SECRET_KEY`)**：
+1. **数据库物理加密**：默认使用自动生成的应用主密钥作为 SQLCipher 数据库密钥。
+2. **应用敏感字段加密**：
    * 系统的主密钥，用于通过 Fernet/AES 算法在应用层对敏感输入（如登录凭证、钉钉 Token）进行二次加密。
-   * **推荐挂载方案**：将主密钥文件 `secrets/app_secret_key` 单独备份于宿主机，通过只读卷挂载到容器内 `/run/secrets/app_secret_key`。
-   * **自动生成方案**：若不挂载，系统会在持久化目录（宿主机 `/data/ops-inspection/data`）下自动生成 `app-secret.key` 文件。只要该目录不丢失，密钥即保持一致。
+   * 系统在持久化数据目录下自动生成 `app-secret.key` 文件。只要该目录不丢失，密钥即保持一致。
 
 ---
 
@@ -170,12 +160,12 @@ python -c "from app.auth import hash_admin_password; import getpass; print(hash_
 
 ## 7. 持久化数据目录结构
 
-所有生成的报告、运行记录均保存在宿主机的映射目录 `/data/ops-inspection/data` 下，目录结构如下：
+所有生成的报告、运行记录均保存在容器的 `/app/data` 下，并通过 `inspection-data` 命名卷持久化。目录结构如下：
 
 ```text
 data/
   ├── app.db               # 加密过的 SQLite 数据库文件
-  ├── app-secret.key       # 自动生成的解密主密钥文件（仅在未手动挂载密钥时存在）
+  ├── app-secret.key       # 自动生成的解密主密钥文件
   ├── YYYY/               # 按年归档
   │   └── MM/             # 按月归档
   │       ├── DD/         # 当天截图与普通报告
@@ -206,4 +196,4 @@ data/
 
 新建巡检任务可选择每天、周一至周五、指定星期、每月多个日期、工作日或非工作日，并设置多个执行时间。每月所选日期在当月不存在时自动跳过。工作日按国内节假日与调休补班数据判断；周一至周五只按星期判断。系统启动时检查节假日主接口，失败时切换备用接口，此后每天重新检查一次。两个接口都不可用时，页面自动隐藏工作日和非工作日选项；已有任务只在本地缓存能够确认当天类型时执行。旧简单计划会在启动时转换，并在 `data/schedule-migration-backup.json` 留存原规则；无法安全转换的旧规则暂停自动执行，等待在页面重新设置。
 
-默认主接口为 `timor.tech`，备用接口为 `publicapi.xiaoai.me`。如需替换同格式接口，可在 `.env` 中设置 `HOLIDAY_PRIMARY_URL` 和 `HOLIDAY_BACKUP_URL`，使用 `{year}` 作为年份占位符。Vue 图标和页面资源随应用构建打包，访问页面无需连接外部静态资源服务。
+默认主接口为 `timor.tech`，备用接口为 `publicapi.xiaoai.me`。Vue 图标和页面资源随应用构建打包，访问页面无需连接外部静态资源服务。

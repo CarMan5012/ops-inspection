@@ -25,18 +25,18 @@ def test_periodic_zip_respects_selected_contents(monkeypatch, tmp_path, include_
     conn.row_factory = sqlite3.Row
     conn.execute(
         "CREATE TABLE run_records (id INTEGER, job_id INTEGER, job_name TEXT, status TEXT, "
-        "report_path TEXT, started_at TEXT, finished_at TEXT, success_count INTEGER, failed_count INTEGER)"
+        "report_path TEXT, started_at TEXT, finished_at TEXT, success_count INTEGER, failed_count INTEGER, schedule_slot TEXT)"
     )
     conn.execute("CREATE TABLE screenshot_results (run_id INTEGER, item_name TEXT, file_path TEXT, status TEXT)")
     conn.execute(
         "INSERT INTO run_records VALUES (1, 7, '巡检', 'success', ?, '2026-10-10T09:00:00', "
-        "'2026-10-10T09:01:00', 1, 0)",
+        "'2026-10-10T09:01:00', 1, 0, 'calendar-0900')",
         (str(report),),
     )
     conn.execute("INSERT INTO screenshot_results VALUES (1, '图表', ?, 'success')", (str(screenshot),))
     conn.execute(
         "INSERT INTO run_records VALUES (2, 7, '巡检', 'success', ?, '2026-10-10T17:00:00', "
-        "'2026-10-10T17:01:00', 1, 0)",
+        "'2026-10-10T17:01:00', 1, 0, 'calendar-1700')",
         (str(report),),
     )
     conn.execute("INSERT INTO screenshot_results VALUES (2, '下午图表', ?, 'success')", (str(afternoon_screenshot),))

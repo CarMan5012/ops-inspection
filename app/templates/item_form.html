@@ -26,15 +26,17 @@
       页面地址 <span style="color: var(--danger);">*</span>
       <textarea name="url" rows="3" required placeholder="http://localhost:3000/d/xxxxxx">{{ item.url or '' }}</textarea>
     </label>
+    {% if template_selected %}
     <label>
-      报告章节 <span style="color: var(--danger);">*</span>
-      <input name="section" value="{{ item.section or '巡检截图' }}" required list="template-section-options" placeholder="如：1服务器资源">
-      <datalist id="template-section-options">
+      模板章节 <span style="color: var(--danger);">*</span>
+      <select name="section" required>
+        <option value="" disabled {% if item.section not in template_sections %}selected{% endif %}>请选择模板章节</option>
         {% for section in template_sections or [] %}
-        <option value="{{ section }}"></option>
+        <option value="{{ section }}" {% if item.section == section %}selected{% endif %}>{{ section }}</option>
         {% endfor %}
-      </datalist>
+      </select>
     </label>
+    {% endif %}
     <label>
       登录认证
       <select name="auth_profile_id">

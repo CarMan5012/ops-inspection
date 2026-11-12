@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 import tempfile
@@ -221,7 +222,45 @@ def _local_run_time(run: dict[str, Any], local_tz: ZoneInfo) -> datetime:
 
 
 def _run_period(run: dict[str, Any], local_tz: ZoneInfo) -> str:
-    return "上午" if _local_run_time(run, local_tz).hour < 13 else "下午"
+    slot = str(run.get("schedule_slot") or "")
+    if slot == "morning":
+        return "上午"
+    if slot == "afternoon":
+        return "下午"
+    if slot.startswith("calendar-") and len(slot) >= 11 and slot[9:11].isdigit():
+        return "上午" if int(slot[9:11]) < 12 else "下午"
+    return "上午" if _local_run_time(run, local_tz).hour < 12 else "下午"
+
+
+def is_daily_schedule_slot(slot: Any) -> bool:
+    value = str(slot or "")
+    return value in {"morning", "afternoon"} or value.startswith("calendar-")
+
+
+def _report_periods(job: dict[str, Any], run: dict[str, Any]) -> tuple[str, ...]:
+    """Show only configured periods for scheduled reports; one for manual runs."""
+    local_tz = ZoneInfo(settings.default_timezone)
+    if not is_daily_schedule_slot(run.get("schedule_slot")):
+        return (_run_period(run, local_tz),)
+    try:
+        config = json.loads(job.get("schedule_config") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    if job.get("schedule_mode") == "calendar":
+        times = config.get("times")
+        if isinstance(times, list) and times:
+            try:
+                periods = {"上午" if int(str(value)[:2]) < 12 else "下午" for value in times}
+            except ValueError:
+                periods = set()
+            if periods:
+                return tuple(period for period in ("上午", "下午") if period in periods)
+    elif job.get("schedule_mode") == "simple":
+        periods = {"上午" if config.get("morning_enabled") else "", "下午" if config.get("afternoon_enabled") else ""}
+        selected = tuple(period for period in ("上午", "下午") if period in periods)
+        if selected:
+            return selected
+    return ("上午", "下午")
 
 
 def _daily_periods(
@@ -247,8 +286,28 @@ def _daily_periods(
     return periods
 
 
-def _fill_template(doc: Document, periods: dict[str, dict[str, Any]]) -> None:
+def _remove_template_period(doc: Document, period: str) -> None:
+    headings = [p for p in doc.paragraphs if p.text.strip().startswith("巡检时间：")]
+    target = next((p for p in headings if period in p.text), None)
+    if target is None:
+        return
+    following = None
+    for index, heading in enumerate(headings):
+        if heading is target:
+            following = headings[index + 1]._p if index + 1 < len(headings) else None
+            break
+    element = target._p
+    while element is not None and element is not following and element.tag != qn("w:sectPr"):
+        next_element = element.getnext()
+        element.getparent().remove(element)
+        element = next_element
+
+
+def _fill_template(doc: Document, periods: dict[str, dict[str, Any]], visible_periods: tuple[str, ...]) -> None:
     """Fill each template section once, keeping every screenshot in that section."""
+    for period in ("上午", "下午"):
+        if period not in visible_periods:
+            _remove_template_period(doc, period)
     headings: dict[tuple[str, str], Paragraph] = {}
     period_headings: dict[str, Paragraph] = {}
     used_headings: set[tuple[str, str]] = set()
@@ -288,9 +347,6 @@ def _fill_template(doc: Document, periods: dict[str, dict[str, Any]]) -> None:
                     anchor.runs[0].font.color.rgb = RGBColor(185, 28, 28)
                     continue
                 image_path = resolve_artifact_path(item.get("file_path") or "")
-                anchor = insert_paragraph_after(anchor, name, style=_item_caption_style(doc))
-                anchor.paragraph_format.space_before = Pt(8)
-                anchor.paragraph_format.space_after = Pt(3)
                 anchor = insert_paragraph_after(anchor)
                 anchor.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 anchor.paragraph_format.space_before = Pt(6)
@@ -313,6 +369,8 @@ def _fill_template(doc: Document, periods: dict[str, dict[str, Any]]) -> None:
             element.getparent().remove(element)
         heading._element.getparent().remove(heading._element)
     for period in ("上午", "下午"):
+        if period not in visible_periods:
+            continue
         heading = period_headings.get(period)
         if heading is None:
             continue
@@ -336,14 +394,36 @@ def generate_docx(
     now_local = datetime.now(local_tz)
     started_dt = _local_run_time(run, local_tz)
     period = _run_period(run, local_tz)
-    daily_periods = _daily_periods(job, run, results, local_tz)
+    scheduled = is_daily_schedule_slot(run.get("schedule_slot"))
+    visible_periods = _report_periods(job, run)
+    daily_periods = _daily_periods(job, run, results, local_tz) if scheduled else {
+        period: {"run": run, "results": [{**item, "run_id": run["id"], "report_period": period} for item in results]}
+    }
+    daily_periods = {period: snapshot for period, snapshot in daily_periods.items() if period in visible_periods}
+    if not job.get("template_id"):
+        # Existing records may still carry old hand-entered chapter names.
+        # Rebuild numbering from the complete day's screenshots on every run.
+        caption_number = 0
+        for slot in ("上午", "下午"):
+            snapshot = daily_periods.get(slot)
+            if snapshot is None:
+                continue
+            numbered_results = []
+            for item in snapshot["results"]:
+                name = str(item.get("item_name") or item.get("section") or "巡检截图").strip()
+                if item.get("status") == "success":
+                    caption_number += 1
+                    name = re.sub(r"^\d+\s*[.．、]\s*", "", name).strip() or "巡检截图"
+                    name = f"{caption_number}. {name}"
+                numbered_results.append({**item, "section": name})
+            snapshot["results"] = numbered_results
     daily_results = [
         item for slot in ("上午", "下午") for item in daily_periods.get(slot, {}).get("results", [])
     ]
     report_date = started_dt.strftime("%Y年%m月%d日")
     document_title = str(job.get("report_title") or job.get("name") or "巡检报告")
     report_name = safe_name(str(job.get("report_title") or job.get("name") or "巡检报告"))
-    stem = f"{report_name}-{started_dt.strftime('%Y-%m-%d')}"
+    stem = f"{report_name}-{started_dt.strftime('%Y-%m-%d')}" if scheduled else f"{report_name}-{started_dt.strftime('%Y-%m-%d')}-手动巡检-{run['id']}"
     output_path = output_dir / f"{stem}.docx"
     logger.info(f"当前时间为 {now_local.strftime('%Y-%m-%d %H:%M:%S')}，匹配巡检时段: '{period}'")
 
@@ -377,7 +457,7 @@ def generate_docx(
     from app.repository import get_previous_run_today
     source_path = None
     reuse_previous_path = False
-    prev_run = get_previous_run_today(job["id"], run["id"])
+    prev_run = get_previous_run_today(job["id"], run["id"]) if scheduled else None
     if prev_run and prev_run.get("report_path"):
         prev_report_path = resolve_artifact_path(prev_run["report_path"])
         # 同一任务当天更新同一份日报；其他任务重名时另取序号。
@@ -419,8 +499,9 @@ def generate_docx(
                 if "巡检执行时间：" in p.text or "巡检耗时：" in p.text:
                     p._element.getparent().remove(p._element)
                         
-            _fill_template(doc, daily_periods)
+            _fill_template(doc, daily_periods, visible_periods)
             _insert_run_findings(doc, daily_results, run, daily_periods)
+            _format_report_typography(doc, report_date, document_title)
             save_docx_atomic(doc, output_path, run["id"], daily_results, document_title, report_date)
             logger.info(f"基于模板的报告已成功保存至: {output_path}")
             return str(output_path)
@@ -432,7 +513,8 @@ def generate_docx(
     # 4. 生成单独独立的 Word 文档（结构极简直接：主标题、巡检时间、各章节名称及截图）
     doc = Document()
     doc.core_properties.title = document_title
-    _build_standalone_docx(doc, job, run, daily_periods, report_date)
+    _build_standalone_docx(doc, job, run, daily_periods, report_date, visible_periods)
+    _format_report_typography(doc, report_date, document_title, auto_layout=True)
     save_docx_atomic(doc, output_path, run["id"], daily_results, document_title, report_date)
     logger.info(f"单独的独立巡检报告已成功保存至: {output_path}")
     return str(output_path)
@@ -444,25 +526,26 @@ def _build_standalone_docx(
     run: dict[str, Any],
     periods: dict[str, dict[str, Any]],
     report_date: str,
+    visible_periods: tuple[str, ...],
 ) -> None:
     """Build the daily report with separate morning and afternoon sections."""
     _setup_styles(doc)
     raw_title = str(job.get('report_title') or job.get('name') or '巡检记录').strip()
     main_title = f"{report_date} {raw_title}"
 
-    title_p = doc.add_paragraph()
+    title_p = doc.add_paragraph(style="Title")
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title_run = title_p.add_run(main_title)
     title_run.bold = True
     title_run.font.name = "Microsoft YaHei"
-    title_run.font.size = Pt(22)
-    title_run.font.color.rgb = RGBColor(15, 44, 89)
-    title_p.paragraph_format.space_before = Pt(8)
-    title_p.paragraph_format.space_after = Pt(20)
+    title_run.font.size = Pt(20)
+    title_run.font.color.rgb = RGBColor(0, 0, 0)
+    title_p.paragraph_format.space_before = Pt(6)
+    title_p.paragraph_format.space_after = Pt(26)
     all_results = [item for period in ("上午", "下午") for item in periods.get(period, {}).get("results", [])]
     _insert_run_findings(doc, all_results, run, periods)
 
-    for period in ("上午", "下午"):
+    for period in visible_periods:
         doc.add_heading(f"巡检时间：{period}", level=1)
         snapshot = periods.get(period)
         if snapshot is None:
@@ -471,33 +554,24 @@ def _build_standalone_docx(
         if not snapshot["results"]:
             doc.add_paragraph("本时段无截图结果。")
             continue
-        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for item in snapshot["results"]:
-            grouped[str(item.get("section") or item.get("item_name") or "巡检截图").strip()].append(item)
-        for section_name, items in grouped.items():
-            doc.add_heading(section_name, level=2)
-            for item in items:
-                name = str(item.get("item_name") or "未命名截图项")
-                if item.get("status") != "success":
-                    warning = doc.add_paragraph(
-                        f"截图失败：{name}。原因：{item.get('error_message') or '未提供失败原因'}"
-                    )
-                    warning.runs[0].font.color.rgb = RGBColor(185, 28, 28)
-                    continue
-                image_path = resolve_artifact_path(item.get("file_path") or "")
-                try:
-                    caption = doc.add_paragraph(name, style=_item_caption_style(doc))
-                    caption.paragraph_format.space_before = Pt(8)
-                    caption.paragraph_format.space_after = Pt(3)
-                    paragraph = doc.add_paragraph()
-                    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    paragraph.paragraph_format.space_before = Pt(6)
-                    paragraph.paragraph_format.space_after = Pt(14)
-                    _add_report_picture(
-                        paragraph.add_run(), image_path, Inches(6.5), _image_marker(snapshot["run"]["id"], item)
-                    )
-                except Exception as exc:
-                    raise ReportValidationError(f"截图“{name}”写入 Word 失败：{exc}") from exc
+            name = str(item.get("item_name") or "未命名截图项").strip()
+            if item.get("status") != "success":
+                doc.add_paragraph(f"截图失败：{name}。原因：{item.get('error_message') or '未提供失败原因'}")
+                continue
+            heading = doc.add_heading(str(item.get("section") or name), level=2)
+            heading.paragraph_format.keep_with_next = True
+            image_path = resolve_artifact_path(item.get("file_path") or "")
+            try:
+                paragraph = doc.add_paragraph()
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                paragraph.paragraph_format.space_before = Pt(6)
+                paragraph.paragraph_format.space_after = Pt(14)
+                _add_report_picture(
+                    paragraph.add_run(), image_path, Inches(6.5), _image_marker(snapshot["run"]["id"], item)
+                )
+            except Exception as exc:
+                raise ReportValidationError(f"截图“{name}”写入 Word 失败：{exc}") from exc
 
 
 
@@ -519,6 +593,82 @@ def _setup_styles(doc: Document) -> None:
     normal = doc.styles["Normal"]
     normal.font.name = "Microsoft YaHei"
     normal.font.size = Pt(10.5)
-    for style_name in ("Title", "Heading 1", "Heading 2"):
+    normal.paragraph_format.space_after = Pt(6)
+    for style_name, size, before, after in (
+        ("Title", 20, 6, 26),
+        ("Heading 1", 14, 12, 10),
+        ("Heading 2", 12, 12, 12),
+    ):
         style = doc.styles[style_name]
         style.font.name = "Microsoft YaHei"
+        style.font.size = Pt(size)
+        style.font.bold = True
+        style.font.color.rgb = RGBColor(0, 0, 0)
+        style.paragraph_format.space_before = Pt(before)
+        style.paragraph_format.space_after = Pt(after)
+        style.paragraph_format.line_spacing = 1.5
+        style.paragraph_format.keep_with_next = True
+
+
+def _format_report_typography(doc: Document, report_date: str, document_title: str, *, auto_layout: bool = False) -> None:
+    """Use one readable black type scale for generated and uploaded-template reports."""
+    black = RGBColor(0, 0, 0)
+    for style in doc.styles:
+        if hasattr(style, "font"):
+            style.font.name = "Microsoft YaHei"
+            style.font.color.rgb = black
+            style._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "Microsoft YaHei")
+    title_texts = {f"{report_date}{document_title}", f"{report_date} {document_title}"}
+
+    def format_paragraph(paragraph: Paragraph) -> None:
+        label = paragraph.text.strip()
+        if not label:
+            return
+        if label in title_texts:
+            size, before, after = 20, 6, 26 if auto_layout else 16
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for owner in (paragraph._p, paragraph.style._element):
+                for border in owner.xpath("./w:pPr/w:pBdr"):
+                    border.getparent().remove(border)
+            for spacing in paragraph.style._element.xpath("./w:rPr/w:spacing"):
+                spacing.getparent().remove(spacing)
+        elif label.startswith("巡检时间："):
+            size, before, after = 14, 12 if auto_layout else 14, 10 if auto_layout else 8
+        elif is_header_paragraph(paragraph):
+            size, before, after = 12, 12 if auto_layout else 11, 12 if auto_layout else 5
+        else:
+            size, before, after = 10.5, 0, 6
+        paragraph.paragraph_format.space_before = Pt(before)
+        paragraph.paragraph_format.space_after = Pt(after)
+        if size >= 12:
+            paragraph.paragraph_format.keep_with_next = True
+            if auto_layout:
+                paragraph.paragraph_format.line_spacing = 1.5
+        for run in paragraph.runs:
+            if not run.text:
+                continue
+            run.font.name = "Microsoft YaHei"
+            run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "Microsoft YaHei")
+            run.font.size = Pt(size)
+            run.font.color.rgb = black
+            if size >= 12:
+                run.bold = True
+
+    def format_table(table) -> None:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    format_paragraph(paragraph)
+                for nested in cell.tables:
+                    format_table(nested)
+
+    for paragraph in doc.paragraphs:
+        format_paragraph(paragraph)
+    for table in doc.tables:
+        format_table(table)
+    for section in doc.sections:
+        for part in (section.header, section.footer):
+            for paragraph in part.paragraphs:
+                format_paragraph(paragraph)
+            for table in part.tables:
+                format_table(table)

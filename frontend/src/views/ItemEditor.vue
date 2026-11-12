@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Info, CheckCircle2, Plus, Minus } from '../icons'
 import { api, type Row } from '../api'
@@ -18,10 +18,9 @@ const taskbarTemplates = ref<Row[]>([])
 const selectedTaskbar = computed(() => taskbarTemplates.value.find(template => template.key === form.taskbar_template_key))
 const sections = ref<string[]>([])
 const templateSelected = ref(false)
-const sectionMode = ref<'template' | 'custom'>('template')
 const selectedTemplateSection = ref('')
-const customSection = ref('')
-const customInputRef = ref<HTMLInputElement | null>(null)
+const sectionError = ref('')
+const nameError = ref('')
 const advanced = ref(false)
 const checkingPage = ref(false)
 const dashboardQuery = ref('')
@@ -129,29 +128,6 @@ watch(() => [
 
 onUnmounted(() => { clearTimeout(previewTimer); previewRequestId++ })
 
-function switchToTemplate() {
-  sectionMode.value = 'template'
-  if (!selectedTemplateSection.value || selectedTemplateSection.value === '__custom__') {
-    selectedTemplateSection.value = sections.value[0] || ''
-  }
-}
-
-function switchToCustom() {
-  sectionMode.value = 'custom'
-  if (!customSection.value && selectedTemplateSection.value && selectedTemplateSection.value !== '__custom__') {
-    customSection.value = selectedTemplateSection.value
-  }
-  nextTick(() => {
-    customInputRef.value?.focus()
-  })
-}
-
-function onSectionSelectChange() {
-  if (selectedTemplateSection.value === '__custom__') {
-    switchToCustom()
-  }
-}
-
 onMounted(async () => {
   const [config, data, taskbarData] = await Promise.all([
     attempt(() => api<Row>('/ui-config')),
@@ -185,25 +161,7 @@ onMounted(async () => {
       for (const key of ['enabled', 'real_browser_capture', 'taskbar_enabled', 'watermark_enabled']) form[key] = bool(form[key])
 
       const curSection = String(item.section || '').trim()
-      if (sections.value.length > 0 && sections.value.includes(curSection)) {
-        sectionMode.value = 'template'
-        selectedTemplateSection.value = curSection
-        customSection.value = ''
-      } else {
-        sectionMode.value = 'custom'
-        customSection.value = curSection || String(itemDefaults.value.section)
-        selectedTemplateSection.value = sections.value[0] || ''
-      }
-    }
-  } else {
-    if (sections.value.length > 0) {
-      sectionMode.value = 'template'
-      selectedTemplateSection.value = sections.value[0]
-      customSection.value = ''
-    } else {
-      sectionMode.value = 'custom'
-      customSection.value = String(itemDefaults.value.section)
-      selectedTemplateSection.value = ''
+      selectedTemplateSection.value = sections.value.includes(curSection) ? curSection : ''
     }
   }
   useReferenceWatermarkLayout()
@@ -211,17 +169,19 @@ onMounted(async () => {
 })
 async function save() {
   selectionError.value = ''
+  sectionError.value = ''
+  nameError.value = ''
   if (form.item_type === 'grafana' && (!form.auth_profile_id || !form.url)) {
     selectionError.value = '请先选择网站连接和 Grafana 看板'
     return
   }
+  if (!String(form.name || '').trim()) { nameError.value = '请填写截图名称'; return }
+  if (templateSelected.value && !sections.value.includes(selectedTemplateSection.value)) {
+    sectionError.value = '请选择 Word 模板中的报告章节'
+    return
+  }
   saving.value = true
-  const finalSection = (
-    sectionMode.value === 'custom'
-      ? customSection.value.trim()
-      : selectedTemplateSection.value
-  ) || String(itemDefaults.value.section)
-  form.section = finalSection
+  form.section = templateSelected.value ? selectedTemplateSection.value : String(form.name).trim()
   useReferenceWatermarkLayout()
   const payload = { ...form, auth_profile_id: form.auth_profile_id || null, browser_width: form.browser_width || null, browser_height: form.browser_height || null }
   const result = await attempt(() => api(id.value ? `/items/${id.value}` : `/jobs/${jobId.value}/items`, id.value ? 'PUT' : 'POST', payload), id.value ? '截图项已更新' : '截图项已创建')
@@ -313,7 +273,7 @@ async function checkPage() {
   <div v-else-if="loadFailed" class="empty-state"><h3>截图项加载失败</h3><p>请返回任务详情，确认截图项仍然存在后重试。</p><ActionButton :to="`/jobs/${jobId}`"  variant="secondary">返回</ActionButton></div>
   <form v-else class="editor-layout item-editor-layout" @submit.prevent="save"><div class="editor-main">
     <section class="form-section"><div class="form-section-head"><div><h2>页面信息</h2></div></div><div class="form-grid">
-      <label class="field"><span>截图名称 <b>*</b></span><input v-model="form.name" required placeholder="例如：生产看板" /></label>
+      <label class="field"><span>截图名称 <b>*</b></span><input v-model="form.name" required placeholder="例如：生产看板" @input="nameError = ''" /><small v-if="nameError" class="schedule-warning" role="alert">{{ nameError }}</small><small v-else-if="!templateSelected">自动排版使用此名称，无需设置报告章节。</small></label>
       <label class="field"><span>页面类型</span><select v-model="form.item_type" @change="onPageTypeChange"><option v-for="option in itemTypes" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
       <div v-if="form.item_type === 'grafana' || form.item_type === 'kibana'" class="field field-full dashboard-select-field">
         <span>选择 {{ form.item_type === 'kibana' ? 'Kibana 仪表盘' : 'Grafana 看板' }} <b v-if="form.item_type === 'grafana'">*</b></span>
@@ -331,41 +291,19 @@ async function checkPage() {
         <GrafanaOptions v-if="form.item_type === 'grafana' && form.url && form.auth_profile_id" :url="String(form.url)" :auth-profile-id="form.auth_profile_id" @update:url="form.url = $event" />
       </div>
       <label v-else class="field field-full"><span>页面地址 <b>*</b></span><input v-model="form.url" type="url" required placeholder="https://example.com/dashboard" /></label>
-      <div class="field report-section-field">
+      <div v-if="templateSelected" class="field report-section-field">
         <div class="field-title-line">
-          <span>报告章节 <b>*</b></span>
-          <div v-if="sections.length" class="section-mode-toggle" role="group" aria-label="章节模式切换">
-            <button
-              type="button"
-              class="mode-btn"
-              :class="{ active: sectionMode === 'template' }"
-              @click="switchToTemplate"
-            >模板章节</button>
-            <button
-              type="button"
-              class="mode-btn"
-              :class="{ active: sectionMode === 'custom' }"
-              @click="switchToCustom"
-            >自定义章节</button>
-          </div>
+          <span>模板章节 <b>*</b></span>
         </div>
-        <template v-if="sectionMode === 'template' && sections.length">
-          <select v-model="selectedTemplateSection" class="section-select" @change="onSectionSelectChange">
+        <template v-if="sections.length">
+          <select v-model="selectedTemplateSection" class="section-select" @change="sectionError = ''">
+            <option value="" disabled>请选择模板章节</option>
             <option v-for="section in sections" :key="section" :value="section">{{ section }}</option>
-            <option value="__custom__">自定义写入新章节...</option>
           </select>
-          <small>截图将放入所选报告章节。</small>
+          <small>章节标题来自当前 Word 模板。</small>
         </template>
-        <template v-else>
-          <input
-            ref="customInputRef"
-            v-model="customSection"
-            class="section-input"
-            required
-            placeholder="请输入自定义章节名称，例如：网络设备专区"
-          />
-          <small class="custom-hint-text">{{ templateSelected ? '自定义章节不在所选模板中时，报告生成会失败；请先在任务中切换为自动排版。' : '自定义章节将由系统自动排版。' }}</small>
-        </template>
+        <small v-else class="schedule-warning">当前模板没有可选章节，请在任务设置中更换模板。</small>
+        <small v-if="sectionError" class="schedule-warning" role="alert">{{ sectionError }}</small>
       </div>
       <label v-if="form.item_type === 'web'" class="field"><span>网站连接</span><select v-model="form.auth_profile_id"><option value="">无需登录</option><option v-for="profile in authProfiles" :key="profile.id" :value="profile.id">{{ profile.name }}</option></select><small>每个页面可选择不同账号。</small></label>
     </div><div class="item-page-check-actions"><ActionButton type="button" :disabled="checkingPage || !form.url" :aria-busy="checkingPage" @click="checkPage" variant="primary" :loading="checkingPage">验证页面</ActionButton></div></section>

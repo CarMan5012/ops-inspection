@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>登录 - 运维巡检平台</title>
+  <title>登录 - {{ app_name }}</title>
   <link rel="shortcut icon" href="{{ url_for_frontend('static/favicon.ico') }}" type="image/x-icon">
   <style>
     *, *::before, *::after {
@@ -12,7 +12,7 @@
     html {
       height: 100%;
       background-color: #edf5ff;
-      scrollbar-gutter: stable;
+      scrollbar-gutter: auto;
     }
     body.login-page {
       height: 100%;
@@ -178,8 +178,8 @@
       transition: background-color 0.16s ease;
     }
     .login-eye svg {
-      width: 18px;
-      height: 18px;
+      width: 14px;
+      height: 14px;
       display: block;
       fill: none;
       stroke: currentColor;
@@ -187,7 +187,7 @@
       stroke-linecap: round;
       stroke-linejoin: round;
     }
-    .login-eye .eye-off {
+    .login-eye .eye-open {
       display: none;
     }
     .login-eye:hover {
@@ -205,10 +205,10 @@
       background-color: rgba(37, 99, 235, 0.08);
       color: #2563eb;
     }
-    .login-eye[aria-pressed="true"] .eye-open {
+    .login-eye[aria-pressed="true"] .eye-off {
       display: none;
     }
-    .login-eye[aria-pressed="true"] .eye-off {
+    .login-eye[aria-pressed="true"] .eye-open {
       display: block;
     }
     .login-btn,
@@ -270,14 +270,17 @@
       }
     }
   </style>
+  <link rel="stylesheet" href="{{ url_for_frontend('static/ambient-scene.css?v=4') }}">
+  <link rel="stylesheet" href="{{ url_for_frontend('static/form-density.css?v=3') }}">
 </head>
-<body class="login-page">
+<body class="login-page ambient-page ambient-auth">
+  {% include "ambient_scene.html" %}
   <main class="login-panel">
     <div class="login-heading">
       <div class="login-mark" aria-hidden="true">
         <img src="{{ login_logo_data_uri }}" alt="" width="52" height="52" decoding="sync" style="width: 52px; height: 52px; display: block; aspect-ratio: 1 / 1;">
       </div>
-      <h1>运维巡检平台</h1>
+      <h1>{{ app_name }}</h1>
     </div>
     <form method="post" action="{{ url_for_frontend('login') }}" class="form-stack" data-login-form data-public-key='{{ login_public_key | tojson }}' novalidate>
       <div class="login-field">

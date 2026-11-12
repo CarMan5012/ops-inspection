@@ -9,6 +9,7 @@ import time
 from fastapi import HTTPException, Request, status
 
 from app.settings import settings
+from app.installation import admin_account, installation_state
 
 
 COOKIE_NAME = "inspection_auth"
@@ -20,7 +21,7 @@ SCRYPT_P = 1
 
 
 def hash_admin_password(password: str) -> str:
-    """Create a value for ADMIN_PASSWORD_HASH without storing the password."""
+    """Hash an administrator password without storing the plaintext."""
     salt = secrets.token_bytes(16)
     digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=SCRYPT_N,
                             r=SCRYPT_R, p=SCRYPT_P, dklen=32, maxmem=256 * 1024 * 1024)
@@ -49,7 +50,13 @@ def _verify_admin_password_hash(password: str, encoded: str) -> bool:
 
 
 def _session_signing_extra() -> str:
-    return settings.admin_password_hash or settings.admin_password
+    account = admin_account()
+    return account[1] if account else ""
+
+
+def admin_username() -> str:
+    account = admin_account()
+    return account[0] if account else ""
 
 
 def get_session_ttl_seconds() -> int:
@@ -173,7 +180,8 @@ def verify_token(token: str | None) -> bool:
         return False
     username, timestamp = parts[:2]
     signature = parts[-1]
-    if username != settings.admin_username:
+    account = admin_account()
+    if not account or username != account[0]:
         return False
     try:
         issued_at = int(timestamp)
@@ -198,28 +206,27 @@ def verify_token(token: str | None) -> bool:
     if (len(parts) != 6 and now - issued_at > lifetime) or issued_at > now + 60:
         return False
     for secret_value in [settings.secret_key, *getattr(settings, "legacy_secret_keys", [])]:
-        expected = _sign(":".join(parts[:-1]), _session_signing_extra(), secret_value)
+        expected = _sign(":".join(parts[:-1]), account[1], secret_value)
         if hmac.compare_digest(signature, expected):
             return len(parts) != 6 or idle_session_active(token, now, lifetime)
     return False
 
 
 def check_password(username: str, password: str) -> bool:
-    username_matches = hmac.compare_digest(username, settings.admin_username)
-    if settings.admin_password_hash:
-        password_matches = _verify_admin_password_hash(password, settings.admin_password_hash)
-    else:
-        password_matches = hmac.compare_digest(password, settings.admin_password)
-    return username_matches and password_matches
+    account = admin_account()
+    return bool(account and hmac.compare_digest(username, account[0])
+                and _verify_admin_password_hash(password, account[1]))
 
 
 def require_login(request: Request) -> None:
     if verify_token(request.cookies.get(COOKIE_NAME)):
         return
-    base = settings.frontend_base_path
-    login_url = "/login"
-    if base != "/":
-        login_url = base + "/login"
+    from app.access_context import public_base_path
+
+    base = public_base_path()
+    login_url = "/setup" if installation_state() == "pending" else "/login"
+    if base:
+        login_url = base + login_url
     raise HTTPException(
         status_code=status.HTTP_303_SEE_OTHER,
         headers={"Location": login_url},

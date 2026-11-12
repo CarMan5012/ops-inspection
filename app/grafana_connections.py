@@ -16,7 +16,6 @@ from app.screenshot import (
     _is_on_login_page,
     _new_context,
     _persist_storage_state,
-    resolve_env_placeholders,
     safe_delete_auth_state,
 )
 
@@ -32,7 +31,7 @@ class _ExpiredSession(ConnectionError):
 
 
 def grafana_base_url(profile: dict[str, Any]) -> str:
-    login_url = resolve_env_placeholders(str(profile.get("login_url") or "").strip())
+    login_url = str(profile.get("login_url") or "").strip()
     parts = urlsplit(login_url)
     if parts.scheme not in {"http", "https"} or not parts.netloc:
         raise ConnectionError("请先填写有效的 Grafana 登录地址")
@@ -118,7 +117,7 @@ def _rendered_dashboard_options(page: Any, url: str, variables: list[dict[str, A
     try:
         page.wait_for_function(
             """labels => [...document.querySelectorAll('span,label,div,a,button')].some(node =>
-                node.children.length === 0 && node.getClientRects().length > 0 &&
+                node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden' &&
                 labels.includes((node.textContent || '').trim()))""",
             arg=visible_labels, timeout=8_000,
         )
@@ -243,6 +242,91 @@ def _rendered_dashboard_options(page: Any, url: str, variables: list[dict[str, A
     return found
 
 
+_CALENDAR_TIME_RANGES = {
+    "今天": ("now/d", "now/d"), "today": ("now/d", "now/d"),
+    "今天到现在": ("now/d", "now"), "today so far": ("now/d", "now"),
+    "本周": ("now/w", "now/w"), "this week": ("now/w", "now/w"),
+    "本周到现在": ("now/w", "now"), "this week so far": ("now/w", "now"),
+    "本月": ("now/M", "now/M"), "this month": ("now/M", "now/M"),
+    "本月到现在": ("now/M", "now"), "this month so far": ("now/M", "now"),
+    "今年": ("now/y", "now/y"), "this year": ("now/y", "now/y"),
+    "今年到现在": ("now/y", "now"), "this year so far": ("now/y", "now"),
+    "昨天": ("now-1d/d", "now-1d/d"), "yesterday": ("now-1d/d", "now-1d/d"),
+    "前天": ("now-2d/d", "now-2d/d"), "day before yesterday": ("now-2d/d", "now-2d/d"),
+    "上周的今天": ("now-7d/d", "now-7d/d"), "this day last week": ("now-7d/d", "now-7d/d"),
+    "上周": ("now-1w/w", "now-1w/w"), "previous week": ("now-1w/w", "now-1w/w"),
+    "上个月": ("now-1M/M", "now-1M/M"), "previous month": ("now-1M/M", "now-1M/M"),
+    "上一财季": ("now-1Q/fQ", "now-1Q/fQ"), "previous fiscal quarter": ("now-1Q/fQ", "now-1Q/fQ"),
+    "上一年": ("now-1y/y", "now-1y/y"), "previous year": ("now-1y/y", "now-1y/y"),
+    "上一财年": ("now-1y/fy", "now-1y/fy"), "previous fiscal year": ("now-1y/fy", "now-1y/fy"),
+    "本财季到现在": ("now/fQ", "now"), "this fiscal quarter so far": ("now/fQ", "now"),
+    "本财季": ("now/fQ", "now/fQ"), "this fiscal quarter": ("now/fQ", "now/fQ"),
+    "本财年到现在": ("now/fy", "now"), "this fiscal year so far": ("now/fy", "now"),
+    "本财年": ("now/fy", "now/fy"), "this fiscal year": ("now/fy", "now/fy"),
+}
+_RELATIVE_TIME_UNITS = {"分钟": "m", "小时": "h", "天": "d", "个月": "M", "年": "y",
+                        "minute": "m", "hour": "h", "day": "d", "month": "M", "year": "y"}
+
+
+def _rendered_time_range(label: str) -> dict[str, str] | None:
+    name = " ".join(label.split())
+    pair = _CALENDAR_TIME_RANGES.get(name.casefold())
+    if pair is None:
+        match = re.fullmatch(r"最近\s*(\d+)\s*(?:个)?\s*(分钟|小时|天|个月|年)", name)
+        if match is None:
+            match = re.fullmatch(r"Last\s+(\d+)\s+(minute|hour|day|month|year)s?", name, re.I)
+        if match is None:
+            return None
+        count, unit = match.groups()
+        pair = (f"now-{count}{_RELATIVE_TIME_UNITS[unit.casefold()]}", "now")
+    return {"label": name, "from": pair[0], "to": pair[1]}
+
+
+def _rendered_time_and_refresh_options(page: Any) -> tuple[list[dict[str, str]], list[str]]:
+    """Read the choices visible in Grafana's time and refresh picker menus."""
+    if page is None or not hasattr(page, "locator"):
+        return [], []
+    time_choices: list[dict[str, str]] = []
+    refresh_choices: list[str] = []
+    try:
+        page.locator('[data-testid*="TimePicker Open Button"], button[aria-controls="TimePickerContent"]').first.click(timeout=3_000)
+        page.locator('#TimePickerContent').wait_for(state="visible", timeout=3_000)
+        labels = page.locator('#TimePickerContent input[data-role="item"]').evaluate_all(
+            "inputs => inputs.map(input => input.closest('li')?.querySelector('label')?.textContent?.trim()).filter(Boolean)"
+        )
+        time_choices = [choice for label in labels[:100] if (choice := _rendered_time_range(str(label)))]
+    except Exception as exc:
+        logger.info("读取 Grafana 时间范围菜单失败：%s", str(exc).splitlines()[0])
+    finally:
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+    try:
+        page.locator('[data-testid*="RefreshPicker interval button"]').first.click(timeout=3_000)
+        page.locator('[role="menu"]').wait_for(state="visible", timeout=3_000)
+        labels = page.locator('[role="menu"] [role="menuitemradio"]').evaluate_all(
+            "items => items.map(item => (item.textContent || '').trim()).filter(Boolean)"
+        )
+        for label in labels[:100]:
+            value = str(label).strip().lower()
+            if value in {"关", "关闭", "off"}:
+                value = "off"
+            elif value in {"自动", "auto"}:
+                value = "auto"
+            if value in {"off", "auto"} or re.fullmatch(r"\d+(?:ms|s|m|h|d|w)", value):
+                if value not in refresh_choices:
+                    refresh_choices.append(value)
+    except Exception as exc:
+        logger.info("读取 Grafana 刷新间隔菜单失败：%s", str(exc).splitlines()[0])
+    finally:
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+    return time_choices, refresh_choices
+
+
 def dashboard_settings(profile: dict[str, Any], uid: str, params: str = "") -> dict[str, Any]:
     """Return the dashboard's variable definitions for the screenshot editor."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", uid):
@@ -339,6 +423,18 @@ def dashboard_settings(profile: dict[str, Any], uid: str, params: str = "") -> d
             timepicker = {}
         quick_ranges = timepicker.get("quick_ranges") or []
         refresh_intervals = timepicker.get("refresh_intervals") or []
+        time_choices = [
+            {"label": str(row["display"]), "from": str(row["from"]), "to": str(row["to"])}
+            for row in quick_ranges[:100] if isinstance(row, dict)
+            and row.get("display") and row.get("from") and row.get("to")
+        ] if isinstance(quick_ranges, list) else []
+        rendered_times, rendered_refreshes = _rendered_time_and_refresh_options(page)
+        seen_ranges = {(choice["from"], choice["to"]) for choice in time_choices}
+        for choice in rendered_times:
+            pair = choice["from"], choice["to"]
+            if pair not in seen_ranges:
+                time_choices.append(choice)
+                seen_ranges.add(pair)
         return {
             "uid": uid,
             "title": str(dashboard.get("title") or uid),
@@ -348,13 +444,11 @@ def dashboard_settings(profile: dict[str, Any], uid: str, params: str = "") -> d
                 "to": str(time_range.get("to") or "now") if isinstance(time_range, dict) else "now",
             },
             "refresh": str(dashboard.get("refresh") or ""),
-            "time_choices": [
-                {"label": str(row["display"]), "from": str(row["from"]), "to": str(row["to"])}
-                for row in quick_ranges[:100] if isinstance(row, dict)
-                and row.get("display") and row.get("from") and row.get("to")
-            ] if isinstance(quick_ranges, list) else [],
-            "refresh_choices": [str(value) for value in refresh_intervals[:100] if isinstance(value, str) and value]
-            if isinstance(refresh_intervals, list) else [],
+            "time_choices": time_choices[:100],
+            "refresh_choices": rendered_refreshes or (
+                [str(value) for value in refresh_intervals[:100] if isinstance(value, str) and value]
+                if isinstance(refresh_intervals, list) else []
+            ),
         }
 
     return _with_login(profile, fetch)

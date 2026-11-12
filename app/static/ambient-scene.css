@@ -1,0 +1,137 @@
+/* One visual system for the setup, login and application templates. */
+body.ambient-page {
+  background: transparent;
+  isolation: isolate;
+}
+
+body.ambient-page #app,
+body.ambient-page .app-shell,
+body.ambient-page .main-frame {
+  background: transparent;
+}
+
+body.ambient-page > main,
+body.ambient-page > #app,
+body.ambient-page > .app-shell {
+  position: relative;
+  z-index: 1;
+}
+
+.ambient-scene {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: #f4f8fa;
+}
+
+.ambient-scene__field,
+.ambient-scene__topology,
+.ambient-scene__canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.ambient-scene__field {
+  background:
+    radial-gradient(ellipse 41% 66% at 81% 37%, rgba(130, 198, 211, .30), transparent 78%),
+    radial-gradient(ellipse 46% 70% at 11% 66%, rgba(139, 177, 218, .23), transparent 82%),
+    radial-gradient(ellipse 42% 47% at 52% 106%, rgba(178, 207, 218, .18), transparent 82%),
+    linear-gradient(125deg, #edf5f8 0%, #f8fbfc 49%, #eef5f6 100%);
+}
+
+/* Local SVG is the fallback for WebGL failure and a designed first paint. */
+.ambient-scene__topology {
+  background: url("ambient-topology.svg") center / cover no-repeat;
+  opacity: .76;
+  transition: opacity .7s ease;
+}
+
+.ambient-scene.is-ready .ambient-scene__topology {
+  opacity: 0;
+}
+
+.ambient-scene__canvas {
+  display: block;
+  opacity: 0;
+  transition: opacity .8s ease;
+}
+
+.ambient-scene.is-ready .ambient-scene__canvas {
+  opacity: 1;
+}
+
+body.ambient-auth .ambient-scene__field {
+  background:
+    radial-gradient(ellipse 38% 70% at 83% 39%, rgba(115, 191, 203, .34), transparent 78%),
+    radial-gradient(ellipse 42% 70% at 10% 70%, rgba(123, 167, 211, .27), transparent 80%),
+    radial-gradient(ellipse 42% 44% at 50% 100%, rgba(175, 202, 220, .16), transparent 82%),
+    linear-gradient(125deg, #eaf3f8 0%, #f8fbfc 50%, #eaf3f4 100%);
+}
+
+body.ambient-auth > main {
+  background: linear-gradient(145deg, rgba(255, 255, 255, .90), rgba(235, 248, 251, .79));
+  border: 1px solid rgba(255, 255, 255, .72);
+  box-shadow: 0 24px 64px rgba(48, 96, 119, .15);
+  backdrop-filter: blur(16px);
+}
+
+body.ambient-page:not(.ambient-auth) .sidebar {
+  background: rgba(246, 252, 254, .88);
+  backdrop-filter: blur(12px);
+}
+
+body.ambient-page:not(.ambient-auth) .top-header {
+  background: rgba(247, 252, 254, .82);
+}
+
+body.ambient-page:not(.ambient-auth) :is(
+  .summary-strip, .job-row, .item-row, .profile-row, .panel,
+  .form-section, .periodic-card, .run-stat-card, .run-table-card,
+  .storage-summary > div
+) {
+  background-color: rgba(240, 250, 253, .86);
+  border-color: rgba(129, 171, 188, .25);
+}
+
+body.ambient-page:not(.ambient-auth) .empty-state {
+  background-color: rgba(239, 250, 253, .78);
+  border-color: rgba(125, 171, 187, .36);
+}
+
+body.ambient-page:not(.ambient-auth) .ambient-scene.is-ready .ambient-scene__canvas {
+  opacity: .30;
+}
+
+body.ambient-page:not(.ambient-auth) .ambient-scene__topology {
+  opacity: .26;
+}
+
+body.ambient-page:not(.ambient-auth) .ambient-scene.is-ready .ambient-scene__topology {
+  opacity: 0;
+}
+
+@media (max-width: 700px) {
+  .ambient-scene__field,
+  body.ambient-auth .ambient-scene__field {
+    background:
+      radial-gradient(ellipse 72% 38% at 88% 15%, rgba(115, 191, 203, .30), transparent 84%),
+      radial-gradient(ellipse 75% 40% at 10% 90%, rgba(123, 167, 211, .24), transparent 84%),
+      #f2f8fa;
+  }
+
+  .ambient-scene__topology { background-size: auto 100%; }
+  body.ambient-auth > main {
+    background: linear-gradient(145deg, rgba(255, 255, 255, .94), rgba(238, 249, 251, .89));
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient-scene__topology,
+  .ambient-scene__canvas { transition: none; }
+}

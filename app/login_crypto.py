@@ -4,11 +4,11 @@ import base64
 import hashlib
 import json
 import math
-import os
 import secrets
 import time
-from pathlib import Path
 from typing import Any
+
+from app.settings import settings
 
 
 KEY_BITS = 2048
@@ -88,7 +88,7 @@ def _cleanup_legacy_key_file() -> None:
     if _LEGACY_KEY_FILE_CLEANED:
         return
     _LEGACY_KEY_FILE_CLEANED = True
-    legacy_path = Path(os.getenv("APP_DATA_DIR", "data")).resolve() / "login-rsa-key.json"
+    legacy_path = settings.data_dir / "login-rsa-key.json"
     try:
         legacy_path.unlink(missing_ok=True)
     except OSError:

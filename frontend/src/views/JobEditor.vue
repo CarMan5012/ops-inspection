@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, reactive, ref, computed, toRaw } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, Info, Plus, Trash2 } from '../icons'
+import { ArrowLeft, Info } from '../icons'
 import { api, type Row } from '../api'
 import { attempt } from '../ui'
 import ScheduleTimePicker from '../components/ScheduleTimePicker.vue'
@@ -18,7 +18,8 @@ const dingtalkProfiles = ref<Row[]>([])
 const calendarAvailable = ref(false)
 const legacySchedule = ref(false)
 const legacyConfirmed = ref(false)
-const lastFixedTimes = ref<string[]>([])
+const lastFixedTimes = reactive<Record<string, string>>({ morning: '09:05', afternoon: '17:05' })
+const scheduleError = ref('')
 let statusTimer: ReturnType<typeof setInterval> | undefined
 let disposed = false
 const form = reactive<Row>({})
@@ -78,7 +79,14 @@ async function load() {
       form.frequency = schedule.frequency || jobDefaults.value.frequency
       form.days_of_week = schedule.days_of_week || [...jobDefaults.value.days_of_week]
       form.days_of_month = schedule.days_of_month || [...jobDefaults.value.days_of_month]
-      form.times = schedule.times || [...jobDefaults.value.times]
+      const times = Array.isArray(schedule.times) ? schedule.times.map(String) : [...jobDefaults.value.times]
+      const morning = times.filter((value: string) => Number(value.slice(0, 2)) < 12)
+      const afternoon = times.filter((value: string) => Number(value.slice(0, 2)) >= 12)
+      if (morning.length > 1 || afternoon.length > 1) legacySchedule.value = true
+      form.morning_enabled = morning.length > 0
+      form.afternoon_enabled = afternoon.length > 0
+      form.morning_time = morning[0] || jobDefaults.value.morning_time
+      form.afternoon_time = afternoon[0] || jobDefaults.value.afternoon_time
     } else {
       if (schedule.frequency && !['daily', 'workday'].includes(schedule.frequency)) legacySchedule.value = true
       if (String(schedule.morning_time || '').includes(':R') || String(schedule.afternoon_time || '').includes(':R')) legacySchedule.value = true
@@ -86,14 +94,15 @@ async function load() {
       const oldTimes = []
       if (schedule.morning_enabled) oldTimes.push(String(schedule.morning_time || jobDefaults.value.morning_time).toUpperCase())
       if (schedule.afternoon_enabled) oldTimes.push(String(schedule.afternoon_time || jobDefaults.value.afternoon_time).toUpperCase())
-      if (oldTimes.length) form.times = oldTimes
+      form.morning_enabled = oldTimes.some(value => Number(value.slice(0, 2)) < 12)
+      form.afternoon_enabled = oldTimes.some(value => Number(value.slice(0, 2)) >= 12)
+      form.morning_time = oldTimes.find(value => Number(value.slice(0, 2)) < 12) || jobDefaults.value.morning_time
+      form.afternoon_time = oldTimes.find(value => Number(value.slice(0, 2)) >= 12) || jobDefaults.value.afternoon_time
     }
-    form.morning_enabled = schedule.morning_enabled === undefined ? true : bool(schedule.morning_enabled)
-    form.afternoon_enabled = schedule.afternoon_enabled === undefined ? true : bool(schedule.afternoon_enabled)
-    form.morning_random = String(schedule.morning_time || '').toUpperCase().endsWith(':R')
-    form.afternoon_random = String(schedule.afternoon_time || '').toUpperCase().endsWith(':R')
-    form.morning_time = form.morning_random ? `${String(schedule.morning_time).slice(0, 2)}:05` : schedule.morning_time || jobDefaults.value.morning_time
-    form.afternoon_time = form.afternoon_random ? `${String(schedule.afternoon_time).slice(0, 2)}:05` : schedule.afternoon_time || jobDefaults.value.afternoon_time
+    for (const slot of ['morning', 'afternoon']) {
+      const value = String(form[`${slot}_time`] || '')
+      if (!value.endsWith(':R')) lastFixedTimes[slot] = value
+    }
   }
   loading.value = false
 }
@@ -107,9 +116,18 @@ onUnmounted(() => { disposed = true; if (statusTimer) clearInterval(statusTimer)
 async function save() {
   if (!form.name.trim()) return
   if (legacySchedule.value && !legacyConfirmed.value) return
+  const times = [form.morning_enabled ? String(form.morning_time) : '', form.afternoon_enabled ? String(form.afternoon_time) : ''].filter(Boolean)
+  if (!times.length) { scheduleError.value = '请至少启用上午或下午一个时段'; return }
+  if ((form.morning_enabled && (Number(String(form.morning_time).slice(0, 2)) >= 12 || Number.isNaN(Number(String(form.morning_time).slice(0, 2))))) ||
+      (form.afternoon_enabled && (Number(String(form.afternoon_time).slice(0, 2)) < 12 || Number.isNaN(Number(String(form.afternoon_time).slice(0, 2)))))) {
+    scheduleError.value = '上午只能选择 00:00–11:59，下午只能选择 12:00–23:59'
+    return
+  }
+  scheduleError.value = ''
   saving.value = true
   const payload = {
     ...form,
+    times,
     mail_profile_id: null,
     send_mail: false,
     send_mail_on_complete: false,
@@ -123,21 +141,19 @@ async function save() {
   saving.value = false
   if (result?.job?.id) router.push(`/jobs/${result.job.id}`)
 }
-function addTime() { if (form.times.length < 8) { const time = String(jobDefaults.value.times?.[0] || ''); form.times.push(time); lastFixedTimes.value.push(time) } }
-function isRandom(value: string) { return value.endsWith(':R') }
-function toggleRandom(index: number, enable: boolean) {
-  const current = String(form.times[index] || '09:05')
-  if (isRandom(current) === enable) return
+function isRandom(slot: string) { return String(form[`${slot}_time`] || '').endsWith(':R') }
+function toggleRandom(slot: string, enable: boolean) {
+  const current = String(form[`${slot}_time`] || (slot === 'morning' ? '09:05' : '17:05'))
+  if (isRandom(slot) === enable) return
   const hour = current.slice(0, 2) || '09'
   if (enable) {
-    if (!isRandom(current)) lastFixedTimes.value[index] = current
-    form.times[index] = `${hour}:R`
+    lastFixedTimes[slot] = current
+    form[`${slot}_time`] = `${hour}:R`
   } else {
-    const previous = lastFixedTimes.value[index]
-    form.times[index] = previous?.startsWith(`${hour}:`) ? previous : `${hour}:00`
+    const previous = lastFixedTimes[slot]
+    form[`${slot}_time`] = previous?.startsWith(`${hour}:`) ? previous : `${hour}:00`
   }
 }
-function removeTime(index: number) { form.times.splice(index, 1); lastFixedTimes.value.splice(index, 1) }
 </script>
 
 <template>
@@ -152,37 +168,37 @@ function removeTime(index: number) { form.times.splice(index, 1); lastFixedTimes
         <label class="field"><span>运行环境</span><input v-model="form.environment" placeholder="例如：生产环境" /></label>
       </div></section>
       <section class="form-section"><div class="form-section-head"><div><h2>巡检时间</h2></div></div><div class="form-grid">
-        <label v-if="legacySchedule" class="field field-full"><span>原定时规则</span><small>此任务使用旧规则。请核对下面的日期和时间，确认后再保存。</small><label class="switch-row"><input v-model="legacyConfirmed" type="checkbox" />我已核对新的巡检时间</label></label>
+        <div v-if="legacySchedule" class="field field-full"><span>原定时规则</span><small>原计划含旧规则或同一时段的多个时间。请核对下面的上午、下午时间，确认后再保存。</small><label class="switch-row"><input v-model="legacyConfirmed" type="checkbox" />我已核对新的巡检时间</label></div>
         <label class="field field-full"><span>巡检日期</span><select v-model="form.frequency"><option v-for="option in jobFrequencies.filter(option => !option.requires_calendar || calendarAvailable || form.frequency === option.value)" :key="option.value" :value="option.value">{{ option.label }}</option></select><small v-if="!calendarAvailable">节假日接口暂不可用，工作日和非工作日选项已隐藏。</small></label>
         <div v-if="form.frequency === 'weekly'" class="field field-full"><span>选择星期</span><div class="weekday-options"><label v-for="day in 7" :key="day" class="switch-row"><input v-model="form.days_of_week" type="checkbox" :value="day" />周{{ '一二三四五六日'[day - 1] }}</label></div></div>
         <div v-if="form.frequency === 'monthly'" class="field field-full"><span>选择日期（可多选）</span><div class="monthday-options"><label v-for="day in 31" :key="day" class="switch-row"><input v-model="form.days_of_month" type="checkbox" :value="day" />{{ day }}号</label></div><small>当月没有所选日期时，该日期自动跳过。例如 2 月没有 30 号。</small></div>
         <div class="field field-full inspection-schedule">
           <div class="inspection-time-heading">
-            <div><span>执行时间</span><small>可设置多个时段，最多 8 个</small></div>
-            <button v-if="form.times.length < 8" type="button" class="inspection-time-add" @click="addTime"><Plus :size="15" />添加时间</button>
+            <div><span>执行时间</span><small>上午、下午各可启用一次，时间可自定义</small></div>
           </div>
           <div class="inspection-time-list">
-            <div v-for="(value, index) in form.times" :key="index" class="inspection-time-row" :class="{ 'is-random': isRandom(value) }">
+            <div v-for="slot in ['morning', 'afternoon']" :key="slot" class="inspection-time-row" :class="{ 'is-random': isRandom(slot), 'is-disabled': !form[`${slot}_enabled`] }">
               <div class="inspection-time-top">
-                <span class="inspection-time-index">时间 {{ String(index + 1).padStart(2, '0') }}</span>
-                <button v-if="form.times.length > 1" type="button" class="inspection-time-remove" :aria-label="`删除第 ${index + 1} 个时间`" @click="removeTime(index)"><Trash2 :size="16" /></button>
+                <span class="inspection-time-index">{{ slot === 'morning' ? '上午' : '下午' }}</span>
+                <label class="switch-row"><input v-model="form[`${slot}_enabled`]" type="checkbox" @change="scheduleError = ''" />启用</label>
               </div>
               <div class="inspection-time-value">
-                <span class="inspection-time-caption">{{ isRandom(value) ? '执行小时' : '执行时间' }}</span>
+                <span class="inspection-time-caption">{{ isRandom(slot) ? '执行小时' : '执行时间' }}</span>
                 <div class="inspection-time-control">
-                  <ScheduleTimePicker v-model="form.times[index]" :label="`第 ${index + 1} 个执行时间`" />
-                  <span v-if="isRandom(value)" class="inspection-minute-range">每天在这一小时内随机执行</span>
+                  <ScheduleTimePicker v-model="form[`${slot}_time`]" :label="`${slot === 'morning' ? '上午' : '下午'}执行时间`" :min-hour="slot === 'morning' ? 0 : 12" :max-hour="slot === 'morning' ? 11 : 23" :disabled="!form[`${slot}_enabled`]" />
+                  <span v-if="isRandom(slot)" class="inspection-minute-range">每天在这一小时内随机执行</span>
                 </div>
               </div>
               <div class="inspection-time-mode-line">
                 <span>分钟方式</span>
-                <div class="inspection-time-mode" role="group" :aria-label="`第 ${index + 1} 个时间的分钟方式`">
-                  <button type="button" :class="{ selected: !isRandom(value) }" :aria-pressed="!isRandom(value)" @click="toggleRandom(index, false)">固定分钟</button>
-                  <button type="button" :class="{ selected: isRandom(value) }" :aria-pressed="isRandom(value)" @click="toggleRandom(index, true)">随机分钟</button>
+                <div class="inspection-time-mode" role="group" :aria-label="`${slot === 'morning' ? '上午' : '下午'}分钟方式`">
+                  <button type="button" :disabled="!form[`${slot}_enabled`]" :class="{ selected: !isRandom(slot) }" :aria-pressed="!isRandom(slot)" @click="toggleRandom(slot, false)">固定分钟</button>
+                  <button type="button" :disabled="!form[`${slot}_enabled`]" :class="{ selected: isRandom(slot) }" :aria-pressed="isRandom(slot)" @click="toggleRandom(slot, true)">随机分钟</button>
                 </div>
               </div>
             </div>
           </div>
+          <small v-if="scheduleError" class="schedule-warning" role="alert">{{ scheduleError }}</small>
           <small class="inspection-time-help">随机分钟由系统为每天确定，具体时间可在任务详情查看“未来三次”。</small>
         </div>
       </div></section>

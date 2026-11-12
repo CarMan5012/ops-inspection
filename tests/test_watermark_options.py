@@ -126,6 +126,7 @@ def test_old_surname_preset_is_migrated_without_changing_custom_layout(monkeypat
     monkeypatch.setattr(db, "sqlite3", sqlite3)
     monkeypatch.setattr(db.settings, "db_path", db_path)
     monkeypatch.setattr(db, "_migrate_plain_database", lambda: None)
+    monkeypatch.setattr(db, "_initialize_installation_state", lambda *_: None)
     db.init_db()
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("""
@@ -329,6 +330,7 @@ def test_existing_watermark_placeholders_migrate_once(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "sqlite3", sqlite3)
     monkeypatch.setattr(db.settings, "db_path", db_path)
     monkeypatch.setattr(db, "_migrate_plain_database", lambda: None)
+    monkeypatch.setattr(db, "_initialize_installation_state", lambda *_: None)
     db.init_db()
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(

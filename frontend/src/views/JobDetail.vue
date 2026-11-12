@@ -132,8 +132,7 @@ onMounted(load)
           </div>
           <p class="item-url">{{ item.url }}</p>
           <div class="job-meta">
-            <span>{{ item.section || '巡检截图' }}</span>
-            <span class="meta-dot"></span>
+            <template v-if="job.template_id"><span>{{ item.section || '未选择模板章节' }}</span><span class="meta-dot"></span></template>
             <span>{{ item.real_browser_capture ? '完整浏览器窗口' : '网页截图' }}</span>
           </div>
         </div>

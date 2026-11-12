@@ -129,14 +129,13 @@ def check_today_jobs_completed(now_dt: datetime) -> tuple[bool, list[str]]:
                 ).fetchall()
 
             for slot, latest_fire in expected_slots.items():
+                from app.report import _run_period, is_daily_schedule_slot
+                expected_period = _run_period({"schedule_slot": slot, "started_at": now_dt.isoformat()}, local_tz)
                 matching = []
                 for run in runs:
-                    if run["schedule_slot"] != slot:
+                    if not is_daily_schedule_slot(run["schedule_slot"]):
                         continue
-                    started = datetime.fromisoformat(run["started_at"])
-                    if started.tzinfo is None:
-                        started = started.replace(tzinfo=local_tz)
-                    if latest_fire is None or started >= latest_fire:
+                    if _run_period(dict(run), local_tz) == expected_period:
                         matching.append(run)
                 if not matching:
                     unfinished.append(f"任务 '{job['name']}' 的 {slot} 时段今日尚未执行")
@@ -218,6 +217,22 @@ def monthly_report_retry_check(run_id: int) -> None:
 
 
 def trigger_periodic_report(report_type: str, is_manual: bool = False) -> int | None:
+    from app.job_execution import JobAlreadyRunning, acquire_job_lease
+
+    if report_type not in ("weekly", "monthly"):
+        return None
+    try:
+        lease = acquire_job_lease(-1 if report_type == "weekly" else -2)
+    except JobAlreadyRunning:
+        logger.info("%s 报告正在生成，跳过重复触发", report_type)
+        return None
+    try:
+        return _trigger_periodic_report_unlocked(report_type, is_manual)
+    finally:
+        lease.close()
+
+
+def _trigger_periodic_report_unlocked(report_type: str, is_manual: bool = False) -> int | None:
     """
     触发周期报告的处理流。
     返回: 报告运行的 ID
@@ -249,7 +264,7 @@ def trigger_periodic_report(report_type: str, is_manual: bool = False) -> int | 
             cand_end = datetime.combine(now_dt.date(), time.max).replace(tzinfo=local_tz)
             with connect() as conn:
                 count_this_week = conn.execute(
-                    "SELECT COUNT(*) FROM run_records WHERE substr(replace(started_at, 'T', ' '), 1, 19) >= ? AND report_path IS NOT NULL AND report_path != ''",
+                    "SELECT COUNT(*) FROM run_records WHERE substr(replace(started_at, 'T', ' '), 1, 19) >= ? AND report_path IS NOT NULL AND report_path != '' AND (schedule_slot IN ('morning', 'afternoon') OR schedule_slot LIKE 'calendar-%')",
                     (cand_start.strftime("%Y-%m-%d %H:%M:%S"),)
                 ).fetchone()[0]
             if count_this_week > 0:
@@ -389,6 +404,7 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
               AND substr(replace(started_at, 'T', ' '), 1, 19) <= ?
               AND report_path IS NOT NULL
               AND report_path != ''
+              AND (schedule_slot IN ('morning', 'afternoon') OR schedule_slot LIKE 'calendar-%')
             ORDER BY substr(replace(started_at, 'T', ' '), 1, 19) ASC, id ASC
             """,
             (period_start, period_end),
@@ -542,15 +558,15 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
                     db_webhook = decrypt_secret(db_webhook)
                 except Exception:
                     pass
-            webhook = db_webhook or settings.dingtalk_webhook
+            webhook = db_webhook
             db_secret = get_system_setting("dingtalk_secret", "")
             if db_secret:
                 try:
                     db_secret = decrypt_secret(db_secret)
                 except Exception:
                     pass
-            secret = db_secret or settings.dingtalk_secret
-            keyword = get_system_setting("dingtalk_keyword", "") or settings.dingtalk_keyword
+            secret = db_secret
+            keyword = get_system_setting("dingtalk_keyword", "")
             emoji_enabled = get_system_setting("dingtalk_emoji_enabled", "0") == "1"
 
         if webhook:

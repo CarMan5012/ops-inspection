@@ -57,7 +57,7 @@ def configure_openapi(app: FastAPI, api_prefix: str, app_name: str) -> None:
             return app.openapi_schema
 
         schema = get_openapi(
-            title=f"{app_name} API",
+            title=f"{app.title} API",
             version="1.0.0",
             description=(
                 "运检巡检系统后端接口文档。"

@@ -52,12 +52,13 @@
 
     <label data-login-field>
       登录密码 <span style="color: var(--danger);">*</span>
-      <div style="position: relative; display: flex; align-items: center; width: 100%;">
-        <input name="password" id="auth_password_input" type="password" value="" placeholder="{{ '已保存，留空沿用原密码' if profile.id else '请输入密码' }}" style="padding-right: 40px; width: 100%;">
-        <button type="button" onclick="togglePasswordVisibility('auth_password_input', this)" style="position: absolute; right: 10px; background: none; border: none; cursor: pointer; color: var(--text-muted); display: flex; align-items: center; min-height: auto; border-radius: 0; border: 0; padding: 0;" title="显示/隐藏密码" aria-label="显示密码">
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+      <span class="password-wrap">
+        <input name="password" id="auth_password_input" type="password" value="" placeholder="{{ '已保存，留空沿用原密码' if profile.id else '请输入密码' }}">
+        <button class="password-toggle" type="button" onclick="togglePasswordVisibility('auth_password_input', this)" aria-label="显示密码" aria-pressed="false">
+          <svg class="icon-hidden" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.6 6.1A10.8 10.8 0 0 1 12 6c6.4 0 10 6 10 6a14 14 0 0 1-4.1 4.9"/><path d="M6.1 6.6A14 14 0 0 0 2 12s3.6 6 10 6a10.8 10.8 0 0 0 4.2-.8"/><path d="M10 10a3 3 0 0 0 4 4M2 2l20 20"/></svg>
+          <svg class="icon-visible" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
         </button>
-      </div>
+      </span>
     </label>
   </div>
 
@@ -98,8 +99,6 @@
 </form>
 
 <script>
-  const eyeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
-  const eyeOffSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; transition: opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
   const selectorDefaults = {
     username: 'input[name="user"], input[name="username"], input[type="email"], input[placeholder*="username"], input[placeholder*="email"], input[placeholder*="user"]',
     password: 'input[name="password"], input[type="password"], input[placeholder*="password"]',
@@ -114,15 +113,11 @@
 
   function togglePasswordVisibility(inputId, btn) {
     const input = document.getElementById(inputId);
-    if (input.type === 'password') {
-      input.type = 'text';
-      btn.innerHTML = eyeOffSvg;
-      btn.setAttribute('aria-label', '隐藏密码');
-    } else {
-      input.type = 'password';
-      btn.innerHTML = eyeSvg;
-      btn.setAttribute('aria-label', '显示密码');
-    }
+    const visible = input.type === 'password';
+    input.type = visible ? 'text' : 'password';
+    btn.setAttribute('aria-pressed', String(visible));
+    btn.setAttribute('aria-label', visible ? '隐藏密码' : '显示密码');
+    input.focus();
   }
 
   function applySystemPreset(forceSuccessSelector) {

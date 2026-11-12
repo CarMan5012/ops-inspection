@@ -103,6 +103,8 @@
 .inspection-time-row{min-width:0;padding:11px 13px 12px;border:1px solid #dce7eb;border-radius:8px;background:#fff;transition:border-color .18s,box-shadow .18s}
 .inspection-time-row:hover{border-color:#a9c8d2;box-shadow:0 4px 14px rgba(31,81,99,.055)}
 .inspection-time-row.is-random{border-left:3px solid #267e98;padding-left:11px}
+.inspection-time-row.is-disabled .inspection-time-value,.inspection-time-row.is-disabled .inspection-time-mode-line{opacity:.5}
+.inspection-time-mode button:disabled{cursor:not-allowed}
 .inspection-time-top{display:flex;align-items:center;justify-content:space-between;min-height:20px;margin-bottom:5px}
 .inspection-time-index{color:#648393;font-size:11px;font-weight:700;letter-spacing:.04em;font-variant-numeric:tabular-nums}
 .inspection-time-value{min-width:0;display:grid;gap:3px}
@@ -449,17 +451,17 @@
 .grafana-options-head p{margin:3px 0 0;color:#8095a0;font-size:11px;line-height:1.4}
 .grafana-options-head a{display:inline-flex;align-items:center;gap:6px;color:#176b84;font-size:11px;font-weight:600;white-space:nowrap;text-decoration:none}
 .grafana-options-head a:hover{text-decoration:underline}
-.grafana-options-loading{margin:0;color:#657f8b;font-size:12px}
-.grafana-controls{display:flex;align-items:flex-start;flex-wrap:wrap;gap:9px 18px;min-width:0}
-.grafana-variable-grid{display:flex;align-items:flex-start;flex:1 1 580px;flex-wrap:wrap;gap:8px;min-width:0}
-.grafana-time-grid{flex:0 1 auto;margin-left:auto;justify-content:flex-end}
-.grafana-variable{display:inline-flex;align-items:stretch;position:relative;min-width:0;height:36px;border:1px solid #cdd9e0;border-radius:6px;background:#fff;color:#334e5d;font-size:12px;font-weight:600;transition:border-color .16s,box-shadow .16s}
+.grafana-options-loading{display:flex;align-items:center;gap:9px;margin:0 0 12px;min-height:40px;padding:9px 12px;border:1px solid #dcebf0;border-radius:6px;background:#f5fafb;color:#527586;font-size:12px}
+.grafana-loading-spinner{display:inline-block;flex:none;width:15px;height:15px;border:2px solid #c9dfe6;border-top-color:#176b84;border-radius:50%;animation:grafana-loading-spin .8s linear infinite}
+@keyframes grafana-loading-spin{to{transform:rotate(360deg)}}
+.grafana-variable-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px;min-width:0}
+.grafana-variable{display:flex;align-items:stretch;position:relative;min-width:0;width:100%;height:36px;border:1px solid #cdd9e0;border-radius:6px;background:#fff;color:#334e5d;font-size:12px;font-weight:600;transition:border-color .16s,box-shadow .16s}
 .grafana-variable:hover{border-color:#a7bfcb}
 .grafana-variable:focus-within{border-color:#5f9daf;box-shadow:0 0 0 3px rgba(31,112,139,.11)}
-.grafana-variable-label{display:inline-flex;align-items:center;flex:none;max-width:170px;padding:0 10px;border-right:1px solid #dce5ea;border-radius:5px 0 0 5px;background:#f5f7f9;color:#58717e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px;font-weight:600}
-.grafana-select-wrap,.grafana-multi-dropdown{display:block;position:relative;min-width:132px;width:clamp(132px,11vw,210px)}
+.grafana-variable-label{display:inline-flex;align-items:center;flex:none;max-width:42%;padding:0 10px;border-right:1px solid #dce5ea;border-radius:5px 0 0 5px;background:#f5f7f9;color:#58717e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px;font-weight:600}
+.grafana-select-wrap,.grafana-multi-dropdown{display:block;position:relative;flex:1 1 0;min-width:0;width:auto}
 .grafana-select-wrap select,.grafana-multi-dropdown summary,.grafana-variable>input{display:block;width:100%;height:34px;min-height:34px;min-width:0;border:0;border-radius:0 5px 5px 0;padding:0 30px 0 11px;background:#fff;color:#233f50;font:inherit;font-size:12px;line-height:34px;text-overflow:ellipsis}
-.grafana-variable>input{flex:1 1 150px;width:150px;padding-right:11px}
+.grafana-variable>input{flex:1 1 0;width:0;padding-right:11px}
 .grafana-select-wrap select{appearance:none;cursor:pointer}
 .grafana-multi-dropdown summary{list-style:none;cursor:pointer;white-space:nowrap;overflow:hidden}
 .grafana-multi-dropdown summary::-webkit-details-marker{display:none}
@@ -470,10 +472,6 @@
 .grafana-variable-choice{display:flex;align-items:center;gap:9px;min-width:0;padding:8px 9px;border-radius:4px;color:#344f5d;font-size:12px;font-weight:500;cursor:pointer}
 .grafana-variable-choice:hover{background:#eef5f8}
 .grafana-variable-choice input{flex:none;margin:0;accent-color:#176b84}
-.grafana-multi-menu>input{width:100%;min-width:0;min-height:33px;margin-top:4px;padding:6px 9px;border:1px solid #dce5ea;border-radius:5px;font-size:11px}
-.grafana-time-variable .grafana-select-wrap{width:210px}
-.grafana-refresh-variable .grafana-select-wrap{width:124px}
-.grafana-custom-time>input{width:132px;padding-right:11px}
 .grafana-options-foot{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-top:13px;padding-top:10px;border-top:1px solid #e8eef1}
 .grafana-options-note,.grafana-import p{margin:0;color:#8297a1;font-size:11px;line-height:1.5}
 .grafana-import{color:#46748a;font-size:11px}
@@ -484,7 +482,8 @@
 .grafana-import input{min-width:0;width:260px;height:34px;padding:0 10px;border:1px solid #dce5ea;border-radius:5px;background:#fff;color:#28424f;font-size:12px}
 .grafana-import input:focus{outline:3px solid rgba(24,107,135,.13);border-color:#5e9cb1}
 .grafana-import button{border:1px solid #bcd7db;border-radius:5px;background:#fff;padding:0 12px;color:#176d84;font-size:11px;font-weight:600;white-space:nowrap}
-@media(max-width:680px){.grafana-options{padding:14px}.grafana-controls{display:block}.grafana-variable-grid,.grafana-time-grid{width:100%;margin:0;justify-content:flex-start}.grafana-time-grid{margin-top:8px}.grafana-variable{flex:1 0 auto}.grafana-select-wrap,.grafana-multi-dropdown{flex:1 1 auto;min-width:132px;width:auto}.grafana-options-foot{flex-direction:column}.grafana-import>div{flex-direction:column}.grafana-import input{width:100%}.grafana-import button{min-height:34px}}
+@media(max-width:680px){.grafana-options{padding:14px}.grafana-variable-grid{grid-template-columns:minmax(0,1fr)}.grafana-options-foot{flex-direction:column}.grafana-import>div{flex-direction:column}.grafana-import input{width:100%}.grafana-import button{min-height:34px}}
+@media(prefers-reduced-motion:reduce){.grafana-loading-spinner{animation:none;border-color:#b4d4df;border-top-color:#176b84}}
 
 /* Screenshot item editor: keep controls anchored as options and results change. */
 .item-editor-layout{max-width:1440px;margin-inline:auto;gap:20px;grid-template-columns:minmax(0,1fr) 220px}
@@ -513,7 +512,6 @@
 .item-editor-layout .grafana-options-head a{display:inline-flex;align-items:center;min-height:0;padding:0;border-radius:0;background:transparent;text-decoration:none}
 .item-editor-layout .grafana-options-head a:hover{background:transparent;text-decoration:underline}
 .item-editor-layout .grafana-options .grafana-variable>input,.item-editor-layout .grafana-options .grafana-select-wrap select,.item-editor-layout .grafana-options .grafana-import input{height:34px;min-height:34px;font-size:12px}
-.item-editor-layout .grafana-options .grafana-multi-menu>input{min-height:33px}
 .item-editor-layout .report-section-field .field-title-line{gap:10px;flex-wrap:wrap}
 .item-editor-layout .item-page-check-actions{display:flex;justify-content:center;align-items:center;margin-top:22px;padding-top:18px;border-top:1px solid #e9eff1}
 .item-editor-layout .item-page-check-button{position:relative;display:inline-flex;align-items:center;justify-content:center;width:132px;min-height:42px;padding:0 20px;border:1px solid #194f63;border-radius:7px;background:#20596c;color:#fff;font-size:13px;font-weight:600;letter-spacing:.015em;white-space:nowrap;box-shadow:0 3px 9px rgba(22,74,91,.14);transition:background .2s,border-color .2s,box-shadow .2s,transform .2s}

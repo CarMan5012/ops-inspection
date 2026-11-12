@@ -1,16 +1,32 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import QRCode from 'qrcode'
 import { Database, ShieldCheck, RefreshCw, HardDrive, X, ChevronLeft, ChevronRight } from '../icons'
 import { api, type Row } from '../api'
 import { attempt, notify, confirmModal } from '../ui'
 import RefreshButton from '../components/RefreshButton.vue'
+import PasswordInput from '../components/PasswordInput.vue'
 
 const usage = ref<Row>({})
+const disk = ref<Row | null>(null)
+const diskAlert = reactive<Row>({ enabled: false, threshold: 80, profile_id: 0 })
+const dingtalkProfiles = ref<Row[]>([])
+const diskAlertSaving = ref(false)
 const route = useRoute()
+const router = useRouter()
+type SettingsSection = 'general' | 'storage' | 'security'
+const activeSection = ref<SettingsSection>('general')
 const storage = reactive<Row>({})
 const security = reactive<Row>({})
+const systemPrefs = reactive<Row>({})
+const systemSaving = ref(false)
+const adminPassword = reactive({ current: '', next: '', confirm: '' })
+const passwordBusy = ref(false)
+const adminUsername = reactive({ next: '', currentPassword: '' })
+const usernameBusy = ref(false)
+const accountModal = ref<'username' | 'password' | null>(null)
+const accountError = ref('')
 const swagger = ref(false)
 const busy = ref(false)
 const pendingAction = ref<'storage' | 'cleanup' | null>(null)
@@ -59,6 +75,115 @@ function bytes(value: unknown) {
 
 function asBoolean(value: unknown): boolean {
   return value === true || value === 1 || value === '1' || value === 'true'
+}
+
+async function saveAdminUsername() {
+  if (usernameBusy.value) return
+  const username = adminUsername.next.trim()
+  if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username) || username === systemPrefs.admin_username) {
+    accountError.value = '请输入不同于当前账号的 3–32 位用户名'
+    return
+  }
+  if (!adminUsername.currentPassword) {
+    accountError.value = '请输入当前密码'
+    return
+  }
+  accountError.value = ''
+  usernameBusy.value = true
+  try {
+    const result = await attempt(() => api<Row>('/admin/username', 'PUT', {
+      username, current_password: adminUsername.currentPassword,
+    }))
+    if (result?.ok) window.location.assign(`${String(systemPrefs.access_context || '')}/login`)
+  } finally {
+    usernameBusy.value = false
+  }
+}
+
+async function saveAdminPassword() {
+  if (passwordBusy.value) return
+  if (!adminPassword.current) {
+    accountError.value = '请输入当前密码'
+    return
+  }
+  if (adminPassword.next.length < 12 || adminPassword.next.length > 128) {
+    accountError.value = '新密码需为 12–128 位'
+    return
+  }
+  if (adminPassword.next !== adminPassword.confirm) {
+    accountError.value = '两次输入的新密码不一致'
+    return
+  }
+  accountError.value = ''
+  passwordBusy.value = true
+  try {
+    const result = await attempt(() => api<Row>('/admin/password', 'PUT', {
+      current_password: adminPassword.current,
+      new_password: adminPassword.next,
+    }))
+    if (result?.ok) {
+      adminPassword.current = ''
+      adminPassword.next = ''
+      adminPassword.confirm = ''
+      window.location.assign(`${window.location.pathname.replace(/\/$/, '')}/login`)
+    }
+  } finally {
+    passwordBusy.value = false
+  }
+}
+
+async function openAccountModal(kind: 'username' | 'password') {
+  accountError.value = ''
+  adminUsername.next = ''
+  adminUsername.currentPassword = ''
+  adminPassword.current = ''
+  adminPassword.next = ''
+  adminPassword.confirm = ''
+  accountModal.value = kind
+  await nextTick()
+  document.querySelector<HTMLInputElement>('.account-dialog-box input')?.focus()
+}
+
+function closeAccountModal() {
+  if (usernameBusy.value || passwordBusy.value) return
+  accountModal.value = null
+  accountError.value = ''
+  adminUsername.currentPassword = ''
+  adminPassword.current = ''
+  adminPassword.next = ''
+  adminPassword.confirm = ''
+}
+
+async function saveSystemPrefs() {
+  if (systemSaving.value) return
+  const name = String(systemPrefs.app_name || '').trim()
+  const primary = String(systemPrefs.holiday_primary_url || '').trim()
+  const backup = String(systemPrefs.holiday_backup_url || '').trim()
+  if (!name || name.length > 40) {
+    notify('系统名称需为 1–40 个字符', 'error')
+    return
+  }
+  if (!primary.includes('{year}') || !backup.includes('{year}')) {
+    notify('节假日接口地址需要包含 {year}', 'error')
+    return
+  }
+  const context = String(systemPrefs.access_context || '').trim()
+  if (context && context !== '/' && !/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(context)) {
+    notify('访问路径前缀需留空或填写 /ops 这样的路径', 'error')
+    return
+  }
+  systemSaving.value = true
+  try {
+    const result = await attempt(() => api<Row>('/system-preferences', 'PUT', {
+      app_name: name, access_context: context, holiday_primary_url: primary, holiday_backup_url: backup,
+    }))
+    if (result?.ok) {
+      notify('基础设置已保存')
+      window.setTimeout(() => window.location.assign(`${String(result.access_context || '')}/#/settings?section=general`), 500)
+    }
+  } finally {
+    systemSaving.value = false
+  }
 }
 
 function toggleCleanupScope(scope: string) {
@@ -155,14 +280,18 @@ async function load(): Promise<boolean> {
   if (refreshing.value) return false
   refreshing.value = true
   try {
-    const [stored, secured, docs] = await Promise.all([
+    const [stored, secured, docs, preferences, profiles] = await Promise.all([
       attempt(() => api<Row>('/storage')),
       attempt(() => api<Row>('/security-settings')),
       attempt(() => api<Row>('/swagger-settings')),
+      attempt(() => api<Row>('/system-preferences')),
+      attempt(() => api<Row>('/dingtalk-profiles')),
     ])
     if (stored?.config) {
       if (stored.latest_completed_month) latestCompletedMonth.value = String(stored.latest_completed_month)
       usage.value = stored.usage || {}
+      disk.value = stored.disk || null
+      if (stored.disk_alert) Object.assign(diskAlert, stored.disk_alert)
       Object.assign(storage, stored.config)
       storage.enabled = asBoolean(stored.config.enabled)
       storage.browser_state_cleanup_enabled = asBoolean(stored.config.browser_state_cleanup_enabled)
@@ -178,10 +307,37 @@ async function load(): Promise<boolean> {
       }
     }
     if (secured) Object.assign(security, secured)
+    if (preferences) Object.assign(systemPrefs, preferences)
+    dingtalkProfiles.value = profiles?.profiles || []
     swagger.value = Boolean(docs?.enabled)
     return Boolean(stored?.config)
   } finally {
     refreshing.value = false
+  }
+}
+
+async function saveDiskAlert() {
+  if (diskAlertSaving.value) return
+  const threshold = Number(diskAlert.threshold)
+  if (!Number.isInteger(threshold) || threshold < 1 || threshold > 99) {
+    notify('告警阈值需为 1–99%', 'error')
+    return
+  }
+  if (diskAlert.enabled && !Number(diskAlert.profile_id)) {
+    notify('请选择钉钉机器人', 'error')
+    return
+  }
+  diskAlertSaving.value = true
+  try {
+    const result = await attempt(() => api<Row>('/storage/disk-alert', 'PUT', {
+      enabled: Boolean(diskAlert.enabled), threshold, profile_id: Number(diskAlert.profile_id) || 0,
+    }))
+    if (result?.ok) {
+      Object.assign(diskAlert, result.disk_alert)
+      notify('磁盘告警设置已保存')
+    }
+  } finally {
+    diskAlertSaving.value = false
   }
 }
 
@@ -415,25 +571,62 @@ async function updateDocs() {
   if (!result) swagger.value = !swagger.value
 }
 
-function scrollToSection(id: string) {
-  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+function isSettingsSection(value: unknown): value is SettingsSection {
+  return value === 'general' || value === 'storage' || value === 'security'
 }
+
+function selectSection(section: SettingsSection) {
+  activeSection.value = section
+  void router.replace({ query: { ...route.query, section } })
+}
+
+watch(() => route.query.section, (section) => {
+  activeSection.value = isSettingsSection(section) ? section : 'general'
+}, { immediate: true })
 
 onMounted(async () => {
   document.addEventListener('pointerdown', closeCleanupMenu)
   await Promise.all([loadUiConfig(), load()])
-  const section = route.query.section
-  if (section === 'storage' || section === 'security') {
-    scrollToSection(`${section}-section`)
-  }
 })
 onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
 </script>
 
 <template>
-  <section class="page-intro"><div><h1>系统设置</h1></div><ButtonGroup class="page-actions"><RefreshButton :loading="refreshing || busy" @click="load" /></ButtonGroup></section>
-  <nav class="settings-tabs" aria-label="设置分类"><button type="button" aria-controls="storage-section" @click="scrollToSection('storage-section')">数据存储</button><button type="button" aria-controls="security-section" @click="scrollToSection('security-section')">安全设置</button></nav>
-  <section id="storage-section" class="settings-section"><div class="section-heading"><div><h2>数据存储</h2></div></div><div class="storage-summary"><div><HardDrive :size="21" /><span>总占用</span><strong>{{ bytes(usage.total_bytes) }}</strong></div><div><Database :size="21" /><span>截图</span><strong>{{ bytes(usage.screenshots_bytes) }}</strong></div><div><Database :size="21" /><span>报告</span><strong>{{ bytes(usage.reports_bytes) }}</strong></div><div><Database :size="21" /><span>日志</span><strong>{{ bytes(usage.logs_bytes) }}</strong></div></div>
+  <div class="settings-page">
+  <section class="page-intro settings-intro"><div><h1>系统设置</h1><p>管理系统信息、数据保留与账户安全</p></div><ButtonGroup class="page-actions"><RefreshButton :loading="refreshing || busy" @click="load" /></ButtonGroup></section>
+  <nav class="settings-tabs settings-category-tabs" role="tablist" aria-label="设置分类"><button type="button" role="tab" id="general-tab" aria-controls="general-section" :aria-selected="activeSection === 'general'" :class="{ active: activeSection === 'general' }" @click="selectSection('general')">基础设置</button><button type="button" role="tab" id="storage-tab" aria-controls="storage-section" :aria-selected="activeSection === 'storage'" :class="{ active: activeSection === 'storage' }" @click="selectSection('storage')">数据存储</button><button type="button" role="tab" id="security-tab" aria-controls="security-section" :aria-selected="activeSection === 'security'" :class="{ active: activeSection === 'security' }" @click="selectSection('security')">安全设置</button></nav>
+  <section v-show="activeSection === 'general'" id="general-section" class="settings-section" role="tabpanel" aria-labelledby="general-tab">
+    <div class="section-heading"><div><h2>基础设置</h2></div></div>
+    <form class="form-section settings-form system-preferences-form" novalidate @submit.prevent="saveSystemPrefs">
+      <div class="form-grid">
+        <label class="field"><span>系统名称</span><input v-model="systemPrefs.app_name" maxlength="40" required placeholder="例如 运维巡检平台"></label>
+        <label class="field"><span>访问路径前缀</span><input v-model="systemPrefs.access_context" placeholder="例如 /ops；留空为根路径" maxlength="80"></label>
+      </div>
+      <div class="system-preferences-holiday">
+        <h3>节假日数据源</h3>
+        <div class="form-grid">
+          <label class="field"><span>主接口地址</span><input v-model="systemPrefs.holiday_primary_url" type="text" spellcheck="false" placeholder="包含 {year} 的 HTTP(S) 地址"></label>
+          <label class="field"><span>备用接口地址</span><input v-model="systemPrefs.holiday_backup_url" type="text" spellcheck="false" placeholder="包含 {year} 的 HTTP(S) 地址"></label>
+        </div>
+      </div>
+      <div class="system-preferences-actions"><ActionButton type="submit" variant="primary" :disabled="systemSaving || !systemPrefs.app_name">保存基础设置</ActionButton></div>
+    </form>
+  </section>
+  <section v-show="activeSection === 'storage'" id="storage-section" class="settings-section" role="tabpanel" aria-labelledby="storage-tab"><div class="section-heading"><div><h2>数据存储</h2></div></div>
+    <div v-if="disk" class="form-section settings-form disk-status-card">
+      <div class="disk-status-heading"><div><HardDrive :size="21" /><strong>磁盘空间</strong><span class="disk-status-badge" :class="{ warning: Number(disk.used_percent) >= Number(diskAlert.threshold) }">{{ Number(disk.used_percent) >= Number(diskAlert.threshold) ? '达到阈值' : '正常' }}</span></div><small>数据目录：{{ disk.path }}</small></div>
+      <div class="disk-status-line"><strong>{{ disk.used_percent }}%</strong><span>已用 {{ bytes(disk.used_bytes) }} / 总容量 {{ bytes(disk.total_bytes) }} · 可用 {{ bytes(disk.free_bytes) }}</span></div>
+      <div class="disk-status-track" role="progressbar" :aria-valuenow="Number(disk.used_percent)" aria-valuemin="0" aria-valuemax="100" aria-label="磁盘已用比例"><span :style="{ width: `${Math.min(100, Number(disk.used_percent))}%` }"></span><i :style="{ left: `${Number(diskAlert.threshold)}%` }"></i></div>
+      <div class="disk-status-scale"><span>0%</span><span>告警阈值 {{ diskAlert.threshold }}%</span><span>100%</span></div>
+      <form class="disk-alert-form" @submit.prevent="saveDiskAlert">
+        <label class="switch-row"><input v-model="diskAlert.enabled" type="checkbox" /><strong>启用钉钉磁盘告警</strong></label>
+        <label class="field"><span>告警阈值（%）</span><input v-model.number="diskAlert.threshold" type="number" min="1" max="99" /></label>
+        <label class="field"><span>钉钉机器人</span><select v-model.number="diskAlert.profile_id"><option :value="0">请选择</option><option v-for="profile in dingtalkProfiles" :key="profile.id" :value="Number(profile.id)">{{ profile.name }}</option></select></label>
+        <ActionButton type="submit" variant="primary" :disabled="diskAlertSaving" :loading="diskAlertSaving">保存告警设置</ActionButton>
+      </form>
+    </div>
+    <div class="storage-summary"><div><HardDrive :size="21" /><span>应用数据</span><strong>{{ bytes(usage.total_bytes) }}</strong></div><div><Database :size="21" /><span>截图</span><strong>{{ bytes(usage.screenshots_bytes) }}</strong></div><div><Database :size="21" /><span>报告</span><strong>{{ bytes(usage.reports_bytes) }}</strong></div><div><Database :size="21" /><span>日志</span><strong>{{ bytes(usage.logs_bytes) }}</strong></div></div>
+    <div class="storage-panels">
     <form class="form-section settings-form auto-cleanup-form" @submit.prevent="saveStorage">
       <div class="form-section-head"><div><h2>自动清理</h2></div></div>
       <label class="switch-row auto-cleanup-switch"><input v-model="storage.enabled" type="checkbox" /><strong>启用自动清理</strong></label>
@@ -514,14 +707,28 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
       </div>
       <div class="manual-cleanup-footer"><span>清理后无法恢复</span><ActionButton type="button" :disabled="busy || cleanupPreviewBusy || !Number(cleanupPreview?.total_items)" @click="cleanup" variant="danger" :loading="pendingAction === 'cleanup'">立即清理</ActionButton></div>
     </div>
+    </div>
   </section>
-  <section id="security-section" class="settings-section">
+  <section v-show="activeSection === 'security'" id="security-section" class="settings-section" role="tabpanel" aria-labelledby="security-tab">
     <div class="section-heading"><div><h2>安全设置</h2></div></div>
+    <div class="security-panels">
     <div class="form-section settings-form">
-      <div class="form-section-head"><div><h2>账户安全</h2></div></div>
-      <div class="form-grid">
-        <!-- 两步验证独立交互行 -->
-        <div class="mfa-switch-row field-full">
+      <div class="form-section-head"><div><h2>管理员账户</h2></div></div>
+      <div class="account-action-list">
+        <div class="account-action-row">
+          <div class="account-action-copy"><span>管理员用户名</span><strong>{{ systemPrefs.admin_username || '—' }}</strong></div>
+          <ActionButton type="button" variant="secondary" @click="openAccountModal('username')">修改用户名</ActionButton>
+        </div>
+        <div class="account-action-row">
+          <div class="account-action-copy"><span>登录密码</span><strong>已设置</strong></div>
+          <ActionButton type="button" variant="secondary" @click="openAccountModal('password')">修改密码</ActionButton>
+        </div>
+      </div>
+    </div>
+    <div class="form-section settings-form">
+      <div class="form-section-head"><div><h2>访问保护</h2></div></div>
+      <div class="account-security-options">
+        <div class="mfa-switch-row">
           <label class="switch-row">
             <input
               type="checkbox"
@@ -540,13 +747,41 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
           </div>
         </div>
 
-        <label class="switch-row field-full">
+        <label class="switch-row">
           <input v-model="swagger" type="checkbox" @change="updateDocs" />启用 API 接口文档
         </label>
       </div>
 
     </div>
+    </div>
   </section>
+  </div>
+
+  <Transition name="modal-fade">
+    <div v-if="accountModal" class="modal-backdrop" @click="closeAccountModal" @keydown.esc.stop="closeAccountModal">
+      <div class="mfa-dialog-box account-dialog-box" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title" @click.stop>
+        <div class="mfa-dialog-header">
+          <h3 id="account-dialog-title">{{ accountModal === 'username' ? '修改用户名' : '修改密码' }}</h3>
+          <IconButton class="icon-button" type="button" aria-label="关闭" label="关闭" @click="closeAccountModal"><X :size="18" /></IconButton>
+        </div>
+        <form v-if="accountModal === 'username'" class="account-dialog-form" autocomplete="off" novalidate @submit.prevent="saveAdminUsername">
+          <label class="field"><span>新用户名</span><input v-model="adminUsername.next" maxlength="32" autocomplete="off" placeholder="输入新用户名"></label>
+          <label class="field"><span>当前密码</span><PasswordInput v-model="adminUsername.currentPassword" autocomplete="current-password" placeholder="输入当前密码" /></label>
+          <p v-if="accountError" class="account-dialog-error" role="alert">{{ accountError }}</p>
+          <p class="account-dialog-note">保存后需重新登录。</p>
+          <ButtonGroup class="mfa-dialog-footer"><ActionButton type="button" variant="secondary" @click="closeAccountModal">取消</ActionButton><ActionButton type="submit" variant="primary" :disabled="usernameBusy" :loading="usernameBusy">确认修改</ActionButton></ButtonGroup>
+        </form>
+        <form v-else class="account-dialog-form" autocomplete="off" novalidate @submit.prevent="saveAdminPassword">
+          <label class="field"><span>当前密码</span><PasswordInput v-model="adminPassword.current" autocomplete="current-password" placeholder="输入当前密码" /></label>
+          <label class="field"><span>新密码</span><PasswordInput v-model="adminPassword.next" autocomplete="new-password" maxlength="128" placeholder="至少 12 位" /></label>
+          <label class="field"><span>确认新密码</span><PasswordInput v-model="adminPassword.confirm" autocomplete="new-password" maxlength="128" placeholder="再次输入新密码" /></label>
+          <p v-if="accountError" class="account-dialog-error" role="alert">{{ accountError }}</p>
+          <p class="account-dialog-note">保存后需重新登录。</p>
+          <ButtonGroup class="mfa-dialog-footer"><ActionButton type="button" variant="secondary" @click="closeAccountModal">取消</ActionButton><ActionButton type="submit" variant="primary" :disabled="passwordBusy" :loading="passwordBusy">确认修改</ActionButton></ButtonGroup>
+        </form>
+      </div>
+    </div>
+  </Transition>
 
   <!-- MFA 绑定与二维码模态弹窗 -->
   <Transition name="modal-fade">
@@ -672,3 +907,74 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
     </div>
   </Transition>
 </template>
+
+<style scoped>
+.settings-page { width: min(100%, 1320px); margin-inline: auto; }
+.settings-intro { margin-bottom: 22px; }
+.settings-intro p { margin: 6px 0 0; color: #78909c; font-size: 12px; }
+.settings-category-tabs { display: inline-flex; gap: 4px; margin: 0 0 30px; padding: 4px; border: 1px solid #d7e6eb; border-radius: 10px; background: rgba(235, 246, 249, .82); }
+.settings-category-tabs button { min-width: 106px; padding: 10px 18px; border: 0; border-radius: 7px; color: #617d8b; font-size: 12px; font-weight: 650; }
+.settings-category-tabs button:hover { background: rgba(255, 255, 255, .55); color: #1d6880; }
+.settings-category-tabs button.active { background: #fff; color: #176b84; box-shadow: 0 1px 5px rgba(29, 87, 107, .13); }
+.settings-section { margin-bottom: 0; }
+.settings-section .section-heading { margin-bottom: 17px; }
+.settings-section .settings-form { background: rgba(245, 251, 253, .88); border-color: #d6e8ed; border-radius: 12px; box-shadow: 0 8px 30px rgba(39, 101, 121, .045); }
+.settings-section .form-section-head { margin-bottom: 16px; }
+.settings-section .form-section-head h2 { margin: 0; font-size: 15px; }
+.system-preferences-form { display: grid; gap: 22px; }
+.system-preferences-form .form-grid { max-width: none; }
+.system-preferences-form .field input { min-height: 42px; background: rgba(255, 255, 255, .94); }
+.system-preferences-holiday { border-top: 1px solid #dce8ed; padding-top: 18px; }
+.system-preferences-holiday h3 { margin: 0 0 16px; color: #294858; font-size: 14px; line-height: 1.35; }
+.system-preferences-actions { display: flex; justify-content: flex-end; border-top: 1px solid #dce8ed; padding-top: 18px; }
+.disk-status-card { display: grid; gap: 16px; margin-bottom: 18px !important; }
+.disk-status-heading, .disk-status-heading > div, .disk-status-line, .disk-status-scale { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.disk-status-heading { border-bottom: 1px solid #dce8ed; padding-bottom: 15px; }
+.disk-status-heading > div { justify-content: flex-start; color: #177991; }
+.disk-status-heading strong { color: #263f4e; font-size: 15px; }
+.disk-status-heading small { color: #718b98; font-size: 11px; }
+.disk-status-badge { padding: 4px 9px; border-radius: 5px; background: #e5f5eb; color: #18835c; font-size: 11px; font-weight: 700; }
+.disk-status-badge.warning { background: #fff0e8; color: #bd4a27; }
+.disk-status-line strong { color: #138866; font-size: 26px; font-variant-numeric: tabular-nums; }
+.disk-status-line span { color: #536c79; font-size: 12px; }
+.disk-status-track { position: relative; height: 12px; border-radius: 9px; background: #dfe8ec; }
+.disk-status-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #37c995, #14ac79); }
+.disk-status-track i { position: absolute; top: -3px; width: 3px; height: 18px; border-radius: 2px; background: #d44e40; }
+.disk-status-scale { margin-top: -10px; color: #718b98; font-size: 10px; }
+.disk-status-scale span:nth-child(2) { color: #c44737; }
+.disk-alert-form { display: grid; grid-template-columns: minmax(180px, 1fr) 140px minmax(180px, 1fr) auto; align-items: end; gap: 14px; border-top: 1px solid #dce8ed; padding-top: 17px; }
+.disk-alert-form .switch-row { min-height: 40px; }
+.disk-alert-form .field { margin: 0; }
+.storage-summary { gap: 12px; margin-bottom: 18px; }
+.storage-summary > div { background: rgba(245, 251, 253, .88); border-color: #d6e8ed; border-radius: 10px; padding: 16px 19px; }
+.storage-summary strong { font-variant-numeric: tabular-nums; }
+.storage-panels { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr); gap: 18px; align-items: start; }
+.storage-panels > .settings-form { min-width: 0; margin-bottom: 0; }
+.storage-panels .manual-cleanup-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.storage-panels .manual-cleanup-scopes { grid-template-columns: minmax(0, 1fr); }
+.storage-panels .auto-cleanup-fields { gap: 15px; }
+.storage-panels .editor-footer { margin-top: 7px; }
+.security-panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: stretch; }
+.security-panels > .settings-form { min-width: 0; margin-bottom: 0; }
+.account-action-list { display: grid; }
+.account-action-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; min-height: 70px; padding: 12px 0; border-bottom: 1px solid #dce8ed; }
+.account-action-row:first-child { padding-top: 0; }
+.account-action-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.account-action-copy { display: grid; gap: 4px; min-width: 0; }
+.account-action-copy span { color: #708996; font-size: 11px; font-weight: 600; }
+.account-action-copy strong { color: #263f4e; font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
+.account-security-options { display: grid; gap: 0; padding-top: 0; }
+.account-security-options > * { display: flex; align-items: center; min-height: 70px; border-bottom: 1px solid #dce8ed; }
+.account-security-options > *:last-child { border-bottom: 0; }
+.account-security-options .switch-row { font-size: 12px; }
+.account-dialog-box { max-width: 440px; gap: 19px; }
+.account-dialog-box h3 { margin: 0; color: #253f4e; font-size: 18px; }
+.account-dialog-form { display: grid; gap: 15px; }
+.account-dialog-form .field { font-size: 12px; }
+.account-dialog-note { margin: 0; color: #8198a4; font-size: 11px; }
+.account-dialog-error { margin: 0; color: #b42318; font-size: 12px; }
+.account-dialog-form .mfa-dialog-footer { margin-top: 3px; }
+@media (max-width: 1080px) { .storage-panels, .security-panels { grid-template-columns: 1fr; } }
+@media (max-width: 1000px) { .disk-alert-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 680px) { .system-preferences-form { gap: 19px; } .settings-category-tabs { display: flex; } .settings-category-tabs button { min-width: 0; flex: 1; padding-inline: 8px; } }
+</style>

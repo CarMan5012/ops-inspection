@@ -13,6 +13,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from app.settings import settings
+from app.repository import get_system_setting
 
 logger = logging.getLogger(__name__)
 _lock = threading.RLock()
@@ -99,7 +100,9 @@ def _load_cache(year: int) -> dict[str, bool] | None:
 def refresh_year(year: int) -> bool:
     global _online, _source, _checked_at
     errors = []
-    for source, template, parser in (("主接口", settings.holiday_primary_url, _backup_days), ("备用接口", settings.holiday_backup_url, _primary_days)):
+    primary_url = get_system_setting("holiday_primary_url", settings.holiday_primary_url)
+    backup_url = get_system_setting("holiday_backup_url", settings.holiday_backup_url)
+    for source, template, parser in (("主接口", primary_url, _backup_days), ("备用接口", backup_url, _primary_days)):
         try:
             days = parser(year, _fetch_json(template.format(year=quote(str(year)))))
             path = _cache_path(year)

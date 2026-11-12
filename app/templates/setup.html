@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>首次初始化 - 运维巡检平台</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; background: #edf5ff; color: #1e293b; font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    main { width: min(540px, 100%); padding: 30px; background: #fff; border-radius: 20px; box-shadow: 0 18px 42px rgba(68,103,170,.13); }
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+    .brand img { width: 44px; height: 44px; }
+    .brand strong { display: block; font-size: 17px; color: #071327; }
+    .brand span { color: #64748b; font-size: 12px; }
+    .steps { display: flex; gap: 5px; margin-bottom: 30px; }
+    .steps span { flex: 1; height: 5px; border-radius: 8px; background: #dbe7f7; }
+    .steps span.active { background: #2563eb; }
+    h1 { margin: 0 0 8px; font-size: 24px; color: #071327; }
+    p { margin: 0 0 20px; color: #53657e; }
+    label { display: block; margin: 15px 0 5px; font-weight: 650; }
+    input { width: 100%; height: 44px; padding: 0 12px; border: 1px solid #c7d4e8; border-radius: 10px; background: #fff; font: inherit; }
+    input:focus { outline: 2px solid #93b4f8; outline-offset: 1px; }
+    input.invalid { border-color: #dc2626; background: #fffafa; }
+    .field-error { display: block; min-height: 18px; margin-top: 4px; color: #b42318; font-size: 12px; }
+    small { display: block; margin-top: 5px; color: #64748b; }
+    code { overflow-wrap: anywhere; font-size: 12px; }
+    .command { display: block; padding: 14px; border-radius: 10px; background: #edf3fb; color: #17375e; }
+    .error { padding: 10px 12px; border-radius: 8px; color: #a21d16; background: #fef2f2; margin-bottom: 18px; }
+    .setup-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; }
+    .setup-fields > div { min-width: 0; }
+    .setup-fields input { min-width: 0; }
+    .holiday-source { margin-top: 18px; border-top: 1px solid #e4ebf4; padding-top: 14px; }
+    .holiday-source h2 { margin: 0 0 2px; font-size: 16px; }
+    @media (max-width: 580px) { .setup-fields { grid-template-columns: 1fr; } }
+    .review { margin: 0; border: 1px solid #e1eaf5; border-radius: 10px; overflow: hidden; }
+    .review div { display: flex; gap: 15px; padding: 11px 14px; border-bottom: 1px solid #e1eaf5; }
+    .review div:last-child { border-bottom: 0; }
+    .review dt { width: 110px; flex: none; color: #64748b; }
+    .review dd { margin: 0; overflow-wrap: anywhere; }
+    .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 28px; }
+    button { min-height: 44px; padding: 0 20px; border: 0; border-radius: 10px; background: #2563eb; color: #fff; font: inherit; font-weight: 700; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    button.secondary { background: #e9f0fa; color: #244467; }
+    [hidden] { display: none !important; }
+  </style>
+  <link rel="stylesheet" href="{{ url_for_frontend('static/ambient-scene.css?v=4') }}">
+  <link rel="stylesheet" href="{{ url_for_frontend('static/form-density.css?v=3') }}">
+</head>
+<body class="ambient-page ambient-auth">
+  {% include "ambient_scene.html" %}
+  <main>
+    <div class="brand"><img src="{{ login_logo_data_uri }}" alt=""><div><strong>运维巡检平台</strong><span>首次安装向导</span></div></div>
+    <div class="steps" aria-label="初始化进度"><span></span><span></span><span></span><span></span><span></span></div>
+    {% if error %}<div class="error" role="alert" id="server-error">设置未完成，请检查输入后重试。{% if error == 'rate' %}尝试次数过多，请稍后再试。{% elif error == 'code' %}初始化码不正确。{% endif %}</div>{% endif %}
+    <form method="post" action="/setup" novalidate data-setup-form>
+      <section data-step="0"><h1>开始初始化</h1><p>在部署机器运行命令，获取初始化码。</p><code class="command">{{ setup_log_command }}</code></section>
+      <section data-step="1" hidden><h1>验证初始化码</h1><label for="setup_code">初始化码</label><input id="setup_code" name="setup_code" placeholder="输入 SETUP_CODE= 后的内容" autocomplete="off" aria-describedby="setup_code-error"><span id="setup_code-error" class="field-error" data-error-for="setup_code" aria-live="polite"></span></section>
+      <section data-step="2" hidden>
+        <h1>设置管理员账号</h1>
+        <label for="username">管理员用户名</label><input id="username" name="username" value="admin" placeholder="例如 admin" autocomplete="username" maxlength="32" aria-describedby="username-error"><span id="username-error" class="field-error" data-error-for="username" aria-live="polite"></span>
+        <label for="password">登录密码</label>
+        <span class="password-wrap"><input id="password" name="password" type="password" placeholder="至少 12 位密码" autocomplete="new-password" maxlength="128" aria-describedby="password-error"><button class="password-toggle" type="button" data-password-toggle="password" aria-label="显示密码" aria-pressed="false">
+          <svg class="icon-hidden" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.6 6.1A10.8 10.8 0 0 1 12 6c6.4 0 10 6 10 6a14 14 0 0 1-4.1 4.9"/><path d="M6.1 6.6A14 14 0 0 0 2 12s3.6 6 10 6a10.8 10.8 0 0 0 4.2-.8"/><path d="M10 10a3 3 0 0 0 4 4M2 2l20 20"/></svg>
+          <svg class="icon-visible" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button></span><span id="password-error" class="field-error" data-error-for="password" aria-live="polite"></span>
+        <label for="password_confirm">确认密码</label>
+        <span class="password-wrap"><input id="password_confirm" name="password_confirm" type="password" placeholder="再次输入密码" autocomplete="new-password" maxlength="128" aria-describedby="password_confirm-error"><button class="password-toggle" type="button" data-password-toggle="password_confirm" aria-label="显示密码" aria-pressed="false">
+          <svg class="icon-hidden" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.6 6.1A10.8 10.8 0 0 1 12 6c6.4 0 10 6 10 6a14 14 0 0 1-4.1 4.9"/><path d="M6.1 6.6A14 14 0 0 0 2 12s3.6 6 10 6a10.8 10.8 0 0 0 4.2-.8"/><path d="M10 10a3 3 0 0 0 4 4M2 2l20 20"/></svg>
+          <svg class="icon-visible" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button></span><span id="password_confirm-error" class="field-error" data-error-for="password_confirm" aria-live="polite"></span>
+      </section>
+      <section data-step="3" hidden>
+        <h1>基础设置</h1>
+        <div class="setup-fields">
+          <div><label for="app_name">系统名称</label><input id="app_name" name="app_name" value="运维巡检平台" placeholder="例如 运维巡检平台" maxlength="40" aria-describedby="app_name-error"><span id="app_name-error" class="field-error" data-error-for="app_name" aria-live="polite"></span></div>
+          <div><label for="access_context">访问路径前缀</label><input id="access_context" name="access_context" placeholder="例如 /ops；留空为根路径" maxlength="80" aria-describedby="access_context-error"><span id="access_context-error" class="field-error" data-error-for="access_context" aria-live="polite"></span></div>
+        </div>
+        <div class="holiday-source">
+          <h2>节假日数据源</h2>
+          <label for="holiday_primary_url">主接口地址</label><input id="holiday_primary_url" name="holiday_primary_url" value="{{ default_holiday_primary_url }}" placeholder="包含 {year} 的 HTTP(S) 地址" aria-describedby="holiday_primary_url-error"><span id="holiday_primary_url-error" class="field-error" data-error-for="holiday_primary_url" aria-live="polite"></span>
+          <label for="holiday_backup_url">备用接口地址</label><input id="holiday_backup_url" name="holiday_backup_url" value="{{ default_holiday_backup_url }}" placeholder="包含 {year} 的 HTTP(S) 地址" aria-describedby="holiday_backup_url-error"><span id="holiday_backup_url-error" class="field-error" data-error-for="holiday_backup_url" aria-live="polite"></span>
+        </div>
+      </section>
+      <section data-step="4" hidden><h1>确认设置</h1><dl class="review"><div><dt>管理员用户名</dt><dd id="review-username"></dd></div><div><dt>系统名称</dt><dd id="review-name"></dd></div><div><dt>访问路径</dt><dd id="review-path"></dd></div><div><dt>节假日数据源</dt><dd>已配置主、备用地址</dd></div></dl></section>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="actions"><button type="button" class="secondary" id="previous" hidden>上一步</button><button type="button" id="next">下一步</button><button type="submit" id="finish" hidden>完成初始化</button></div>
+    </form>
+  </main>
+  <script>
+    (() => {
+      const form = document.querySelector('[data-setup-form]');
+      const steps = [...document.querySelectorAll('[data-step]')];
+      const bars = [...document.querySelectorAll('.steps span')];
+      const previous = document.querySelector('#previous');
+      const next = document.querySelector('#next');
+      const finish = document.querySelector('#finish');
+      document.querySelectorAll('[data-password-toggle]').forEach(button => {
+        button.addEventListener('click', () => {
+          const input = document.getElementById(button.dataset.passwordToggle);
+          const visible = input.type === 'password';
+          input.type = visible ? 'text' : 'password';
+          button.setAttribute('aria-pressed', String(visible));
+          button.setAttribute('aria-label', visible ? '隐藏密码' : '显示密码');
+          input.focus();
+        });
+      });
+      let step = 0;
+      const field = (name) => form.elements.namedItem(name);
+      const showError = (name, message) => {
+        const input = field(name);
+        input.classList.toggle('invalid', Boolean(message));
+        if (message) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid');
+        document.querySelector('[data-error-for="' + name + '"]').textContent = message;
+        if (message) input.focus();
+      };
+      const render = () => {
+        steps.forEach((item, index) => item.hidden = index !== step);
+        bars.forEach((item, index) => item.classList.toggle('active', index <= step));
+        previous.hidden = step === 0;
+        next.hidden = step === steps.length - 1;
+        finish.hidden = step !== steps.length - 1;
+      };
+      const validAccount = () => {
+        const username = field('username').value.trim();
+        const password = field('password').value;
+        const confirmation = field('password_confirm').value;
+        if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username)) { showError('username', '请输入 3–32 位字母、数字、下划线、点或连字符。'); return false; }
+        if (password.length < 12 || password.length > 128) { showError('password', '密码需为 12–128 位。'); return false; }
+        if (confirmation !== password) { showError('password_confirm', '两次输入的密码不一致。'); return false; }
+        field('username').value = username;
+        return true;
+      };
+      const validBasics = () => {
+        const name = field('app_name').value.trim();
+        const context = field('access_context').value.trim();
+        if (!name || name.length > 40) { showError('app_name', '系统名称需为 1–40 个字符。'); return false; }
+        if (context !== '' && context !== '/' && !/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(context)) { showError('access_context', '留空使用根路径，或填写 /ops 这样的路径。'); return false; }
+        for (const key of ['holiday_primary_url', 'holiday_backup_url']) {
+          const value = field(key).value.trim();
+          if ((value.match(/\{year\}/g) || []).length !== 1 || !/^https?:\/\//.test(value)) { showError(key, '请输入包含一个 {year} 的 HTTP 或 HTTPS 地址。'); return false; }
+        }
+        field('app_name').value = name;
+        field('access_context').value = context === '/' ? '' : context;
+        document.querySelector('#review-username').textContent = field('username').value;
+        document.querySelector('#review-name').textContent = name;
+        document.querySelector('#review-path').textContent = field('access_context').value || '/';
+        return true;
+      };
+      next.addEventListener('click', async () => {
+        if (step === 1) {
+          const code = field('setup_code').value.trim();
+          if (!code) { showError('setup_code', '请输入初始化码。'); return; }
+          next.disabled = true;
+          try {
+            const body = new FormData();
+            body.set('setup_code', code);
+            body.set('csrf_token', field('csrf_token').value);
+            const response = await fetch('/setup/verify-code', {method: 'POST', body, credentials: 'same-origin'});
+            if (!response.ok) { showError('setup_code', response.status === 429 ? '尝试次数过多，请稍后重试。' : '初始化码不正确。'); return; }
+            field('setup_code').value = code;
+          } catch { showError('setup_code', '验证失败，请检查网络后重试。'); return; }
+          finally { next.disabled = false; }
+        }
+        if (step === 2 && !validAccount()) return;
+        if (step === 3 && !validBasics()) return;
+        step += 1; render();
+      });
+      previous.addEventListener('click', () => { step -= 1; render(); });
+      form.addEventListener('submit', (event) => {
+        if (step !== 4 || !validAccount() || !validBasics()) { event.preventDefault(); return; }
+        finish.disabled = true;
+      });
+      for (const input of form.querySelectorAll('input:not([type="hidden"])')) input.addEventListener('input', () => showError(input.name, ''));
+      const serverError = {{ error | tojson }};
+      if (serverError) step = serverError === 'code' || serverError === 'rate' ? 1 : serverError === 'username' || serverError === 'password' ? 2 : 3;
+      render();
+    })();
+  </script>
+</body>
+</html>

@@ -14,7 +14,7 @@ FREQUENCIES = {"daily", "weekdays", "weekly", "monthly", "workday", "non_workday
 HOLIDAY_FREQUENCIES = {"workday", "non_workday"}
 
 
-def normalize_schedule(payload: dict) -> dict:
+def normalize_schedule(payload: dict, *, enforce_daily_slots: bool = False) -> dict:
     frequency = str(payload.get("frequency") or "daily")
     if frequency not in FREQUENCIES:
         raise ValueError("请选择有效的巡检日期")
@@ -41,6 +41,12 @@ def normalize_schedule(payload: dict) -> dict:
         if parsed.second or parsed.microsecond:
             raise ValueError("巡检时间精确到分钟即可")
         times.append(parsed.strftime("%H:%M"))
+    if enforce_daily_slots:
+        if len(times) > 2 or len(set(times)) != len(times):
+            raise ValueError("上午和下午各最多设置一个巡检时间")
+        periods = [int(value[:2]) < 12 for value in times]
+        if len(set(periods)) != len(periods):
+            raise ValueError("上午和下午各最多设置一个巡检时间")
     days = payload.get("days_of_week") or []
     if frequency == "weekly":
         if not isinstance(days, list) or not days or any(type(day) is not int or day not in range(1, 8) for day in days):

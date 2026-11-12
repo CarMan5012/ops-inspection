@@ -27,7 +27,7 @@ def _job_config(value: str) -> dict:
         "days_of_week": [int(old.get("day_of_week") or 1)] if frequency == "weekly" else [],
         "days_of_month": [int(old.get("day_of_month") or 1)] if frequency == "monthly" else [],
         "times": times,
-    })
+    }, enforce_daily_slots=True)
 
 
 def _periodic_config(value: str, report_type: str) -> dict:

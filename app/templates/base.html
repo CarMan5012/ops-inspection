@@ -7,10 +7,13 @@
   <title>{{ title or "运维巡检平台" }}</title>
   <link rel="shortcut icon" href="{{ url_for_frontend('static/favicon.ico') }}" type="image/x-icon">
   <link rel="stylesheet" href="{{ url_for_frontend('static/app.css?v=20261008-notices') }}">
+  <link rel="stylesheet" href="{{ url_for_frontend('static/ambient-scene.css?v=4') }}">
+  <link rel="stylesheet" href="{{ url_for_frontend('static/form-density.css?v=3') }}">
   <script src="{{ url_for_frontend('static/vendor/lucide.min.js') }}" defer></script>
 </head>
 
-<body>
+<body class="ambient-page">
+  {% include "ambient_scene.html" %}
   <header class="topbar">
     <a class="brand" href="{{ url_for_frontend('/') }}"><span class="brand-mark"><img src="{{ url_for_frontend('static/images/logo.svg') }}" alt=""></span><span>运维巡检平台</span></a>
     <nav class="nav">

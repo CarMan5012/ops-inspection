@@ -1,0 +1,159 @@
+/* Shared compact form rhythm for server templates and the Vue application. */
+body.ambient-page .form-section {
+  padding: 20px 22px;
+}
+
+body.ambient-page .form-section-head {
+  margin-bottom: 16px;
+}
+
+body.ambient-page .form-grid,
+body.ambient-page .item-editor-layout .form-grid,
+body.ambient-page .form-page > .form-grid {
+  gap: 14px 18px;
+}
+body.ambient-page .form-grid { max-width: 840px; }
+
+body.ambient-page .field,
+body.ambient-page .form-page label {
+  gap: 5px;
+}
+
+body.ambient-page .field > span:first-child,
+body.ambient-page .form-page label {
+  font-size: 12px;
+  font-weight: 650;
+  color: #395566;
+}
+
+body.ambient-page .field input:not([type="checkbox"]):not([type="radio"]),
+body.ambient-page .field select,
+body.ambient-page .field textarea,
+body.ambient-page .time-setting input[type="time"],
+body.ambient-page .item-editor-layout .field input:not([type="checkbox"]):not([type="radio"]),
+body.ambient-page .item-editor-layout .field select,
+body.ambient-page .form-page input:not([type="checkbox"]):not([type="radio"]),
+body.ambient-page .form-page select,
+body.ambient-page .form-page textarea {
+  min-height: 36px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.45;
+  background-color: rgba(255, 255, 255, .87);
+}
+
+body.ambient-page .field textarea,
+body.ambient-page .form-page textarea {
+  min-height: 72px;
+}
+
+body.ambient-page .form-page .form-actions button,
+body.ambient-page .form-page .form-actions .button,
+body.ambient-page .editor-footer .btn {
+  min-height: 36px;
+}
+
+body.ambient-auth main:not(.login-panel) {
+  width: min(510px, 100%);
+  padding: 25px 28px;
+}
+
+body.ambient-auth main:not(.login-panel) .brand { margin-bottom: 18px; }
+body.ambient-auth main:not(.login-panel) .steps { margin-bottom: 22px; }
+body.ambient-auth main:not(.login-panel) h1 { font-size: 22px; }
+body.ambient-auth main:not(.login-panel) p { margin-bottom: 14px; }
+body.ambient-auth main:not(.login-panel) label { margin: 11px 0 4px; font-size: 12px; }
+body.ambient-auth main:not(.login-panel) input { height: 38px; border-radius: 8px; font-size: 13px; }
+body.ambient-auth main:not(.login-panel) .field-error:empty { display: none; }
+body.ambient-auth main:not(.login-panel) .actions { margin-top: 20px; }
+body.ambient-auth main:not(.login-panel) .actions button { min-height: 38px; border-radius: 8px; }
+body.ambient-auth main:not(.login-panel) .command { padding: 11px 12px; }
+
+body.ambient-auth .login-panel {
+  width: min(380px, 100%);
+  padding: 27px 30px 25px;
+}
+
+body.ambient-auth .login-heading { margin-bottom: 18px; }
+body.ambient-auth .login-mark { width: 48px; height: 48px; margin-bottom: 14px; }
+body.ambient-auth .login-mark img { width: 48px; height: 48px; }
+body.ambient-auth .login-panel h1 { font-size: 24px; }
+body.ambient-auth .login-field { grid-template-rows: 40px 18px; }
+body.ambient-auth .login-field-error { height: 18px; line-height: 18px; }
+body.ambient-auth .login-panel input,
+body.ambient-auth .login-password-wrap,
+body.ambient-auth .login-password-wrap input {
+  height: 40px;
+  min-height: 40px;
+  border-radius: 8px;
+}
+body.ambient-auth .login-panel button[type="submit"] {
+  height: 40px;
+  min-height: 40px;
+  margin-top: 6px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.password-wrap {
+  position: relative;
+  display: block;
+  width: 100%;
+}
+.password-wrap input { padding-right: 42px !important; }
+body.ambient-page .field .password-input input { padding-right: 42px; }
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: #7892a0;
+  cursor: pointer;
+}
+.password-toggle:hover { background: rgba(40, 119, 145, .09); color: #176b86; }
+.password-toggle:focus-visible { outline: 2px solid #75aabc; outline-offset: 1px; }
+.password-toggle svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.password-toggle .icon-visible { display: none; }
+.password-toggle[aria-pressed="true"] .icon-hidden { display: none; }
+.password-toggle[aria-pressed="true"] .icon-visible { display: block; }
+
+@media (max-width: 700px) {
+  body.ambient-page .form-section { padding: 18px 16px; }
+  body.ambient-page .form-grid,
+  body.ambient-page .item-editor-layout .form-grid,
+  body.ambient-page .form-page > .form-grid { gap: 13px; }
+  body.ambient-page .field input:not([type="checkbox"]):not([type="radio"]),
+  body.ambient-page .field select,
+  body.ambient-page .form-page input:not([type="checkbox"]):not([type="radio"]),
+  body.ambient-page .form-page select { min-height: 42px; }
+  body.ambient-auth main:not(.login-panel) { padding: 23px 22px; }
+  body.ambient-auth main:not(.login-panel) input { height: 42px; }
+  body.ambient-auth main:not(.login-panel) .actions button { min-height: 42px; }
+  body.ambient-auth .login-panel { width: min(340px, 100%); padding: 25px 21px 22px; }
+  body.ambient-auth .login-field { grid-template-rows: 44px 18px; }
+  body.ambient-auth .login-panel input,
+  body.ambient-auth .login-password-wrap,
+  body.ambient-auth .login-password-wrap input,
+  body.ambient-auth .login-panel button[type="submit"] { height: 44px; min-height: 44px; }
+  .password-toggle { width: 36px; height: 36px; min-height: 36px; }
+}

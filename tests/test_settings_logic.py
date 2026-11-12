@@ -16,6 +16,15 @@ def _load_modules():
     return db, main, scheduler, utils
 
 
+@pytest.fixture(autouse=True)
+def mock_admin_account(monkeypatch):
+    _load_modules()
+    from app import auth
+
+    password_hash = auth.hash_admin_password("test-password")
+    monkeypatch.setattr(auth, "admin_account", lambda: ("admin", password_hash))
+
+
 def test_mfa_rebinding_keeps_existing_protection_until_code_is_verified(monkeypatch):
     _, main, _, utils = _load_modules()
 
@@ -94,11 +103,11 @@ def test_session_lifetime_is_fixed_at_login_and_tokens_are_unique(monkeypatch):
     monkeypatch.setattr(auth, "get_session_ttl_seconds", lambda: lifetime[0])
     monkeypatch.setattr(auth, "is_token_revoked", lambda _: False)
 
-    first = auth.create_token(auth.settings.admin_username)
-    second = auth.create_token(auth.settings.admin_username)
+    first = auth.create_token("admin")
+    second = auth.create_token("admin")
     assert first != second
-    legacy_payload = f"{auth.settings.admin_username}:{now[0]}"
-    legacy_token = f"{legacy_payload}:{auth._sign(legacy_payload, auth.settings.admin_password)}"
+    legacy_payload = f"admin:{now[0]}"
+    legacy_token = f"{legacy_payload}:{auth._sign(legacy_payload, auth._session_signing_extra())}"
     assert auth.verify_token(legacy_token)
     now[0] += 299
     assert auth.verify_token(first)
@@ -106,7 +115,7 @@ def test_session_lifetime_is_fixed_at_login_and_tokens_are_unique(monkeypatch):
     lifetime[0] = 3600
     assert not auth.verify_token(first)
 
-    longer = auth.create_token(auth.settings.admin_username)
+    longer = auth.create_token("admin")
     now[0] += 1800
     assert auth.verify_token(longer)
     lifetime[0] = 300
@@ -125,7 +134,7 @@ def test_revoked_token_remains_blocked_after_lifetime_increase(monkeypatch):
     monkeypatch.setattr(auth.time, "time", lambda: now[0])
     monkeypatch.setattr(auth, "get_session_ttl_seconds", lambda: lifetime[0])
     try:
-        token = auth.create_token(auth.settings.admin_username)
+        token = auth.create_token("admin")
         auth.revoke_token(token)
         assert connection.execute("SELECT expired_at FROM token_blacklist WHERE token = ?", (token,)).fetchone()[0] == now[0] + auth.MAX_SESSION_TTL_SECONDS
         now[0] += 600
@@ -149,7 +158,7 @@ def test_idle_session_only_renews_on_explicit_activity(monkeypatch):
     monkeypatch.setattr(auth.time, "time", lambda: now[0])
     monkeypatch.setattr(auth, "get_session_ttl_seconds", lambda: 300)
     try:
-        token = auth.create_idle_token(auth.settings.admin_username)
+        token = auth.create_idle_token("admin")
         assert auth.verify_token(token)
         now[0] += 299
         assert auth.verify_token(token)  # Read-only requests do not extend the session.
@@ -160,7 +169,7 @@ def test_idle_session_only_renews_on_explicit_activity(monkeypatch):
         assert not auth.verify_token(token)
         assert not auth.renew_idle_session(token)
 
-        other = auth.create_idle_token(auth.settings.admin_username)
+        other = auth.create_idle_token("admin")
         assert auth.verify_token(other)
         auth.revoke_token(other)
         assert not auth.verify_token(other)
@@ -181,8 +190,9 @@ def test_renew_endpoint_refreshes_cookies_and_migrates_legacy_token(monkeypatch)
     monkeypatch.setattr(auth.time, "time", lambda: 1_000_000.0)
     monkeypatch.setattr(auth, "get_session_ttl_seconds", lambda: 300)
     monkeypatch.setattr(main, "get_session_ttl_seconds", lambda: 300)
+    monkeypatch.setattr(main, "cookie_path", lambda: "/ops")
     try:
-        legacy = auth.create_token(auth.settings.admin_username)
+        legacy = auth.create_token("admin")
         cookie_header = f"{auth.COOKIE_NAME}={legacy}; csrf_token=sample-csrf".encode()
         request = Request({
             "type": "http", "method": "POST", "scheme": "http",
