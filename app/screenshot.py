@@ -490,14 +490,14 @@ def _capture_with_browser(
         stage = "等待页面"
         _disable_grafana_auto_refresh(page, deadline)
         _assert_not_login_page_before_screenshot(page, auth_profile)
+        if _is_grafana_dashboard(str(page.url)):
+            _collapse_grafana_sidebar(page, deadline)
         waited_content = _wait_for_page(page, item, _remaining_ms(deadline), query_tracker)
         if isinstance(waited_content, dict):
             content = waited_content
         _assert_not_login_page_before_screenshot(page, auth_profile)
         _remaining_ms(deadline)
-        if _is_grafana_dashboard(str(page.url)):
-            content = _wait_for_grafana_panels(page, min(5_000, _remaining_ms(deadline)), query_tracker, settle_ms=0)
-        elif str(item.get("item_type") or "").lower() == "kibana":
+        if str(item.get("item_type") or "").lower() == "kibana":
             content = _wait_for_kibana_panels(page, min(5_000, _remaining_ms(deadline)), settle_ms=0)
         if is_real_capture:
             _assert_real_window_viewport(page)
@@ -815,6 +815,21 @@ def _is_grafana_dashboard(url: str) -> bool:
     return bool(re.search(r"/d(?:-solo)?/", urlsplit(url).path))
 
 
+def _collapse_grafana_sidebar(page: Page, deadline: float) -> None:
+    """Use Grafana's own menu control to leave dashboard filters visible."""
+    try:
+        close_button = page.get_by_role(
+            "button",
+            name=re.compile(r"^(关闭菜单|关闭导航|Close menu|Close navigation menu|Hide sidebar)$", re.I),
+        ).first
+        if not close_button.is_visible():
+            return
+        close_button.click(timeout=min(2_000, _remaining_ms(deadline)))
+        logger.info("  Grafana 左侧导航已收起")
+    except Exception as exc:
+        logger.warning("  Grafana 左侧导航未能自动收起：%s", str(exc).splitlines()[0])
+
+
 class _GrafanaQueryTracker:
     """Observe this page's Grafana queries without waiting for unrelated live traffic."""
 
@@ -955,7 +970,28 @@ _GRAFANA_PANEL_SNAPSHOT = r"""() => {
     if (errorNode || errorText) return {title, state: 'error', detail: bodyText.slice(0, 160)};
     const noData = /^(?:No data|暂无数据|无数据)(?:\s|$)/i.test(bodyText);
     if (noData) return {title, state: 'no_data'};
-    const visual = 'canvas, svg, img, video, iframe, table, [role="table"], [role="img"], [role="grid"]';
+    const canvases = nodes.flatMap(node => [...node.querySelectorAll('canvas')]);
+    if (canvases.length) {
+      const painted = canvases.some(canvas => {
+        if (!canvas.width || !canvas.height || !canvas.getBoundingClientRect().height) return false;
+        try {
+          const context = canvas.getContext('2d');
+          if (!context) return true;
+          for (const fraction of [0.125, 0.25, 0.5, 0.75, 0.875]) {
+            const y = Math.min(canvas.height - 1, Math.floor(canvas.height * fraction));
+            const pixels = context.getImageData(0, y, canvas.width, 1).data;
+            for (let x = 3; x < pixels.length; x += 32) {
+              if (pixels[x] > 0) return true;
+            }
+          }
+          return false;
+        } catch (_) {
+          return true;
+        }
+      });
+      return {title, state: painted ? 'data' : 'loading'};
+    }
+    const visual = 'svg, img, video, iframe, table, [role="table"], [role="img"], [role="grid"]';
     const hasVisual = nodes.some(node => node.matches(visual) || !!node.querySelector(visual));
     return {title, state: hasVisual || !!bodyText ? 'data' : 'loading'};
   });
@@ -1048,8 +1084,8 @@ def _wait_for_grafana_panels(
         if errors:
             panel = errors[0]
             raise RuntimeError(f"Grafana 图表“{panel['title']}”查询错误：{panel.get('detail') or '请检查数据源'}")
-        pending_first_cycle = tracker is not None and bool(tracker.pending) and not tracker.completed_cycle
-        ready = bool(panels) and not pending_first_cycle and all(p.get("state") in {"data", "no_data"} for p in panels)
+        pending_queries = tracker is not None and bool(tracker.pending)
+        ready = bool(panels) and not pending_queries and all(p.get("state") in {"data", "no_data"} for p in panels)
         now = time.monotonic()
         if ready:
             ready_since = ready_since or now
@@ -1068,7 +1104,7 @@ def _wait_for_grafana_panels(
         remaining = deadline - now
         if remaining <= 0:
             unfinished = [p["title"] for p in last_panels if p.get("state") not in {"data", "no_data"}]
-            detail = "、".join(unfinished[:5]) or ("数据查询仍在进行" if pending_first_cycle else "未找到可见图表")
+            detail = "、".join(unfinished[:5]) or ("数据查询仍在进行" if pending_queries else "未找到可见图表")
             raise TimeoutError(f"Grafana 图表未完成加载：{detail}")
         page.wait_for_timeout(min(300, max(1, int(remaining * 1000))))
 
@@ -1824,7 +1860,7 @@ def _take_screenshot(
                     f"{expected_width}x{expected_height} 不一致"
                 )
             content = (_wait_for_grafana_panels(
-                page, min(5_000, _remaining_ms(deadline)), query_tracker, settle_ms=0,
+                page, _remaining_ms(deadline), query_tracker, settle_ms=750,
             ) if _is_grafana_dashboard(str(page.url)) else None)
             _remaining_ms(deadline)
             with mss.mss() as sct:

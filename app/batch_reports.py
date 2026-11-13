@@ -69,14 +69,13 @@ def archive_name_for_range(start: date, end: date) -> str:
 
 
 def daily_reports(start: date, end: date) -> list[tuple[str, Path, int]]:
-    """Keep the latest available report for each task and local calendar day."""
+    """Select existing Word reports regardless of how a run was triggered."""
     with connect() as conn:
         rows = conn.execute(
             """SELECT id, job_id, started_at, report_path
                FROM run_records
                WHERE substr(started_at, 1, 10) BETWEEN ? AND ?
                  AND report_path IS NOT NULL AND report_path != ''
-                 AND (schedule_slot IN ('morning', 'afternoon') OR schedule_slot LIKE 'calendar-%')
                ORDER BY id DESC""",
             (start.isoformat(), end.isoformat()),
         ).fetchall()
@@ -92,7 +91,6 @@ def monthly_reports(months: list[str]) -> list[tuple[str, Path, int]]:
                 FROM run_records
                 WHERE substr(started_at, 1, 7) IN ({placeholders})
                   AND report_path IS NOT NULL AND report_path != ''
-                  AND (schedule_slot IN ('morning', 'afternoon') OR schedule_slot LIKE 'calendar-%')
                 ORDER BY id DESC""",
             months,
         ).fetchall()
@@ -107,8 +105,7 @@ def _select_daily_reports(rows) -> list[tuple[str, Path, int]]:
         path = resolve_artifact_path(row["report_path"])
         if path.suffix.lower() != ".docx" or not path.is_file() or not is_safe_path(path):
             continue
-        # Deleted jobs have a NULL job_id; the shared report path still identifies
-        # repeated runs without merging unrelated deleted jobs with the same name.
+        # Rows are newest first: one final Word per task and day.
         group = ("job", str(row["job_id"]), day) if row["job_id"] is not None else ("path", str(path.resolve()), day)
         selected.setdefault(group, (day, path, run_id))
     return sorted(selected.values(), key=lambda item: (item[0], item[1].name, item[2]))
@@ -121,7 +118,7 @@ def build_archive(reports: list[tuple[str, Path, int]]) -> BinaryIO:
         used_names: set[str] = set()
         with ZipFile(archive, "w", compression=ZIP_STORED, allowZip64=True) as output:
             for day, path, run_id in reports:
-                base = safe_name(path.stem, f"report-{run_id}")
+                base = safe_name(re.sub(r"-手动巡检-\d+$", "", path.stem), f"report-{run_id}")
                 name = f"{day[:7]}/{base}.docx"
                 counter = 2
                 while name in used_names:

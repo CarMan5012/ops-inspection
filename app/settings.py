@@ -13,7 +13,6 @@ class Settings:
         self.secret_key = self._load_or_create_secret_key()
         self.legacy_secret_keys = ["change-me"] if self.secret_key != "change-me" else []
         self.db_path = self.data_dir / "app.db"
-        self.screenshot_dir = self.data_dir / "screenshots"
         self.report_dir = self.data_dir / "reports"
         self.log_dir = self.data_dir / "logs"
         self.browser_state_dir = self.data_dir / "browser-state"
@@ -50,7 +49,6 @@ class Settings:
     def ensure_dirs(self) -> None:
         for path in (
             self.data_dir,
-            self.screenshot_dir,
             self.report_dir,
             self.log_dir,
             self.browser_state_dir,

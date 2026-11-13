@@ -2,7 +2,6 @@ import { api, frontendUrl, logout } from './api'
 
 const ACTIVITY_KEY = 'ops_inspection_last_activity'
 const RENEW_INTERVAL_MS = 30_000
-const TRAILING_RENEW_MS = 3_000
 
 export function startIdleSession(): () => void {
   let timeoutMs = 30 * 60_000
@@ -12,7 +11,6 @@ export function startIdleSession(): () => void {
   let renewInFlight = false
   let exiting = false
   let stopped = false
-  let trailingRenew: ReturnType<typeof setTimeout> | undefined
 
   function sharedActivityAt(): number {
     try {
@@ -61,11 +59,8 @@ export function startIdleSession(): () => void {
   function onActivity(event: Event) {
     if (!event.isTrusted || stopped || exiting || exitIfIdle()) return
     publishActivity(Date.now())
-    if (trailingRenew) clearTimeout(trailingRenew)
     if (Date.now() - lastRenewAt >= RENEW_INTERVAL_MS) {
       void renew()
-    } else {
-      trailingRenew = setTimeout(() => void renew(true), TRAILING_RENEW_MS)
     }
   }
 
@@ -87,13 +82,11 @@ export function startIdleSession(): () => void {
   void api<{ idle_timeout_seconds: number }>('/session').then((session) => {
     if (!stopped) {
       if (session.idle_timeout_seconds) timeoutMs = session.idle_timeout_seconds * 1000
-      void renew(true)
     }
   }).catch(() => { /* The API handler redirects on an expired session. */ })
 
   return () => {
     stopped = true
-    if (trailingRenew) clearTimeout(trailingRenew)
     clearInterval(checkTimer)
     for (const type of ['pointerdown', 'keydown', 'wheel', 'touchstart']) window.removeEventListener(type, onActivity)
     window.removeEventListener('storage', onStorage)

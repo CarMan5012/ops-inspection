@@ -83,8 +83,10 @@ onMounted(async () => {
         <div class="alert-heading-line">
           <h1>{{ alert.name }}</h1>
           <span class="alert-state" :class="firingCount ? 'is-firing' : pendingCount ? 'is-pending' : ''">{{ stateLabel }}</span>
+          <span v-if="alert.ignored" class="alert-state is-ignored">巡检时已忽略</span>
         </div>
         <p>本次运行采集的告警信息。Prometheus 页面显示当前实时状态。</p>
+        <p v-if="alert.ignored && alert.ignore_reason">忽略原因：{{ alert.ignore_reason }}</p>
         <div class="alert-head-actions">
           <ActionButton v-if="prometheusLink"  :href="prometheusLink" target="_blank" rel="noopener noreferrer" variant="primary">查看源站</ActionButton>
           <span v-else class="alert-link-unavailable">该记录未保存 Prometheus 数据源信息</span>
@@ -155,6 +157,7 @@ onMounted(async () => {
 .alert-page-head p { margin: 12px 0 0; color: #708794; font-size: 13px; line-height: 1.6; }
 .alert-state { display: inline-flex; align-items: center; min-height: 28px; padding: 0 10px; border-radius: 6px; background: #eaf1f4; color: #486673; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .alert-state.is-firing { color: #b83a32; background: #fceae8; }
+.alert-state.is-ignored { color: #5b7180; background: #e8f0f3; }
 .alert-state.is-pending { color: #956513; background: #fff3d9; }
 .alert-head-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 22px; }
 .alert-link-unavailable { color: #8a9ca5; font-size: 12px; }

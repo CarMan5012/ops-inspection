@@ -2,6 +2,7 @@ import sqlite3
 import sys
 import types
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -15,9 +16,11 @@ from app import periodic_reporter
 
 @pytest.mark.parametrize("include_docx", [0, 1])
 def test_periodic_zip_respects_selected_contents(monkeypatch, tmp_path, include_docx):
-    report = tmp_path / "daily.docx"
-    screenshot = tmp_path / "morning-chart.png"
-    afternoon_screenshot = tmp_path / "afternoon-chart.png"
+    day_dir = tmp_path / "reports/2026/10/10"
+    day_dir.mkdir(parents=True)
+    report = day_dir / "daily.docx"
+    screenshot = day_dir / "morning-chart.png"
+    afternoon_screenshot = day_dir / "afternoon-chart.png"
     report.write_bytes(b"word")
     screenshot.write_bytes(b"image")
     afternoon_screenshot.write_bytes(b"image")
@@ -54,12 +57,14 @@ def test_periodic_zip_respects_selected_contents(monkeypatch, tmp_path, include_
     monkeypatch.setattr(periodic_reporter, "get_periodic_report_setting", lambda _type: setting)
     monkeypatch.setattr(periodic_reporter, "save_periodic_report_run", lambda data, _id: run.update(data))
     monkeypatch.setattr(periodic_reporter.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(periodic_reporter.settings, "report_dir", tmp_path / "reports")
     monkeypatch.setattr(periodic_reporter.tempfile, "mkdtemp", lambda **_: str(tmp_path / "stage"))
     (tmp_path / "stage").mkdir()
 
     periodic_reporter.execute_periodic_report_flow(9)
 
     assert run["status"] == "success"
+    assert (tmp_path / "reports") in Path(run["zip_path"]).parents
     with zipfile.ZipFile(run["zip_path"]) as archive:
         names = archive.namelist()
     assert any(name.endswith("morning-chart.png") for name in names)

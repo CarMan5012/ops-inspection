@@ -199,7 +199,6 @@ def test_selected_month_preview_and_cleanup_all_scopes(monkeypatch, tmp_path):
     """)
     monkeypatch.setattr(cleanup.settings, "data_dir", data_dir)
     monkeypatch.setattr(cleanup.settings, "log_dir", log_dir)
-    monkeypatch.setattr(cleanup.settings, "screenshot_dir", data_dir / "screenshots")
     monkeypatch.setattr(cleanup.settings, "report_dir", data_dir / "reports")
     monkeypatch.setattr(cleanup.settings, "ensure_dirs", lambda: None)
     monkeypatch.setattr(cleanup, "connect", lambda: connection)
@@ -441,14 +440,12 @@ def test_month_cleanup_keeps_active_inspection_files_and_record(monkeypatch, tmp
     cleanup = _cleanup_module()
     from app import storage_paths
     data_dir = tmp_path / "data"
-    screenshot_dir = data_dir / "screenshots"
     report_dir = data_dir / "reports"
     files = {}
     for run_id in (1, 2):
-        screenshot = screenshot_dir / "2020" / "10" / "01" / f"run-{run_id}" / "capture.png"
-        report = report_dir / "2020" / "10" / "01" / f"run-{run_id}" / "report.docx"
-        screenshot.parent.mkdir(parents=True)
-        report.parent.mkdir(parents=True)
+        screenshot = report_dir / "2020" / "10" / "01" / f"capture-{run_id}.png"
+        report = report_dir / "2020" / "10" / "01" / f"report-{run_id}.docx"
+        screenshot.parent.mkdir(parents=True, exist_ok=True)
         screenshot.write_bytes(b"image")
         report.write_bytes(b"report")
         files[run_id] = (screenshot, report)
@@ -470,8 +467,10 @@ def test_month_cleanup_keeps_active_inspection_files_and_record(monkeypatch, tmp
             error_summary TEXT, detail_json TEXT
         );
     """)
+    for run_id, (screenshot, report) in files.items():
+        conn.execute("UPDATE run_records SET report_path = ? WHERE id = ?", (str(report), run_id))
+        conn.execute("INSERT INTO screenshot_results VALUES (?, ?)", (run_id, str(screenshot)))
     monkeypatch.setattr(cleanup.settings, "data_dir", data_dir)
-    monkeypatch.setattr(cleanup.settings, "screenshot_dir", screenshot_dir)
     monkeypatch.setattr(cleanup.settings, "report_dir", report_dir)
     monkeypatch.setattr(cleanup.settings, "ensure_dirs", lambda: None)
     monkeypatch.setattr(cleanup, "connect", lambda: conn)
@@ -692,12 +691,11 @@ def test_orphan_artifacts_keep_their_own_retention_after_record_expires(monkeypa
     cleanup = _cleanup_module()
     data_dir = tmp_path / "data"
     monkeypatch.setattr(cleanup.settings, "data_dir", data_dir)
-    monkeypatch.setattr(cleanup.settings, "screenshot_dir", data_dir / "screenshots")
     monkeypatch.setattr(cleanup.settings, "report_dir", data_dir / "reports")
     monkeypatch.setattr(cleanup.settings, "log_dir", data_dir / "logs")
     monkeypatch.setattr(cleanup.settings, "browser_state_dir", data_dir / "browser-state")
     started_at = datetime.now() - timedelta(days=40)
-    day_dir = data_dir / started_at.strftime("%Y/%m/%d")
+    day_dir = data_dir / "reports" / started_at.strftime("%Y/%m/%d")
     day_dir.mkdir(parents=True)
     screenshot = day_dir / "inspection.png"
     screenshot.write_bytes(b"image")
@@ -843,12 +841,12 @@ def test_auto_cleanup_removes_all_configured_artifact_types(monkeypatch, tmp_pat
     data_dir = tmp_path / "data"
     old_date = datetime.now() - timedelta(days=100)
     stamp = old_date.strftime("%Y-%m-%d %H:%M:%S")
-    day_dir = data_dir / old_date.strftime("%Y/%m/%d")
+    day_dir = data_dir / "reports" / old_date.strftime("%Y/%m/%d")
     log_dir = data_dir / "logs"
     state_dir = data_dir / "browser-state"
-    periodic_dir = data_dir / "periodic-reports"
+    periodic_dir = day_dir.parent
     for directory in (day_dir, log_dir, state_dir, periodic_dir):
-        directory.mkdir(parents=True)
+        directory.mkdir(parents=True, exist_ok=True)
     files = {
         "screenshot": day_dir / "capture.png",
         "report": day_dir / "report.docx",
@@ -890,7 +888,6 @@ def test_auto_cleanup_removes_all_configured_artifact_types(monkeypatch, tmp_pat
     monkeypatch.setattr(cleanup.settings, "data_dir", data_dir)
     monkeypatch.setattr(cleanup.settings, "log_dir", log_dir)
     monkeypatch.setattr(cleanup.settings, "browser_state_dir", state_dir)
-    monkeypatch.setattr(cleanup.settings, "screenshot_dir", data_dir / "screenshots")
     monkeypatch.setattr(cleanup.settings, "report_dir", data_dir / "reports")
     monkeypatch.setattr(cleanup.settings, "ensure_dirs", lambda: None)
     monkeypatch.setattr(cleanup, "connect", lambda: connection)

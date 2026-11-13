@@ -12,6 +12,32 @@ if "pysqlcipher3" not in sys.modules:
 from app import screenshot
 
 
+def test_grafana_sidebar_uses_close_menu_button():
+    clicked = []
+
+    class Button:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def is_visible(self):
+            return True
+
+        def click(self, **kwargs):
+            clicked.append(kwargs)
+
+    class Page:
+        def get_by_role(self, role, *, name):
+            assert role == "button"
+            assert name.search("关闭菜单")
+            return Button()
+
+    screenshot._collapse_grafana_sidebar(Page(), screenshot.time.monotonic() + 5)
+    assert len(clicked) == 1
+    assert 0 < clicked[0]["timeout"] <= 2_000
+
+
 def test_dashboard_slug_containing_login_is_not_a_login_page():
     class PageStub:
         url = "https://grafana.example/d/abc/login-overview"
@@ -246,8 +272,6 @@ def test_grafana_waits_for_panel_loading_to_finish():
             self.waited.append(milliseconds)
 
         def evaluate(self, expression):
-            assert ".panel-content" in expression
-            assert "canvas, svg, img, video, iframe, table" in expression
             self.calls += 1
             return {"panels": [{"title": "CPU", "state": "loading" if self.calls == 1 else "data"}]}
 
@@ -273,6 +297,31 @@ def test_grafana_no_data_is_success_but_recorded():
 
     result = screenshot._wait_for_grafana_panels(PageStub(), 1000, settle_ms=0)
     assert result == {"status": "partial_no_data", "summary": "1 个图表无数据：服务检查"}
+
+
+def test_grafana_waits_for_later_query_cycle():
+    class PageStub:
+        url = "http://grafana.test/d/board/inspection"
+
+        def evaluate(self, _expression):
+            return {"panels": [{"title": "CPU", "state": "data"}]}
+
+        def wait_for_timeout(self, milliseconds):
+            screenshot.time.sleep(milliseconds / 1000)
+
+    class TrackerStub:
+        pending = {1}
+        completed_cycle = True
+
+        def check(self):
+            pass
+
+    try:
+        screenshot._wait_for_grafana_panels(PageStub(), 30, TrackerStub(), settle_ms=0)
+    except TimeoutError as exc:
+        assert "数据查询仍在进行" in str(exc)
+    else:
+        raise AssertionError("后续查询未完成时不能截图")
 
 
 def test_grafana_all_no_data_needs_review():
@@ -411,6 +460,7 @@ def test_grafana_row_heading_does_not_block_rendered_panel():
         page = browser.new_page(viewport={"width": 800, "height": 600})
         page.route("https://grafana.example/**", lambda route: route.fulfill(body=html, content_type="text/html"))
         page.goto("https://grafana.example/d/test/dashboard")
+        page.evaluate("document.querySelector('canvas').getContext('2d').fillRect(10, 50, 100, 2)")
         screenshot._wait_for_grafana_panels(page, 3000)
         browser.close()
 
@@ -440,9 +490,25 @@ def test_grafana_11_generated_panel_classes_are_recognized():
         page = browser.new_page(viewport={"width": 800, "height": 600})
         page.route("https://grafana.example/**", lambda route: route.fulfill(body=html, content_type="text/html"))
         page.goto("https://grafana.example/d/test/dashboard")
+        page.evaluate("document.querySelector('canvas').getContext('2d').fillRect(10, 50, 100, 2)")
         result = screenshot._wait_for_grafana_panels(page, 3000, settle_ms=0)
         assert result["status"] == "partial_no_data"
         assert "Service Check Table" in result["summary"]
+        browser.close()
+
+
+def test_grafana_canvas_must_paint_before_capture():
+    from playwright.sync_api import sync_playwright
+
+    html = '<div class="react-grid-item"><section class="panel-container"><div class="panel-header">CPU</div><div class="panel-content"><canvas width="200" height="100"></canvas><div>CPU 25%</div></div></section></div>'
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, channel="chrome")
+        page = browser.new_page(viewport={"width": 800, "height": 600})
+        page.route("https://grafana.example/**", lambda route: route.fulfill(body=html, content_type="text/html"))
+        page.goto("https://grafana.example/d/test/dashboard")
+        assert screenshot._grafana_snapshot(page)["panels"][0]["state"] == "loading"
+        page.evaluate("document.querySelector('canvas').getContext('2d').fillRect(0, 50, 200, 2)")
+        assert screenshot._grafana_snapshot(page)["panels"][0]["state"] == "data"
         browser.close()
 
 

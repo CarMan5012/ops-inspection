@@ -532,7 +532,7 @@ def get_previous_run_today(job_id: int, current_run_id: int) -> dict[str, Any] |
 
 
 def list_report_runs_for_day(job_id: int, current_run_id: int, day: str) -> list[dict[str, Any]]:
-    """Return earlier runs with reports for rebuilding one job's daily Word file."""
+    """Return earlier manual and scheduled runs for one job's daily Word."""
     from datetime import date, timedelta
 
     report_day = date.fromisoformat(day)
@@ -541,13 +541,12 @@ def list_report_runs_for_day(job_id: int, current_run_id: int, day: str) -> list
         rows = conn.execute(
             """
             SELECT * FROM run_records
-            WHERE job_id = ? AND id < ?
+              WHERE job_id = ? AND id < ?
               AND report_path IS NOT NULL AND report_path != ''
-              AND (schedule_slot IN ('morning', 'afternoon') OR schedule_slot LIKE 'calendar-%')
               AND substr(started_at, 1, 10) IN (?, ?, ?)
             ORDER BY id DESC
             """,
-            (job_id, current_run_id, *nearby_days),
+              (job_id, current_run_id, *nearby_days),
         ).fetchall()
     return [dict(row) for row in rows]
 

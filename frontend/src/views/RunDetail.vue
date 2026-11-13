@@ -4,7 +4,7 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, ExternalLink, X, ImageIcon } from '../icons'
 import { api, apiUrl, dateTime, statusText, type Row } from '../api'
 import { groupRunAlerts } from '../monitorAlerts'
-import { attempt } from '../ui'
+import { attempt, notify } from '../ui'
 
 const route = useRoute()
 const router = useRouter()
@@ -22,7 +22,14 @@ const previewZoomed = ref(false)
 const glassStyles = ref<Record<number, Record<string, string>>>({})
 const thumbnailImages = new Map<number, HTMLImageElement>()
 const rerunBusy = ref(false)
+const regenerateBusy = ref(false)
 const loadError = ref(false)
+const ignoreTarget = ref<Row | null>(null)
+const ignoreScope = ref<'instance' | 'rule'>('instance')
+const ignoreInstanceIndex = ref(0)
+const ignoreReason = ref('')
+const ignoreExpiry = ref('never')
+const ignoreBusy = ref(false)
 
 let timer: number | undefined
 let requestSeq = 0
@@ -121,6 +128,20 @@ async function rerunJob(jobId: number | undefined) {
   }
 }
 
+async function regenerateReport() {
+  if (!run.value?.job_id || regenerateBusy.value) return
+  regenerateBusy.value = true
+  try {
+    const result = await attempt(() => api<Row>(`/runs/${id.value}/regenerate-report`, 'POST'))
+    if (result?.ok) {
+      await load()
+      notify('当日日报已按当前任务模板重新生成')
+    }
+  } finally {
+    regenerateBusy.value = false
+  }
+}
+
 function openModal(item: Row) {
   previewZoomed.value = false
   activePreview.value = {
@@ -136,6 +157,41 @@ function closeModal() {
 }
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape' && activePreview.value) closeModal()
+  if (e.key === 'Escape' && !ignoreBusy.value) ignoreTarget.value = null
+}
+
+function openIgnore(alert: Row) {
+  ignoreTarget.value = alert
+  ignoreScope.value = 'instance'
+  ignoreInstanceIndex.value = 0
+  ignoreReason.value = ''
+  ignoreExpiry.value = 'never'
+}
+
+async function saveIgnore() {
+  if (!ignoreTarget.value || ignoreBusy.value) return
+  if (!ignoreReason.value.trim() || ignoreReason.value.trim().length > 200) {
+    notify('请填写 1–200 字的忽略原因', 'error')
+    return
+  }
+  const instance = ignoreTarget.value.instances[ignoreInstanceIndex.value]
+  if (!instance) return
+  const days = Number(ignoreExpiry.value)
+  const expiresAt = Number.isFinite(days) && days > 0
+    ? new Date(Date.now() + days * 86400000).toISOString() : null
+  ignoreBusy.value = true
+  try {
+    const result = await attempt(() => api<Row>('/alert-ignores', 'POST', {
+      run_id: id.value, result_id: instance.result_id, alert_index: instance.alert_index,
+      scope: ignoreScope.value, reason: ignoreReason.value.trim(), expires_at: expiresAt,
+    }))
+    if (result?.ok) {
+      ignoreTarget.value = null
+      notify('忽略规则已保存，后续巡检生效')
+    }
+  } finally {
+    ignoreBusy.value = false
+  }
 }
 
 onMounted(() => {
@@ -160,7 +216,8 @@ onUnmounted(() => {
 
 const successCount = computed(() => results.value.filter(r => r.status === 'success').length)
 const failCount = computed(() => results.value.filter(r => r.status !== 'success').length)
-const monitorAlerts = computed<Row[]>(() => groupRunAlerts(results.value))
+const monitorAlerts = computed<Row[]>(() => groupRunAlerts(results.value).filter(alert => !alert.ignored))
+const ignoredAlerts = computed<Row[]>(() => groupRunAlerts(results.value).filter(alert => alert.ignored))
 const monitorSummary = computed(() => {
   if (run.value?.monitor_status !== 'alert' || !monitorAlerts.value.length) return run.value?.monitor_summary || ''
   const count = monitorAlerts.value.reduce((total, group) => total + group.instances.length, 0)
@@ -169,7 +226,7 @@ const monitorSummary = computed(() => {
   return `${monitorAlerts.value.length} 类 · ${count} 个实例（触发 ${firing}${pending ? `，待触发 ${pending}` : ''}）`
 })
 const monitorLabel = computed(() => ({
-  alert: '发现告警', unknown: '无法判断', unconfigured: '未配置告警规则', normal: '暂无活跃告警', not_checked: '未检查',
+  alert: '发现告警', unknown: '无法判断', unconfigured: '未配置告警规则', normal: ignoredAlerts.value.length ? '暂无未忽略告警' : '暂无活跃告警', not_checked: '未检查',
 } as Row)[run.value?.monitor_status || 'not_checked'] || '未检查')
 </script>
 
@@ -196,6 +253,10 @@ const monitorLabel = computed(() => ({
         </ActionButton>
         <ActionButton v-if="run.report_url"  class="run-action-btn" :href="run.report_url" variant="primary">
           下载报告
+        </ActionButton>
+        <ActionButton v-if="run.report_url && run.job_id" type="button" class="run-action-btn" variant="secondary"
+          :disabled="regenerateBusy" :loading="regenerateBusy" @click="regenerateReport">
+          按当前模板重新生成
         </ActionButton>
         <ActionButton
           v-if="run.job_id"
@@ -265,12 +326,19 @@ const monitorLabel = computed(() => ({
                 <div class="alert-row-actions">
                   <RouterLink class="alert-row-link" :to="`/runs/${id}/alerts/${alert.result_id}/${alert.alert_index}`">详情</RouterLink>
                   <a v-if="alert.source_uid" class="alert-row-link alert-row-link-external" :href="apiUrl(`runs/${id}/prometheus/${alert.result_id}/${encodeURIComponent(alert.source_uid)}`)" target="_blank" rel="noopener noreferrer"><ExternalLink :size="15" />Prometheus</a>
+                  <button type="button" class="alert-row-link alert-ignore-action" @click="openIgnore(alert)">忽略…</button>
                 </div>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
+      <details v-if="ignoredAlerts.length" class="ignored-alerts">
+        <summary>已忽略 {{ ignoredAlerts.reduce((count, alert) => count + alert.instances.length, 0) }} 条告警</summary>
+        <div v-for="alert in ignoredAlerts" :key="`${alert.source_key || alert.source_uid}-${alert.name}`" class="ignored-alert-row">
+          <strong>{{ alert.name }}</strong><span>{{ alert.source }} · {{ alert.instances.length }} 个实例</span><small>{{ alert.ignore_reason }}</small><RouterLink :to="`/runs/${id}/alerts/${alert.result_id}/${alert.alert_index}`">详情</RouterLink>
+        </div>
+      </details>
     </section>
 
     <!-- 3. 第一板块：截图结果（表格明细） -->
@@ -411,6 +479,20 @@ const monitorLabel = computed(() => ({
       </Transition>
     </Teleport>
 
+    <Teleport to="body">
+      <div v-if="ignoreTarget" class="alert-ignore-backdrop" @click.self="!ignoreBusy && (ignoreTarget = null)">
+        <form class="alert-ignore-dialog" role="dialog" aria-modal="true" aria-label="忽略 Prometheus 告警" @submit.prevent="saveIgnore">
+          <div class="alert-ignore-head"><div><h2>忽略告警</h2><p>{{ ignoreTarget.name }} · {{ ignoreTarget.source }}</p></div><button type="button" aria-label="关闭" :disabled="ignoreBusy" @click="ignoreTarget = null"><X :size="18" /></button></div>
+          <label class="field"><span>忽略范围</span><select v-model="ignoreScope"><option value="instance">仅此实例</option><option value="rule">此类告警的所有实例</option></select></label>
+          <label v-if="ignoreScope === 'instance'" class="field"><span>实例</span><select v-model.number="ignoreInstanceIndex"><option v-for="(item, index) in ignoreTarget.instances" :key="index" :value="index">{{ item.labels?.pod || item.labels?.service || item.instance || `实例 ${index + 1}` }}</option></select></label>
+          <label class="field"><span>忽略原因</span><input v-model="ignoreReason" maxlength="200" placeholder="例如：已确认的非关键告警" /></label>
+          <label class="field"><span>有效期</span><select v-model="ignoreExpiry"><option value="never">长期有效</option><option value="7">7 天</option><option value="30">30 天</option></select></label>
+          <p class="alert-ignore-note">仅影响后续巡检的告警统计与通知；Prometheus 和历史记录保持原样。</p>
+          <div class="alert-ignore-actions"><ActionButton type="button" variant="secondary" :disabled="ignoreBusy" @click="ignoreTarget = null">取消</ActionButton><ActionButton type="submit" variant="primary" :disabled="ignoreBusy || !ignoreReason.trim()" :loading="ignoreBusy">保存规则</ActionButton></div>
+        </form>
+      </div>
+    </Teleport>
+
   </template>
 
   <div v-else-if="!loadError" class="loading-panel">
@@ -446,6 +528,22 @@ const monitorLabel = computed(() => ({
 .alert-row-link:active { transform: translateY(1px); }
 .alert-row-link:focus-visible { outline: 3px solid #9ccbd8; outline-offset: 3px; border-radius: 2px; }
 .alert-row-link-external { color: #506e7d; }
+.alert-ignore-action { border: 0; padding: 0; background: none; cursor: pointer; }
+.ignored-alerts { margin-top: 14px; border: 1px solid #d9e5e9; border-radius: 10px; background: rgba(244, 249, 250, .75); padding: 12px 16px; }
+.ignored-alerts summary { cursor: pointer; color: #536f7c; font-size: 13px; font-weight: 700; }
+.ignored-alert-row { display: flex; align-items: baseline; gap: 14px; padding: 10px 0; border-top: 1px solid #e0e9ed; font-size: 12px; color: #6b818b; }
+.ignored-alert-row:first-of-type { margin-top: 10px; }
+.ignored-alert-row strong { color: #344e5b; }
+.ignored-alert-row small { margin-left: auto; font-size: 12px; }
+.alert-ignore-backdrop { position: fixed; inset: 0; z-index: 1100; display: grid; place-items: center; background: rgba(15, 37, 48, .46); padding: 20px; }
+.alert-ignore-dialog { width: min(100%, 440px); display: grid; gap: 14px; border: 1px solid #d5e5eb; border-radius: 16px; background: #f7fbfc; box-shadow: 0 24px 80px rgba(12, 42, 55, .28); padding: 24px; }
+.alert-ignore-head { display: flex; justify-content: space-between; gap: 12px; }
+.alert-ignore-head h2 { margin: 0; font-size: 20px; color: #203d4a; }
+.alert-ignore-head p { margin: 5px 0 0; color: #6d8792; font-size: 12px; }
+.alert-ignore-head button { align-self: start; border: 0; background: transparent; color: #66818e; cursor: pointer; }
+.alert-ignore-dialog .field { margin: 0; }
+.alert-ignore-note { margin: 0; color: #718b96; font-size: 12px; line-height: 1.5; }
+.alert-ignore-actions { display: flex; justify-content: flex-end; gap: 10px; }
 
 .size-dim-text {
   white-space: nowrap;

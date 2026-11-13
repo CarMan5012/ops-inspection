@@ -20,7 +20,8 @@ export function collectRunAlerts(results: Row[]): Row[] {
           entry?.uid === alert.source_uid || entry?.name === alert.source)
         const sourceUid = String(alert.source_uid || source?.uid || '')
         const key = JSON.stringify([
-          sourceUid || alert.source, alert.name, alert.instance, alert.state,
+          alert.source_key || sourceUid || alert.source, alert.name, alert.instance, alert.state,
+          Boolean(alert.ignored),
           detailEntries(alert.labels),
         ])
         if (!found.has(key)) {
@@ -41,7 +42,7 @@ export function collectRunAlerts(results: Row[]): Row[] {
 export function groupRunAlerts(results: Row[]): Row[] {
   const groups = new Map<string, Row>()
   for (const alert of collectRunAlerts(results)) {
-    const key = JSON.stringify([alert.source_uid || alert.source, alert.name])
+    const key = JSON.stringify([alert.source_key || alert.source_uid || alert.source, alert.name, Boolean(alert.ignored)])
     const group = groups.get(key)
     if (group) {
       group.instances.push(alert)

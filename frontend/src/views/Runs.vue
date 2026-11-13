@@ -69,14 +69,14 @@ async function downloadReports() {
   exportBusy.value = true
   try {
     const info = await api<Row>(`/runs/reports/archive-info?${query}`)
-    if (!info.count) throw new Error('所选日期内没有可下载的日报')
+    if (!info.count) throw new Error('所选日期内没有可下载的 Word 报告')
     const link = document.createElement('a')
     link.href = apiUrl(`/runs/reports/archive?${query}`)
     link.download = String(info.filename || '巡检日报.zip')
     document.body.append(link)
     link.click()
     link.remove()
-    notify('日报压缩包已开始下载')
+    notify('报告压缩包已开始下载')
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : '下载失败，请稍后重试'
   } finally {
@@ -142,7 +142,7 @@ onUnmounted(() => clearInterval(timer))
 <template>
   <section class="page-intro"><div><h1>巡检记录</h1></div><ButtonGroup class="page-actions"><RefreshButton :loading="refreshing" @click="() => load()" /></ButtonGroup></section>
   <section class="runs-export" aria-labelledby="runs-export-title">
-    <div class="runs-export-intro"><h2 id="runs-export-title">批量下载日报</h2><p>每个任务每天仅打包最终合并的 Word。</p></div>
+    <div class="runs-export-intro"><h2 id="runs-export-title">批量下载报告</h2><p>每个任务每天只打包一份最终 Word，包含手动和定时巡检结果。</p></div>
     <div class="runs-export-controls">
       <div class="runs-export-field"><span>范围</span>
         <div class="runs-export-modes" role="group" aria-label="下载范围">

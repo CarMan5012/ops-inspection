@@ -3,7 +3,7 @@ import { nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import QRCode from 'qrcode'
 import { Database, ShieldCheck, RefreshCw, HardDrive, X, ChevronLeft, ChevronRight } from '../icons'
-import { api, type Row } from '../api'
+import { api, utcDateTime, type Row } from '../api'
 import { attempt, notify, confirmModal } from '../ui'
 import RefreshButton from '../components/RefreshButton.vue'
 import PasswordInput from '../components/PasswordInput.vue'
@@ -12,10 +12,12 @@ const usage = ref<Row>({})
 const disk = ref<Row | null>(null)
 const diskAlert = reactive<Row>({ enabled: false, threshold: 80, profile_id: 0 })
 const dingtalkProfiles = ref<Row[]>([])
+const ignoredAlertRules = ref<Row[]>([])
+const ignoreRuleBusy = ref<number | null>(null)
 const diskAlertSaving = ref(false)
 const route = useRoute()
 const router = useRouter()
-type SettingsSection = 'general' | 'storage' | 'security'
+type SettingsSection = 'general' | 'storage' | 'alerts' | 'security'
 const activeSection = ref<SettingsSection>('general')
 const storage = reactive<Row>({})
 const security = reactive<Row>({})
@@ -280,12 +282,13 @@ async function load(): Promise<boolean> {
   if (refreshing.value) return false
   refreshing.value = true
   try {
-    const [stored, secured, docs, preferences, profiles] = await Promise.all([
+    const [stored, secured, docs, preferences, profiles, ignores] = await Promise.all([
       attempt(() => api<Row>('/storage')),
       attempt(() => api<Row>('/security-settings')),
       attempt(() => api<Row>('/swagger-settings')),
       attempt(() => api<Row>('/system-preferences')),
       attempt(() => api<Row>('/dingtalk-profiles')),
+      attempt(() => api<Row>('/alert-ignores')),
     ])
     if (stored?.config) {
       if (stored.latest_completed_month) latestCompletedMonth.value = String(stored.latest_completed_month)
@@ -309,10 +312,31 @@ async function load(): Promise<boolean> {
     if (secured) Object.assign(security, secured)
     if (preferences) Object.assign(systemPrefs, preferences)
     dingtalkProfiles.value = profiles?.profiles || []
+    ignoredAlertRules.value = ignores?.rules || []
     swagger.value = Boolean(docs?.enabled)
     return Boolean(stored?.config)
   } finally {
     refreshing.value = false
+  }
+}
+
+async function cancelIgnoreRule(rule: Row) {
+  if (ignoreRuleBusy.value != null) return
+  const confirmed = await confirmModal({
+    title: '取消忽略告警',
+    message: `取消后，${rule.alert_name} 在后续巡检中将重新计入告警。`,
+    confirmText: '取消忽略',
+  })
+  if (!confirmed) return
+  ignoreRuleBusy.value = Number(rule.id)
+  try {
+    const result = await attempt(() => api<Row>(`/alert-ignores/${rule.id}`, 'DELETE'))
+    if (result?.ok) {
+      ignoredAlertRules.value = ignoredAlertRules.value.filter(item => item.id !== rule.id)
+      notify('已取消忽略，后续巡检生效')
+    }
+  } finally {
+    ignoreRuleBusy.value = null
   }
 }
 
@@ -572,7 +596,7 @@ async function updateDocs() {
 }
 
 function isSettingsSection(value: unknown): value is SettingsSection {
-  return value === 'general' || value === 'storage' || value === 'security'
+  return value === 'general' || value === 'storage' || value === 'alerts' || value === 'security'
 }
 
 function selectSection(section: SettingsSection) {
@@ -594,7 +618,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
 <template>
   <div class="settings-page">
   <section class="page-intro settings-intro"><div><h1>系统设置</h1><p>管理系统信息、数据保留与账户安全</p></div><ButtonGroup class="page-actions"><RefreshButton :loading="refreshing || busy" @click="load" /></ButtonGroup></section>
-  <nav class="settings-tabs settings-category-tabs" role="tablist" aria-label="设置分类"><button type="button" role="tab" id="general-tab" aria-controls="general-section" :aria-selected="activeSection === 'general'" :class="{ active: activeSection === 'general' }" @click="selectSection('general')">基础设置</button><button type="button" role="tab" id="storage-tab" aria-controls="storage-section" :aria-selected="activeSection === 'storage'" :class="{ active: activeSection === 'storage' }" @click="selectSection('storage')">数据存储</button><button type="button" role="tab" id="security-tab" aria-controls="security-section" :aria-selected="activeSection === 'security'" :class="{ active: activeSection === 'security' }" @click="selectSection('security')">安全设置</button></nav>
+  <nav class="settings-tabs settings-category-tabs" role="tablist" aria-label="设置分类"><button type="button" role="tab" id="general-tab" aria-controls="general-section" :aria-selected="activeSection === 'general'" :class="{ active: activeSection === 'general' }" @click="selectSection('general')">基础设置</button><button type="button" role="tab" id="storage-tab" aria-controls="storage-section" :aria-selected="activeSection === 'storage'" :class="{ active: activeSection === 'storage' }" @click="selectSection('storage')">数据存储</button><button type="button" role="tab" id="alerts-tab" aria-controls="alerts-section" :aria-selected="activeSection === 'alerts'" :class="{ active: activeSection === 'alerts' }" @click="selectSection('alerts')">告警忽略</button><button type="button" role="tab" id="security-tab" aria-controls="security-section" :aria-selected="activeSection === 'security'" :class="{ active: activeSection === 'security' }" @click="selectSection('security')">安全设置</button></nav>
   <section v-show="activeSection === 'general'" id="general-section" class="settings-section" role="tabpanel" aria-labelledby="general-tab">
     <div class="section-heading"><div><h2>基础设置</h2></div></div>
     <form class="form-section settings-form system-preferences-form" novalidate @submit.prevent="saveSystemPrefs">
@@ -707,6 +731,18 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
       </div>
       <div class="manual-cleanup-footer"><span>清理后无法恢复</span><ActionButton type="button" :disabled="busy || cleanupPreviewBusy || !Number(cleanupPreview?.total_items)" @click="cleanup" variant="danger" :loading="pendingAction === 'cleanup'">立即清理</ActionButton></div>
     </div>
+    </div>
+  </section>
+  <section v-show="activeSection === 'alerts'" id="alerts-section" class="settings-section" role="tabpanel" aria-labelledby="alerts-tab">
+    <div class="section-heading"><div><h2>告警忽略</h2></div></div>
+    <div class="form-section settings-form alert-ignore-settings">
+      <p>在巡检记录的 Prometheus 告警列表中添加规则。规则只影响后续巡检统计和通知，原始告警仍可回查。</p>
+      <div v-if="!ignoredAlertRules.length" class="alert-ignore-empty">暂无忽略规则</div>
+      <div v-for="rule in ignoredAlertRules" :key="rule.id" class="alert-ignore-rule">
+        <div class="alert-ignore-rule-main"><strong>{{ rule.alert_name }}</strong><span :class="{ expired: rule.expired }">{{ rule.expired ? '已过期' : rule.scope === 'instance' ? '仅此实例' : '所有实例' }}</span></div>
+        <div class="alert-ignore-rule-meta">{{ rule.source_name || rule.source_uid }} · {{ rule.source_key }}<template v-if="rule.scope === 'instance'"> · {{ rule.instance_label || '指定实例' }}</template> · {{ rule.expires_at ? `到期 ${utcDateTime(rule.expires_at)}` : '长期有效' }}</div>
+        <div class="alert-ignore-rule-bottom"><span>原因：{{ rule.reason }}</span><ActionButton type="button" variant="secondary" class="btn-small" :disabled="ignoreRuleBusy != null" :loading="ignoreRuleBusy === Number(rule.id)" @click="cancelIgnoreRule(rule)">取消忽略</ActionButton></div>
+      </div>
     </div>
   </section>
   <section v-show="activeSection === 'security'" id="security-section" class="settings-section" role="tabpanel" aria-labelledby="security-tab">
@@ -916,6 +952,16 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeCleanupMenu))
 .settings-category-tabs button { min-width: 106px; padding: 10px 18px; border: 0; border-radius: 7px; color: #617d8b; font-size: 12px; font-weight: 650; }
 .settings-category-tabs button:hover { background: rgba(255, 255, 255, .55); color: #1d6880; }
 .settings-category-tabs button.active { background: #fff; color: #176b84; box-shadow: 0 1px 5px rgba(29, 87, 107, .13); }
+.alert-ignore-settings { display: grid; gap: 14px; }
+.alert-ignore-settings > p { margin: 0; color: #6f8792; font-size: 13px; }
+.alert-ignore-empty { padding: 28px; text-align: center; color: #8298a1; border: 1px dashed #cadde4; border-radius: 10px; }
+.alert-ignore-rule { padding: 17px 19px; border: 1px solid #dce8ec; border-radius: 10px; background: rgba(255, 255, 255, .7); }
+.alert-ignore-rule-main, .alert-ignore-rule-bottom { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.alert-ignore-rule-main strong { font-size: 15px; color: #294451; }
+.alert-ignore-rule-main span { color: #176b84; font-size: 12px; font-weight: 700; }
+.alert-ignore-rule-main span.expired { color: #99754d; }
+.alert-ignore-rule-meta { margin-top: 5px; color: #7a919b; font-size: 12px; overflow-wrap: anywhere; }
+.alert-ignore-rule-bottom { margin-top: 12px; color: #526d79; font-size: 12px; }
 .settings-section { margin-bottom: 0; }
 .settings-section .section-heading { margin-bottom: 17px; }
 .settings-section .settings-form { background: rgba(245, 251, 253, .88); border-color: #d6e8ed; border-radius: 12px; box-shadow: 0 8px 30px rgba(39, 101, 121, .045); }

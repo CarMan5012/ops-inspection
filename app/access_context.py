@@ -29,6 +29,19 @@ def public_base_path() -> str:
     return get_system_setting(SETTING_KEY, LEGACY_BASE)
 
 
+def routing_state() -> tuple[str, str]:
+    """Read the installation state and public path in one database connection."""
+    from app.db import connect
+
+    with connect() as conn:
+        state_row = conn.execute("SELECT state FROM installation_state WHERE id = 1").fetchone()
+        state = str(state_row[0]) if state_row else "unknown"
+        if state == "pending":
+            return state, ""
+        path_row = conn.execute("SELECT value FROM system_settings WHERE key = ?", (SETTING_KEY,)).fetchone()
+    return state, str(path_row[0]) if path_row else LEGACY_BASE
+
+
 def public_api_prefix() -> str:
     return public_base_path() + "/api"
 

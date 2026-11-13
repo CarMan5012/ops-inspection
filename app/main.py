@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import base64
+import re
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
@@ -63,7 +64,7 @@ from app.openapi import configure_openapi
 from app.login_crypto import LoginPayloadError, decrypt_login_payload, get_login_public_jwk
 from app.login_rate_limit import consume_login_attempt, clear_login_attempts
 from app.installation import change_admin_password, change_admin_username, complete_setup, ensure_setup_code, installation_state, verify_setup_code
-from app.access_context import cookie_path, normalize_access_context, public_api_prefix, public_base_path
+from app.access_context import cookie_path, normalize_access_context, public_api_prefix, public_base_path, routing_state
 import os
 import logging
 import sys
@@ -120,8 +121,7 @@ configure_openapi(app, settings.api_prefix, settings.app_name)
 @app.middleware("http")
 async def csrf_protect_middleware(request: Request, call_next):
     external_path = request.scope["path"]
-    state = installation_state()
-    base = public_base_path()
+    state, base = routing_state()
     if state == "pending":
         if external_path == "/":
             return RedirectResponse("/setup", status_code=303)
@@ -219,22 +219,20 @@ async def csrf_protect_middleware(request: Request, call_next):
 
     response = await call_next(request)
 
-    # 当用户处于登录状态且缺失 csrf_token cookie 时，自动补发自愈
+    # A missing CSRF cookie can be restored by a safe request. Normal requests
+    # already carry it and must not repeat the expensive session verification.
     token = request.cookies.get(COOKIE_NAME)
-    if token and verify_token(token):
-        if not request.cookies.get("csrf_token"):
-            import secrets
-            csrf_token = secrets.token_urlsafe(32)
-            is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
-            response.set_cookie(
-                "csrf_token",
-                csrf_token,
-                httponly=False,
-                samesite="lax",
-                secure=is_secure,
-                path=cookie_path(),
-                max_age=get_session_ttl_seconds(),
-            )
+    if request.method in ("GET", "HEAD") and token and not request.cookies.get("csrf_token") and verify_token(token):
+        import secrets
+        response.set_cookie(
+            "csrf_token",
+            secrets.token_urlsafe(32),
+            httponly=False,
+            samesite="lax",
+            secure=request.url.scheme == "https",
+            path=cookie_path(),
+            max_age=get_session_ttl_seconds(),
+        )
 
     return response
 
@@ -615,7 +613,7 @@ def setup_page(request: Request) -> Response:
          "setup_log_command": f"docker logs {log_target} 2>&1 | grep '^SETUP_CODE='",
          "login_logo_data_uri": LOGIN_LOGO_DATA_URI},
     )
-    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    is_secure = request.url.scheme == "https"
     response.set_cookie("csrf_token", csrf_token, httponly=False, samesite="lax",
                         secure=is_secure, path="/",
                         max_age=get_session_ttl_seconds())
@@ -689,7 +687,7 @@ def setup_submit(
 def login_page(request: Request) -> Response:
     if installation_state() == "pending":
         return frontend_redirect("/setup")
-    security = security_settings()
+    mfa_enabled = get_system_setting(MFA_ENABLED_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"}
     
     # 每次渲染登录页面时，主动生成并下发一个新的强随机 csrf_token，确保页面表单与 Cookie 状态保持一致
     import secrets
@@ -701,7 +699,7 @@ def login_page(request: Request) -> Response:
         {
             "request": request,
             "error": request.query_params.get("error", ""),
-            "mfa_enabled": security["mfa_enabled"],
+            "mfa_enabled": mfa_enabled,
             "login_public_key": get_login_public_jwk(),
             "login_logo_data_uri": LOGIN_LOGO_DATA_URI,
             "app_name": display_name(),
@@ -710,7 +708,7 @@ def login_page(request: Request) -> Response:
     )
     
     # 动态识别请求协议，自适应设置 secure 属性
-    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    is_secure = request.url.scheme == "https"
     current_cookie_path = cookie_path()
     # The setup form uses a root-scoped CSRF cookie. After choosing /ops (or
     # another context), keeping it would send two cookies with this name and
@@ -766,14 +764,13 @@ def login(
 
     if not check_password(username, password):
         return frontend_redirect("/login?error=1")
-    security = security_settings()
-    if security["mfa_enabled"]:
+    if get_system_setting(MFA_ENABLED_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "enabled"}:
         secret = current_mfa_secret()
         if not secret or not verify_totp_code(secret, mfa_code):
             return frontend_redirect("/login?error=mfa")
     clear_login_attempts(client_host)
     response = frontend_redirect("/")
-    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    is_secure = request.url.scheme == "https"
     current_cookie_path = cookie_path()
     import secrets
     csrf_token = secrets.token_urlsafe(32)
@@ -1073,7 +1070,7 @@ def api_save_system_preferences(payload: dict[str, Any], background_tasks: Backg
     from app.holiday_calendar import refresh_current_year
     background_tasks.add_task(refresh_current_year)
     if old_cookie_path != cookie_path():
-        is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+        is_secure = request.url.scheme == "https"
         token = request.cookies.get(COOKIE_NAME)
         csrf_token = request.cookies.get("csrf_token")
         response.delete_cookie(COOKIE_NAME, path=old_cookie_path)
@@ -1256,42 +1253,16 @@ def api_reset_all_jobs(payload: dict[str, Any]) -> dict[str, Any]:
             conn.execute("DELETE FROM sqlite_sequence WHERE name = ?", (table,))
         conn.execute("PRAGMA foreign_keys = ON")
 
-    # 4. 物理清理截图、Word 报告、周期归档包目录下的历史文件
-    for directory in (settings.screenshot_dir, settings.report_dir, settings.data_dir / "periodic-reports"):
-        if directory.exists():
-            for item in directory.iterdir():
-                try:
-                    if item.is_dir():
-                        shutil.rmtree(item)
-                    else:
-                        os.remove(item)
-                except Exception as e:
-                    app_logger.error(f"物理删除 {item} 失败: {e}", exc_info=True)
-
-    # 新版日期目录中的截图、报告及月份目录的周期 ZIP 也属于运行历史。
-    from datetime import date
-    for directory in settings.data_dir.glob("????/??"):
-        if not directory.is_dir():
-            continue
-        try:
-            date(int(directory.parent.name), int(directory.name), 1)
-        except ValueError:
-            continue
-        for file_path in directory.glob("*.zip"):
-            if file_path.is_file():
-                file_path.unlink()
-        for day_dir in directory.glob("??"):
-            if not day_dir.is_dir():
-                continue
-            for file_path in day_dir.iterdir():
-                if file_path.is_file() and file_path.suffix.lower() in {".png", ".docx"}:
-                    file_path.unlink()
-            if not any(day_dir.iterdir()):
-                day_dir.rmdir()
-        if not any(directory.iterdir()):
-            directory.rmdir()
-            if not any(directory.parent.iterdir()):
-                directory.parent.rmdir()
+    # All generated screenshots, daily reports and periodic ZIPs live here.
+    if settings.report_dir.exists():
+        for item in settings.report_dir.iterdir():
+            try:
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+            except Exception as exc:
+                app_logger.error(f"物理删除 {item} 失败: {exc}", exc_info=True)
 
     # 5. 刷新后台任务调度
     reload_jobs()
@@ -1512,19 +1483,28 @@ def artifact_filename(file_path: str) -> str:
     return str(file_path or "").replace("\\", "/").rsplit("/", 1)[-1]
 
 
+def daily_report_filename(file_path: str) -> str:
+    """Do not expose old per-run manual suffixes as the daily download name."""
+    return re.sub(r"-手动巡检-\d+(?=\.docx$)", "", artifact_filename(file_path), flags=re.I)
+
+
 def get_artifact_url(kind: str, run_id: int | str, filename: str) -> str:
     return url_for_frontend(f"/artifact/{kind}/{run_id}/{filename}")
 
 
-def enrich_run(run: dict[str, Any]) -> dict[str, Any]:
+def enrich_run(run: dict[str, Any], base_path: str | None = None) -> dict[str, Any]:
     data = dict(run)
     data["status_label"] = api_status_label(data.get("status"))
     data["dingtalk_status_label"] = dingtalk_status_label(data.get("dingtalk_status"))
     if data.get("report_path"):
         filename = artifact_filename(data["report_path"])
+        data["report_filename"] = daily_report_filename(data["report_path"])
         local_path = resolve_artifact_path(data["report_path"])
         if local_path.exists():
-            data["report_url"] = get_artifact_url("reports", data["id"], filename)
+            if base_path is None:
+                data["report_url"] = get_artifact_url("reports", data["id"], filename)
+            else:
+                data["report_url"] = f"{base_path}/artifact/reports/{data['id']}/{filename}"
     return data
 
 
@@ -1547,7 +1527,7 @@ def api_renew_session(request: Request, response: Response) -> dict[str, Any]:
     else:
         # 旧版固定时长令牌在首次真实操作时迁移为闲置会话。
         token = create_idle_token(admin_username())
-    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    is_secure = request.url.scheme == "https"
     for name, value, http_only in (
         (COOKIE_NAME, token, True),
         ("csrf_token", request.cookies.get("csrf_token", ""), False),
@@ -1563,7 +1543,8 @@ def api_renew_session(request: Request, response: Response) -> dict[str, Any]:
 @api_router.get("/dashboard", dependencies=[Depends(require_api_login)])
 def api_dashboard() -> dict[str, Any]:
     jobs, raw_runs, auth_profiles = dashboard_data()
-    runs = [enrich_run(run) for run in raw_runs]
+    base_path = public_base_path()
+    runs = [enrich_run(run, base_path) for run in raw_runs]
     return {
         "app_name": display_name(),
         "jobs": public_jobs(jobs),
@@ -1949,8 +1930,9 @@ def api_list_runs(page: int = 1, page_size: int = RUN_DEFAULT_PAGE_SIZE) -> dict
     if page < 1:
         page = 1
     runs_list, total = list_runs_page(page, page_size)
+    base_path = public_base_path()
     return {
-        "runs": [enrich_run(run) for run in runs_list],
+        "runs": [enrich_run(run, base_path) for run in runs_list],
         "total": total,
         "page": page,
         "page_size": page_size
@@ -1981,7 +1963,7 @@ def _daily_archive_selection(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     if not reports:
-        raise HTTPException(status_code=404, detail="所选月份内没有可下载的日报" if months is not None else "所选日期内没有可下载的日报")
+        raise HTTPException(status_code=404, detail="所选月份内没有可下载的 Word 报告" if months is not None else "所选日期内没有可下载的 Word 报告")
     return reports, filename
 
 
@@ -2027,6 +2009,92 @@ def api_get_run(run_id: int) -> dict[str, Any]:
     run = enrich_run(require_value(get_run(run_id), "运行记录不存在"))
     results = [with_file_url(dict(item)) for item in list_screenshot_results(run_id)]
     return {"run": run, "results": results}
+
+
+@api_router.post("/runs/{run_id}/regenerate-report", dependencies=[Depends(require_api_login)])
+def api_regenerate_daily_report(run_id: int) -> dict[str, Any]:
+    from app.job_execution import JobAlreadyRunning
+    from app.report import ReportValidationError
+    from app.runner import regenerate_daily_report
+
+    try:
+        report_path = regenerate_daily_report(run_id)
+    except JobAlreadyRunning as exc:
+        raise HTTPException(status_code=409, detail="任务正在执行，请稍后重试") from exc
+    except (ValueError, ReportValidationError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "filename": daily_report_filename(report_path)}
+
+
+@api_router.get("/alert-ignores", dependencies=[Depends(require_api_login)])
+def api_list_alert_ignores() -> dict[str, Any]:
+    from app.alert_ignores import list_ignore_rules
+    return {"rules": list_ignore_rules()}
+
+
+@api_router.post("/alert-ignores", dependencies=[Depends(require_api_login)])
+def api_create_alert_ignore(payload: dict[str, Any]) -> dict[str, Any]:
+    import json
+    from datetime import datetime, timezone
+    from app.alert_ignores import create_ignore_rule, instance_identity, instance_label, source_identity
+
+    try:
+        run_id = int(payload.get("run_id"))
+        result_id = int(payload.get("result_id"))
+        alert_index = int(payload.get("alert_index"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="请选择有效的告警记录") from None
+    result = next((row for row in list_screenshot_results(run_id) if row["id"] == result_id), None)
+    if result is None:
+        raise HTTPException(status_code=404, detail="告警记录不存在")
+    try:
+        snapshot = json.loads(result.get("monitor_data") or "{}")
+        alert = snapshot["alerts"][alert_index]
+    except (TypeError, ValueError, KeyError, IndexError):
+        raise HTTPException(status_code=404, detail="告警记录不存在") from None
+    if not isinstance(alert, dict) or alert_index < 0:
+        raise HTTPException(status_code=400, detail="告警记录无效")
+    scope = str(payload.get("scope") or "")
+    reason = str(payload.get("reason") or "").strip()
+    if scope not in {"rule", "instance"}:
+        raise HTTPException(status_code=400, detail="忽略范围无效")
+    if not reason or len(reason) > 200:
+        raise HTTPException(status_code=400, detail="忽略原因需为 1–200 个字符")
+    item = get_screenshot_item(result.get("item_id")) if result.get("item_id") else None
+    source_key, source_uid, source_name = source_identity(
+        alert, snapshot.get("sources") if isinstance(snapshot.get("sources"), list) else [],
+        str(item.get("url") or "") if item else "",
+    )
+    alert_name = str(alert.get("name") or "").strip()
+    if not source_key or not source_uid or not alert_name:
+        raise HTTPException(status_code=400, detail="该历史告警缺少数据源信息，无法建立安全的忽略规则")
+    instance = instance_identity(alert) if scope == "instance" else ""
+    if scope == "instance" and not instance:
+        raise HTTPException(status_code=400, detail="该告警没有可识别的实例，请改用整类告警范围")
+    expires_at = None
+    if payload.get("expires_at"):
+        try:
+            expiry = datetime.fromisoformat(str(payload["expires_at"]).replace("Z", "+00:00"))
+            if expiry.tzinfo is None or expiry <= datetime.now(timezone.utc):
+                raise ValueError
+            expires_at = expiry.astimezone(timezone.utc).isoformat(timespec="seconds")
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="到期时间必须是未来的有效时间") from None
+    rule = create_ignore_rule(
+        source_key=source_key, source_uid=source_uid, source_name=source_name,
+        alert_name=alert_name, scope=scope, instance=instance,
+        instance_label=instance_label(alert) if scope == "instance" else "",
+        reason=reason, expires_at=expires_at,
+    )
+    return {"ok": True, "rule": rule}
+
+
+@api_router.delete("/alert-ignores/{rule_id}", dependencies=[Depends(require_api_login)])
+def api_delete_alert_ignore(rule_id: int) -> dict[str, Any]:
+    from app.alert_ignores import disable_ignore_rule
+    if not disable_ignore_rule(rule_id):
+        raise HTTPException(status_code=404, detail="忽略规则不存在")
+    return {"ok": True}
 
 
 @api_router.get("/runs/{run_id}/prometheus/{result_id}/{source_uid}", dependencies=[Depends(require_api_login)])
@@ -2417,6 +2485,7 @@ def api_update_periodic_report(report_type: str, payload: dict[str, Any]) -> dic
 def index(request: Request) -> HTMLResponse:
     import json
 
+    base_path = public_base_path()
     manifest_path = Path("app/static/vue/.vite/manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     entry = manifest["index.html"]
@@ -2424,9 +2493,9 @@ def index(request: Request) -> HTMLResponse:
         "vue.html",
         {
             "request": request,
-            "url_for_frontend": url_for_frontend,
-            "api_prefix": public_api_prefix(),
-            "frontend_base_path": public_base_path() or "/",
+            "url_for_frontend": lambda path: f"{base_path}/{path.lstrip('/')}",
+            "api_prefix": base_path + "/api",
+            "frontend_base_path": base_path or "/",
             "app_name": display_name(),
             "time_zone": settings.default_timezone,
             "vue_js": entry["file"],
@@ -2895,7 +2964,8 @@ def artifact(request: Request, kind: str, run_id: int, filename: str):
 </html>"""
         return HTMLResponse(content=html_content)
 
-    return FileResponse(target_path, filename=filename if download_requested or not is_image else None)
+    download_name = daily_report_filename(filename) if kind == "reports" else filename
+    return FileResponse(target_path, filename=download_name if download_requested or not is_image else None)
 
 
 def require_value(value: Any, message: str) -> Any:
@@ -3066,11 +3136,11 @@ def run_periodic_report_now(report_type: str, background_tasks: BackgroundTasks)
 @frontend_router.get("/periodic-reports/download/{run_id}", dependencies=[Depends(require_login)])
 def download_periodic_report_zip(run_id: int) -> FileResponse:
     from app.repository import get_periodic_report_run
-    from app.storage_paths import is_safe_path
+    from app.storage_paths import is_safe_path, resolve_artifact_path
     run = get_periodic_report_run(run_id)
     if not run or not run.get("zip_path"):
         raise HTTPException(status_code=404, detail="周期报告包不存在")
-    path = Path(run["zip_path"]).resolve()
+    path = resolve_artifact_path(run["zip_path"]).resolve()
     if not is_safe_path(path):
         raise HTTPException(status_code=403, detail="非法路径，拒绝访问")
     if not path.exists():

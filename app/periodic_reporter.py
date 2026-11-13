@@ -264,7 +264,7 @@ def _trigger_periodic_report_unlocked(report_type: str, is_manual: bool = False)
             cand_end = datetime.combine(now_dt.date(), time.max).replace(tzinfo=local_tz)
             with connect() as conn:
                 count_this_week = conn.execute(
-                    "SELECT COUNT(*) FROM run_records WHERE substr(replace(started_at, 'T', ' '), 1, 19) >= ? AND report_path IS NOT NULL AND report_path != '' AND (schedule_slot IN ('morning', 'afternoon') OR schedule_slot LIKE 'calendar-%')",
+                    "SELECT COUNT(DISTINCT coalesce(cast(job_id as text), job_name) || ':' || substr(started_at, 1, 10)) FROM run_records WHERE substr(replace(started_at, 'T', ' '), 1, 19) >= ? AND report_path IS NOT NULL AND report_path != ''",
                     (cand_start.strftime("%Y-%m-%d %H:%M:%S"),)
                 ).fetchone()[0]
             if count_this_week > 0:
@@ -392,9 +392,7 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
 
     logger.info(f"正在为周期报告 '{setting['name']}' 运行打包归档流程 (ID: {run_id})")
 
-    # 1. 查询此时间段内所有已经生成 Word 的巡检记录。
-    #    同一个任务一天可能跑多次，09:05 和 17:05 会写入同一个日报模板；
-    #    周报/月报只取“任务 + 日期”维度最后一次 Word，避免同一天重复放多份。
+    # 1. One final Word per task and day, manual or scheduled.
     with connect() as conn:
         rows = conn.execute(
             """
@@ -404,7 +402,6 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
               AND substr(replace(started_at, 'T', ' '), 1, 19) <= ?
               AND report_path IS NOT NULL
               AND report_path != ''
-              AND (schedule_slot IN ('morning', 'afternoon') OR schedule_slot LIKE 'calendar-%')
             ORDER BY substr(replace(started_at, 'T', ' '), 1, 19) ASC, id ASC
             """,
             (period_start, period_end),
@@ -450,7 +447,7 @@ def execute_periodic_report_flow(run_id: int, force_warning: bool = False, unfin
         zip_stem = f"月报_{year_month}"
 
     generated_at = datetime.now(ZoneInfo(settings.default_timezone))
-    zip_dir = settings.data_dir / generated_at.strftime("%Y") / generated_at.strftime("%m")
+    zip_dir = settings.report_dir / generated_at.strftime("%Y") / generated_at.strftime("%m")
     zip_dir.mkdir(parents=True, exist_ok=True)
     zip_filepath = unique_artifact_path(zip_dir, zip_stem, ".zip")
 

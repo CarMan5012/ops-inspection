@@ -60,7 +60,7 @@ RUN rm -f /etc/apt/sources.list.d/google-chrome.list \
 
 COPY app ./app
 COPY --from=frontend-build /build/app/static/vue ./app/static/vue
-RUN mkdir -p /app/data/screenshots /app/data/reports /app/data/templates /app/data/taskbar-templates /app/data/logs /app/data/browser-state
+RUN mkdir -p /app/data/reports /app/data/templates /app/data/taskbar-templates /app/data/logs /app/data/browser-state
 
 EXPOSE 8000
 

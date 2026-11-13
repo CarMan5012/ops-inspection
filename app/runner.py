@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from typing import Any
 
 from app.settings import settings
+from app.db import connect
 from app.job_execution import JobAlreadyRunning, JobLease, acquire_job_lease
 
 from app.monitoring import summarize_monitoring
@@ -32,6 +33,57 @@ from playwright.sync_api import sync_playwright
 logger = logging.getLogger("app.runner")
 _real_browser_lock = Lock()
 _BROWSER_LOCK_WAIT_SECONDS = 900
+
+
+def _publish_daily_report(job: dict[str, Any], run: dict[str, Any], results: list[dict[str, Any]]) -> str:
+    """Serialize report generation and its DB pointer across all tasks."""
+    lease = acquire_job_lease(0, blocking=True)
+    try:
+        report_path = generate_docx(job, run, results)
+        update_run(int(run["id"]), report_path=report_path)
+        day = str(run.get("started_at") or "")[:10]
+        if len(day) == 10 and run.get("job_id") is not None:
+            with connect() as conn:
+                conn.execute(
+                    """UPDATE run_records SET report_path = ? WHERE job_id = ?
+                       AND substr(started_at, 1, 10) = ? AND report_path IS NOT NULL AND report_path != ''""",
+                    (report_path, int(run["job_id"]), day),
+                )
+        return report_path
+    finally:
+        lease.close()
+
+
+def regenerate_daily_report(run_id: int) -> str:
+    """Rebuild one task's historical daily Word using its current template."""
+    requested = get_run(run_id)
+    if not requested or requested.get("job_id") is None:
+        raise ValueError("运行记录或所属任务不存在")
+    job_id = int(requested["job_id"])
+    job = get_job(job_id)
+    if not job:
+        raise ValueError("所属任务已删除，无法重新生成")
+    day = str(requested["started_at"])[:10]
+    job_lease = acquire_job_lease(job_id, blocking=False)
+    try:
+        with connect() as conn:
+            latest = conn.execute(
+                """SELECT id FROM run_records WHERE job_id = ? AND substr(started_at, 1, 10) = ?
+                   AND report_path IS NOT NULL AND report_path != '' ORDER BY id DESC LIMIT 1""",
+                (job_id, day),
+            ).fetchone()
+        if latest is None:
+            raise ValueError("当天没有可重新生成的报告")
+        target = get_run(int(latest["id"]))
+        report_path = _publish_daily_report(job, target, list_screenshot_results(int(latest["id"])))
+        with connect() as conn:
+            conn.execute(
+                "UPDATE run_records SET report_path = ? WHERE job_id = ? AND substr(started_at, 1, 10) = ? AND report_path IS NOT NULL AND report_path != ''",
+                (report_path, job_id, day),
+            )
+        return report_path
+    finally:
+        job_lease.close()
 
 
 @contextmanager
@@ -158,11 +210,7 @@ def _execute_job(
             )
             run = get_run(run_id)
             results = []
-            report_path = generate_docx(job, run or {}, results)
-            update_run(
-                run_id,
-                report_path=report_path,
-            )
+            report_path = _publish_daily_report(job, run or {"id": run_id}, results)
             try:
                 _send_dingtalk_notification(job, run_id, status="failed", success_count=0,
                                            failed_count=0, error_summary=err_msg)
@@ -260,9 +308,8 @@ def _execute_job(
         run = get_run(run_id) or run
         
         logger.info("正在生成 Word 报告…")
-        report_path = generate_docx(job, run, results)
+        report_path = _publish_daily_report(job, run, results)
         logger.info(f"报告已生成：{Path(report_path).name}")
-        update_run(run_id, report_path=report_path)
 
         try:
             notify_status = (

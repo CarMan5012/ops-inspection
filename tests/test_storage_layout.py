@@ -18,7 +18,6 @@ def _storage_modules():
 
 def _set_test_paths(monkeypatch, tmp_path, cleanup, storage_paths):
     monkeypatch.setattr(storage_paths.settings, "data_dir", tmp_path)
-    monkeypatch.setattr(storage_paths.settings, "screenshot_dir", tmp_path / "screenshots")
     monkeypatch.setattr(storage_paths.settings, "report_dir", tmp_path / "reports")
     monkeypatch.setattr(storage_paths, "get_run_date", lambda _run_id: ("2020", "01", "01"))
 
@@ -29,7 +28,7 @@ def test_day_layout_has_no_run_id_and_avoids_name_collisions(monkeypatch, tmp_pa
 
     screenshot_dir = storage_paths.get_screenshot_dir(42)
     report_dir = storage_paths.get_report_dir(42)
-    assert screenshot_dir == tmp_path / "2020/01/01"
+    assert screenshot_dir == tmp_path / "reports/2020/01/01"
     assert report_dir == screenshot_dir
 
     first = storage_paths.unique_artifact_path(screenshot_dir, "09-05_job_dashboard", ".png")
@@ -38,10 +37,29 @@ def test_day_layout_has_no_run_id_and_avoids_name_collisions(monkeypatch, tmp_pa
     assert second.name == "09-05_job_dashboard-2.png"
     assert storage_paths.resolve_artifact_path(str(first)) == first.resolve()
 
-    legacy = tmp_path / "reports/2020/01/01/run-42/old.docx"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_bytes(b"report")
-    assert storage_paths.resolve_artifact_path(str(legacy)) == legacy.resolve()
+    container_path = "/app/data/reports/2020/01/01/old.docx"
+    mapped = report_dir / "old.docx"
+    mapped.write_bytes(b"report")
+    assert storage_paths.resolve_artifact_path(container_path) == mapped.resolve()
+
+
+def test_storage_usage_classifies_files_under_reports(monkeypatch, tmp_path):
+    cleanup, storage_paths = _storage_modules()
+    _set_test_paths(monkeypatch, tmp_path, cleanup, storage_paths)
+    monkeypatch.setattr(cleanup.settings, "db_path", tmp_path / "app.db")
+    monkeypatch.setattr(cleanup.settings, "log_dir", tmp_path / "logs")
+    monkeypatch.setattr(cleanup.settings, "browser_state_dir", tmp_path / "browser-state")
+    monkeypatch.setattr(cleanup.settings, "ensure_dirs", lambda: None)
+    day_dir = tmp_path / "reports/2020/01/01"
+    day_dir.mkdir(parents=True)
+    (day_dir / "capture.png").write_bytes(b"image")
+    (day_dir / "daily.docx").write_bytes(b"word")
+    (day_dir.parent / "weekly.zip").write_bytes(b"zip")
+
+    usage = cleanup.get_storage_usage()
+    assert usage["screenshots_bytes"] == 5
+    assert usage["reports_bytes"] == 4
+    assert usage["periodic_reports_bytes"] == 3
 
 
 def test_cleanup_removes_only_expired_artifact_type(monkeypatch, tmp_path):
@@ -111,7 +129,7 @@ def test_same_job_updates_one_daily_report(monkeypatch, tmp_path):
 
     assert first_path == second_path
     assert report.Path(second_path).name == "获取标题-2020-01-01.docx"
-    assert len(list((tmp_path / "2020/01/01").glob("*.docx"))) == 1
+    assert len(list((tmp_path / "reports/2020/01/01").glob("*.docx"))) == 1
 
 
 def test_download_requires_file_to_belong_to_requested_run(monkeypatch, tmp_path):
@@ -121,7 +139,7 @@ def test_download_requires_file_to_belong_to_requested_run(monkeypatch, tmp_path
     from starlette.requests import Request
 
     monkeypatch.setattr(storage_paths.settings, "data_dir", tmp_path)
-    picture = tmp_path / "2020/01/01/09-05_job_dashboard.png"
+    picture = tmp_path / "reports/2020/01/01/09-05_job_dashboard.png"
     picture.parent.mkdir(parents=True)
     picture.write_bytes(b"image")
     monkeypatch.setattr(main, "list_screenshot_results", lambda run_id: [{"file_path": str(picture)}] if run_id == 42 else [])

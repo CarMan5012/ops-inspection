@@ -160,22 +160,20 @@ docker logs inspection-report 2>&1 | grep '^SETUP_CODE='
 
 ## 7. 持久化数据目录结构
 
-所有生成的报告、运行记录均保存在容器的 `/app/data` 下，并通过 `inspection-data` 命名卷持久化。目录结构如下：
+应用数据均保存在容器的 `/app/data` 下。本地 Compose 使用 `inspection-data` 命名卷；生产 `docker run` 可将宿主机目录挂载到 `/app/data`。目录结构如下：
 
 ```text
 data/
   ├── app.db               # 加密过的 SQLite 数据库文件
   ├── app-secret.key       # 自动生成的解密主密钥文件
-  ├── YYYY/               # 按年归档
-  │   └── MM/             # 按月归档
-  │       ├── DD/         # 当天截图与普通报告
-  │       │   ├── HH-MM-SS_截图项.png
-  │       │   └── 报告标题-YYYY-MM-DD.docx
-  │       ├── 周报_起始日期_至_结束日期.zip
-  │       └── 月报_YYYY-MM.zip
-  ├── screenshots/         # 旧版本截图，仍可读取
-  ├── reports/             # 旧版本报告，仍可读取
-  ├── periodic-reports/    # 周报和月报 ZIP 包
+  ├── reports/             # 所有生成的报告、截图与周期归档
+  │   └── YYYY/
+  │       └── MM/
+  │           ├── DD/     # 当天截图与最终日报
+  │           │   ├── HH-MM-SS_截图项.png
+  │           │   └── 报告标题-YYYY-MM-DD.docx
+  │           ├── 周报_起始日期_至_结束日期.zip
+  │           └── 月报_YYYY-MM.zip
   ├── templates/           # 用户上传的 Word 模板
   ├── taskbar-templates/   # 用户上传的截图底栏图片
   ├── logs/                # 存放巡检执行的系统运行日志

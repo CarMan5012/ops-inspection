@@ -105,21 +105,18 @@ def get_dir_size(path: Path) -> int:
 def get_storage_usage() -> dict[str, Any]:
     """获取 data 及其子目录的存储空间占用统计"""
     settings.ensure_dirs()
-    periodic_dir = settings.data_dir / "periodic-reports"
-    periodic_dir.mkdir(parents=True, exist_ok=True)
-
     db_size = settings.db_path.stat().st_size if settings.db_path.exists() else 0
-    month_dirs = [path for path in settings.data_dir.glob("????/??") if path.is_dir()]
-    day_dirs = [path for path in settings.data_dir.glob("????/??/??") if path.is_dir()]
-    screenshots_size = get_dir_size(settings.screenshot_dir) + sum(
+    month_dirs = [path for path in settings.report_dir.glob("????/??") if path.is_dir()]
+    day_dirs = [path for path in settings.report_dir.glob("????/??/??") if path.is_dir()]
+    screenshots_size = sum(
         file.stat().st_size for path in day_dirs for file in path.glob("*.png") if file.is_file()
     )
-    reports_size = get_dir_size(settings.report_dir) + sum(
+    reports_size = sum(
         file.stat().st_size for path in day_dirs for file in path.glob("*.docx") if file.is_file()
     )
     logs_size = get_dir_size(settings.log_dir)
     browser_state_size = get_dir_size(settings.browser_state_dir)
-    periodic_reports_size = get_dir_size(periodic_dir) + sum(
+    periodic_reports_size = sum(
         file.stat().st_size for path in month_dirs for file in path.glob("*.zip") if file.is_file()
     )
     total_size = get_dir_size(settings.data_dir)
@@ -479,6 +476,8 @@ def run_cleanup(
 
 def _cleanup_periodic_archives(sent_days: int, failed_days: int, protect_date: datetime, dry_run: bool, results: dict[str, Any], target_month: str | None = None) -> None:
     """清理周期报告打包的 Zip 文件"""
+    from app.storage_paths import resolve_artifact_path
+
     now = datetime.now()
     with connect() as conn:
         rows = conn.execute(
@@ -489,7 +488,7 @@ def _cleanup_periodic_archives(sent_days: int, failed_days: int, protect_date: d
         run = dict(row)
         if not _finished_run(run):
             continue
-        z_path = Path(run["zip_path"])
+        z_path = resolve_artifact_path(run["zip_path"])
         if not z_path.exists():
             continue
 
@@ -547,7 +546,7 @@ def _cleanup_screenshot_artifacts(retention_days: int | None, protect_date: date
         run_id = run["id"]
         from app.storage_paths import get_run_date, resolve_artifact_path
         yyyy, mm, dd = get_run_date(run_id)
-        current_dir = settings.data_dir / yyyy / mm / dd
+        current_dir = settings.report_dir / yyyy / mm / dd
         with connect() as conn:
             current_files = conn.execute("SELECT file_path FROM screenshot_results WHERE run_id = ?", (run_id,)).fetchall()
         for file_row in current_files:
@@ -559,26 +558,6 @@ def _cleanup_screenshot_artifacts(retention_days: int | None, protect_date: date
                 results["deleted_files_count"] += f_count
                 results["deleted_bytes"] += f_bytes
                 results["deleted_screenshots_count"] += f_count
-        # A. 清理新日期目录格式: YYYY/MM/DD/run-{id}
-        try:
-            new_dir = settings.screenshot_dir / yyyy / mm / dd / f"run-{run_id}"
-            if new_dir.exists():
-                f_count, f_bytes = safe_delete_dir(new_dir, dry_run, results["errors"])
-                results["deleted_files_count"] += f_count
-                results["deleted_bytes"] += f_bytes
-                results["deleted_screenshots_count"] += f_count
-        except Exception as e:
-            results["errors"].append(f"清理截图目录 {new_dir} 失败: {e}")
-
-        # B. 清理旧格式目录: screenshots/{id}
-        legacy_dir = settings.screenshot_dir / str(run_id)
-        if legacy_dir.exists():
-            f_count, f_bytes = safe_delete_dir(legacy_dir, dry_run, results["errors"])
-            results["deleted_files_count"] += f_count
-            results["deleted_bytes"] += f_bytes
-            results["deleted_screenshots_count"] += f_count
-
-
 def _cleanup_report_artifacts(retention_days: int | None, protect_date: datetime, dry_run: bool, results: dict[str, Any], target_month: str | None = None) -> None:
     """物理清理过期的巡检 Word 报告子目录"""
     if target_month is None and retention_days is None:
@@ -611,7 +590,7 @@ def _cleanup_report_artifacts(retention_days: int | None, protect_date: datetime
 
         run_id = run["id"]
         yyyy, mm, dd = get_run_date(run_id)
-        current_dir = settings.data_dir / yyyy / mm / dd
+        current_dir = settings.report_dir / yyyy / mm / dd
         if run.get("report_path"):
             file_path = resolve_artifact_path(run["report_path"])
             if file_path.parent == current_dir.resolve() and file_path not in protected_paths and file_path not in counted_paths:
@@ -620,26 +599,6 @@ def _cleanup_report_artifacts(retention_days: int | None, protect_date: datetime
                 results["deleted_bytes"] += f_bytes
                 results["deleted_reports_count"] += f_count
                 counted_paths.add(file_path)
-        # A. 清理新日期目录格式: YYYY/MM/DD/run-{id}
-        try:
-            new_dir = settings.report_dir / yyyy / mm / dd / f"run-{run_id}"
-            if new_dir.exists():
-                f_count, f_bytes = safe_delete_dir(new_dir, dry_run, results["errors"])
-                results["deleted_files_count"] += f_count
-                results["deleted_bytes"] += f_bytes
-                results["deleted_reports_count"] += f_count
-        except Exception as e:
-            results["errors"].append(f"清理报告目录 {new_dir} 失败: {e}")
-
-        # B. 清理旧格式目录: reports/{id}
-        legacy_dir = settings.report_dir / str(run_id)
-        if legacy_dir.exists():
-            f_count, f_bytes = safe_delete_dir(legacy_dir, dry_run, results["errors"])
-            results["deleted_files_count"] += f_count
-            results["deleted_bytes"] += f_bytes
-            results["deleted_reports_count"] += f_count
-
-
 def _cleanup_logs(retention_days: int | None, protect_date: datetime, dry_run: bool, results: dict[str, Any], target_month: str | None = None) -> None:
     """清理 logs 目录下超时的历史日志文件"""
     if not settings.log_dir.exists():
@@ -696,21 +655,6 @@ def _cleanup_browser_state(retention_days: int, protect_date: datetime, enabled:
         results["deleted_browser_state_count"] += f_count
 
 
-def _clean_empty_parent_dirs(root_dir: Path, dry_run: bool) -> None:
-    """安全地递归删除指定根目录下的空子文件夹"""
-    if not root_dir.exists() or not root_dir.is_dir():
-        return
-    for root, dirs, files in os.walk(root_dir, topdown=False):
-        for d in dirs:
-            d_path = Path(root) / d
-            try:
-                if is_safe_path(d_path) and d_path.is_dir() and not any(os.scandir(d_path)):
-                    if not dry_run:
-                        d_path.rmdir()
-            except Exception:
-                pass
-
-
 def _cleanup_orphan_files(
     protect_date: datetime, dry_run: bool, results: dict[str, Any], *,
     screenshot_retention_days: int, report_retention_days: int, periodic_retention_days: int,
@@ -724,9 +668,6 @@ def _cleanup_orphan_files(
         ".docx": min(protect_date, now - timedelta(days=report_retention_days)),
         ".zip": min(protect_date, now - timedelta(days=periodic_retention_days)),
     }
-    with connect() as conn:
-        active_ids = {row[0] for row in conn.execute("SELECT id FROM run_records").fetchall()}
-
     # 日期目录没有运行 ID，通过数据库保存的文件路径识别仍被引用的产物。
     from app.storage_paths import resolve_artifact_path
     with connect() as conn:
@@ -749,20 +690,7 @@ def _cleanup_orphan_files(
             results["deleted_bytes"] += f_bytes
             results[counter] += f_count
 
-    def clean_orphan_directory(path: Path, counter: str, cutoff: datetime) -> None:
-        if datetime.fromtimestamp(path.stat().st_mtime) >= cutoff:
-            return
-        if any(
-            datetime.fromtimestamp(child.stat().st_mtime) >= cutoff
-            for child in path.rglob("*") if child.is_file()
-        ):
-            return
-        f_count, f_bytes = safe_delete_dir(path, dry_run, results["errors"])
-        results["deleted_files_count"] += f_count
-        results["deleted_bytes"] += f_bytes
-        results[counter] += f_count
-
-    for month_dir in settings.data_dir.glob("????/??"):
+    for month_dir in settings.report_dir.glob("????/??"):
         if not month_dir.is_dir():
             continue
         if "periodic" in allowed_scopes:
@@ -778,89 +706,6 @@ def _cleanup_orphan_files(
             month_dir.rmdir()
             if not any(month_dir.parent.iterdir()):
                 month_dir.parent.rmdir()
-
-    # 1. 扫描 screenshots 目录下的孤儿子文件夹
-    if "inspection" in allowed_scopes and settings.screenshot_dir.exists():
-        # A. 扫描旧版数字目录
-        for entry in os.scandir(settings.screenshot_dir):
-            if not entry.is_dir():
-                continue
-            dir_name = entry.name
-            try:
-                val = int(dir_name)
-                # 排除年份目录 (如 2000 到 2100) 以防误删
-                if 1900 <= val <= 2100:
-                    continue
-                run_id = val
-            except ValueError:
-                continue
-
-            if run_id not in active_ids:
-                clean_orphan_directory(Path(entry.path), "deleted_screenshots_count", cutoffs[".png"])
-
-        # B. 扫描新版 YYYY/MM/DD/run-{id} 目录
-        for entry_path in settings.screenshot_dir.glob("????/??/??/run-*"):
-            if not entry_path.is_dir():
-                continue
-            dir_name = entry_path.name
-            try:
-                run_id = int(dir_name[4:])
-            except ValueError:
-                continue
-
-            if run_id not in active_ids:
-                clean_orphan_directory(entry_path, "deleted_screenshots_count", cutoffs[".png"])
-
-        _clean_empty_parent_dirs(settings.screenshot_dir, dry_run)
-
-    # 2. 扫描 reports 目录下的孤儿子文件夹
-    if "inspection" in allowed_scopes and settings.report_dir.exists():
-        # A. 扫描旧版数字目录
-        for entry in os.scandir(settings.report_dir):
-            if not entry.is_dir():
-                continue
-            dir_name = entry.name
-            try:
-                val = int(dir_name)
-                if 1900 <= val <= 2100:
-                    continue
-                run_id = val
-            except ValueError:
-                continue
-
-            if run_id not in active_ids:
-                clean_orphan_directory(Path(entry.path), "deleted_reports_count", cutoffs[".docx"])
-
-        # B. 扫描新版 YYYY/MM/DD/run-{id} 目录
-        for entry_path in settings.report_dir.glob("????/??/??/run-*"):
-            if not entry_path.is_dir():
-                continue
-            dir_name = entry_path.name
-            try:
-                run_id = int(dir_name[4:])
-            except ValueError:
-                continue
-
-            if run_id not in active_ids:
-                clean_orphan_directory(entry_path, "deleted_reports_count", cutoffs[".docx"])
-
-        _clean_empty_parent_dirs(settings.report_dir, dry_run)
-
-    # 3. 扫描 periodic-reports 目录下的孤儿 ZIP 包
-    periodic_dir = settings.data_dir / "periodic-reports"
-    if "periodic" in allowed_scopes and periodic_dir.exists():
-        for entry in os.scandir(periodic_dir):
-            if not entry.is_file() or not entry.name.endswith(".zip"):
-                continue
-            file_path = Path(entry.path)
-            if file_path.resolve() in referenced_files:
-                continue
-            if datetime.fromtimestamp(entry.stat().st_mtime) >= cutoffs[".zip"]:
-                continue
-            f_count, f_bytes = safe_delete_file(file_path, dry_run, results["errors"])
-            results["deleted_files_count"] += f_count
-            results["deleted_bytes"] += f_bytes
-            results["deleted_periodic_archives_count"] += f_count
 
 
 def _cleanup_old_run_records(retention_days: int | None, protect_date: datetime, dry_run: bool, results: dict[str, Any], target_month: str | None = None) -> None:

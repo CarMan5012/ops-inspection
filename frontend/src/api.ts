@@ -20,13 +20,44 @@ function safeDecode(val: string): string {
   try { return decodeURIComponent(val) } catch { return val }
 }
 
+let csrfRefresh: Promise<void> | undefined
+
+function refreshCsrfCookie(): Promise<void> {
+  if (!csrfRefresh) {
+    csrfRefresh = (async () => {
+      const response = await fetch(`${apiBase}/session`, { credentials: 'same-origin' })
+      if (response.status === 401) {
+        location.assign(frontendUrl('login'))
+        throw new Error('登录已过期，请重新登录')
+      }
+      if (!response.ok || !cookie('csrf_token')) {
+        throw new Error('无法获取安全验证 Cookie，请检查浏览器 Cookie 设置后刷新页面')
+      }
+    })().finally(() => { csrfRefresh = undefined })
+  }
+  return csrfRefresh
+}
+
+async function fetchWithCsrf(path: string, method: string, body?: BodyInit, contentType?: string): Promise<Response> {
+  const write = method !== 'GET' && method !== 'HEAD'
+  if (write && !cookie('csrf_token')) await refreshCsrfCookie()
+  const send = () => {
+    const headers: Record<string, string> = { Accept: 'application/json' }
+    if (contentType) headers['Content-Type'] = contentType
+    if (write) headers['X-CSRF-Token'] = safeDecode(cookie('csrf_token'))
+    return fetch(`${apiBase}${path}`, { method, headers, body, credentials: 'same-origin' })
+  }
+  let response = await send()
+  if (write && response.status === 403 && (await response.clone().text()) === 'Forbidden: Missing CSRF token in cookie') {
+    await refreshCsrfCookie()
+    response = await send() // The first request was rejected before its handler ran.
+  }
+  return response
+}
+
 export async function api<T = Row>(path: string, method = 'GET', body?: Row): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' }
-  if (body) headers['Content-Type'] = 'application/json'
-  if (method !== 'GET' && method !== 'HEAD') headers['X-CSRF-Token'] = safeDecode(cookie('csrf_token'))
-  const response = await fetch(`${apiBase}${path}`, {
-    method, headers, body: body ? JSON.stringify(body) : undefined, credentials: 'same-origin',
-  })
+  const response = await fetchWithCsrf(path, method, body ? JSON.stringify(body) : undefined,
+    body ? 'application/json' : undefined)
   if (response.status === 401) {
     location.assign(frontendUrl('login'))
     throw new Error('登录已过期，请重新登录')
@@ -40,12 +71,7 @@ export async function api<T = Row>(path: string, method = 'GET', body?: Row): Pr
 }
 
 export async function uploadForm<T = Row>(path: string, body: FormData): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`, {
-    method: 'POST',
-    headers: { 'X-CSRF-Token': safeDecode(cookie('csrf_token')), Accept: 'application/json' },
-    body,
-    credentials: 'same-origin',
-  })
+  const response = await fetchWithCsrf(path, 'POST', body)
   if (response.status === 401) {
     location.assign(frontendUrl('login'))
     throw new Error('登录已过期，请重新登录')

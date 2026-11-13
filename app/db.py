@@ -120,7 +120,6 @@ def connect():
         conn.execute(f"PRAGMA key = '{db_key}'")
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL;")
         with conn:
             yield conn
     finally:
@@ -143,6 +142,9 @@ def init_db() -> None:
     existing_database = settings.db_path.exists() and settings.db_path.stat().st_size > 0
     _migrate_plain_database()
     with connect() as conn:
+        # Journal mode persists in the database; setting it on every connection
+        # adds a schema operation to every request and can contend with writers.
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS auth_profiles (
@@ -383,6 +385,24 @@ def init_db() -> None:
                 value TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS alert_ignore_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_key TEXT NOT NULL,
+                source_uid TEXT NOT NULL,
+                source_name TEXT NOT NULL DEFAULT '',
+                alert_name TEXT NOT NULL,
+                scope TEXT NOT NULL CHECK(scope IN ('rule', 'instance')),
+                instance TEXT NOT NULL DEFAULT '',
+                instance_label TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL,
+                expires_at TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                disabled_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_alert_ignore_active
+                ON alert_ignore_rules(active, source_key, source_uid, alert_name);
 
             CREATE TABLE IF NOT EXISTS token_blacklist (
                 token TEXT PRIMARY KEY,

@@ -67,7 +67,7 @@ def test_custom_morning_is_preserved_when_afternoon_uses_template(tmp_path, monk
     assert len(doc.inline_shapes) == 1
 
 
-def test_manual_run_keeps_separate_word_and_does_not_replace_daily(tmp_path, monkeypatch):
+def test_manual_run_updates_the_same_daily_word(tmp_path, monkeypatch):
     history = []
     monkeypatch.setattr(report, "get_report_dir", lambda _: tmp_path)
     monkeypatch.setattr(repository, "list_report_runs_for_day", lambda *_: history)
@@ -79,9 +79,36 @@ def test_manual_run_keeps_separate_word_and_does_not_replace_daily(tmp_path, mon
     history.append({**morning, "report_path": canonical})
     manual = {"id": 2, "started_at": "2026-11-10T10:00:00+08:00", "schedule_slot": ""}
     snapshot = report.generate_docx(job, manual, [])
-    assert snapshot != canonical
-    assert "手动巡检-2" in snapshot
+    assert snapshot == canonical
     assert Document(canonical).paragraphs[0].text == Document(snapshot).paragraphs[0].text
+
+
+def test_regenerate_legacy_manual_report_updates_daily_links(monkeypatch):
+    from contextlib import nullcontext
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE run_records (id INTEGER, job_id INTEGER, started_at TEXT, report_path TEXT)")
+    conn.executemany("INSERT INTO run_records VALUES (?, 7, ?, ?)", [
+        (16, "2026-11-13T09:00:00+08:00", "服务器巡检-2026-11-13-手动巡检-16.docx"),
+        (17, "2026-11-13T16:00:00+08:00", "服务器巡检-2026-11-13-手动巡检-17.docx"),
+    ])
+    records = {
+        16: {"id": 16, "job_id": 7, "started_at": "2026-11-13T09:00:00+08:00"},
+        17: {"id": 17, "job_id": 7, "started_at": "2026-11-13T16:00:00+08:00"},
+    }
+    monkeypatch.setattr(runner, "connect", lambda: nullcontext(conn))
+    monkeypatch.setattr(runner, "get_run", lambda run_id: records[run_id])
+    monkeypatch.setattr(runner, "get_job", lambda _job_id: {"id": 7, "template_id": 3})
+    monkeypatch.setattr(runner, "list_screenshot_results", lambda _run_id: [])
+    monkeypatch.setattr(runner, "acquire_job_lease", lambda *_args, **_kwargs: type("Lease", (), {"close": lambda self: None})())
+    published = []
+    monkeypatch.setattr(runner, "_publish_daily_report", lambda job, run, _results: published.append((job["template_id"], run["id"])) or "服务器巡检-2026-11-13.docx")
+
+    assert runner.regenerate_daily_report(16) == "服务器巡检-2026-11-13.docx"
+    assert published == [(3, 17)]
+    assert {row[0] for row in conn.execute("SELECT report_path FROM run_records")} == {"服务器巡检-2026-11-13.docx"}
+    conn.close()
 
 
 def test_empty_job_sends_dingtalk_failure_notification_and_keeps_failed_status(tmp_path, monkeypatch):

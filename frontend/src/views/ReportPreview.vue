@@ -10,7 +10,7 @@ const run = ref<Row | null>(null)
 const loading = ref(true)
 const error = ref('')
 const documentSurface = ref<HTMLElement | null>(null)
-const reportName = computed(() => String(run.value?.report_path || '巡检报告.docx').replace(/\\/g, '/').split('/').pop() || '巡检报告.docx')
+const reportName = computed(() => String(run.value?.report_filename || '巡检报告.docx'))
 
 let requestId = 0
 let controller: AbortController | null = null

@@ -290,8 +290,11 @@ def collect_dashboard_alerts(
                 errors.append(f"{name}：{exc}")
         if errors:
             snapshot["error"] = "；".join(errors[:5])
+        from app.alert_ignores import apply_ignore_rules
+        apply_ignore_rules(snapshot, page_url)
+        actionable_alerts = [alert for alert in snapshot["alerts"] if not alert.get("ignored")]
         snapshot["status"] = (
-            "alert" if snapshot["alerts"] else "unknown" if errors else
+            "alert" if actionable_alerts else "unknown" if errors else
             "unconfigured" if snapshot["unconfigured_sources"] else "normal"
         )
     except Exception as exc:
@@ -303,6 +306,7 @@ def summarize_monitoring(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize captured data-source states without equating no alerts with no coverage."""
     statuses: list[str] = []
     alerts: list[dict[str, Any]] = []
+    ignored: list[dict[str, Any]] = []
     errors: list[str] = []
     uncovered: list[str] = []
     seen: set[tuple[Any, ...]] = set()
@@ -330,7 +334,7 @@ def summarize_monitoring(results: list[dict[str, Any]]) -> dict[str, Any]:
             )
             if key not in seen:
                 seen.add(key)
-                alerts.append(alert)
+                (ignored if alert.get("ignored") else alerts).append(alert)
     status = (
         "alert" if alerts else "unknown" if "unknown" in statuses else
         "unconfigured" if "unconfigured" in statuses else
@@ -349,7 +353,8 @@ def summarize_monitoring(results: list[dict[str, Any]]) -> dict[str, Any]:
     elif status == "unconfigured":
         text = "关联的数据源没有已加载的告警规则"
     elif status == "normal":
-        text = "已配置的 Prometheus 告警规则当前无活跃告警"
+        text = ("当前无未忽略的活跃告警" if ignored else
+                "已配置的 Prometheus 告警规则当前无活跃告警")
     else:
         text = "本次未检查 Prometheus 告警"
     if errors:
@@ -358,4 +363,6 @@ def summarize_monitoring(results: list[dict[str, Any]]) -> dict[str, Any]:
         text += f"（{uncovered[0]}）"
     if uncovered and status == "alert":
         text += f"；{uncovered[0]} 未配置告警规则"
-    return {"status": status, "text": text, "alerts": alerts, "errors": errors}
+    if ignored:
+        text += f"；已忽略 {len(ignored)} 条告警"
+    return {"status": status, "text": text, "alerts": alerts, "ignored": ignored, "errors": errors}

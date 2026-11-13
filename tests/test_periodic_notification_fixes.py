@@ -136,6 +136,7 @@ def _periodic_archive_fixture(monkeypatch, tmp_path, *, selected_bot_id):
     monkeypatch.setattr(periodic_reporter, "get_periodic_report_setting", lambda _type: setting)
     monkeypatch.setattr(periodic_reporter, "save_periodic_report_run", lambda data, _id: run.update(data))
     monkeypatch.setattr(periodic_reporter.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(periodic_reporter.settings, "report_dir", tmp_path / "reports")
     monkeypatch.setattr(periodic_reporter.tempfile, "mkdtemp", lambda **_: str(stage))
     return conn, run
 

@@ -22,7 +22,7 @@ from docx.shared import Inches, Pt, RGBColor
 from docx.text.paragraph import Paragraph
 
 from app.settings import settings
-from app.storage_paths import get_report_dir, resolve_artifact_path, unique_artifact_path
+from app.storage_paths import get_report_dir, resolve_artifact_path
 from app.utils import safe_name
 
 logger = logging.getLogger("app.report")
@@ -176,6 +176,42 @@ def list_template_sections(template_path: Path | None = None) -> list[str]:
     return sections
 
 
+def replace_template_title_date(doc: Document, report_date: str) -> str:
+    """Replace only the date placeholder, retaining the template's title runs."""
+    for paragraph in doc.paragraphs:
+        full_text = "".join(run.text for run in paragraph.runs)
+        token = next((value for value in ("yyyy年mm月dd日", "yyyy-mm-dd") if value in full_text), None)
+        if token is None:
+            continue
+        start = full_text.index(token)
+        end = start + len(token)
+        offset = 0
+        first = last = None
+        for index, run in enumerate(paragraph.runs):
+            next_offset = offset + len(run.text)
+            if first is None and offset <= start < next_offset:
+                first = (index, start - offset)
+            if offset < end <= next_offset:
+                last = (index, end - offset)
+                break
+            offset = next_offset
+        if first is None or last is None:
+            raise ReportValidationError("模板标题日期占位符无法替换")
+        first_index, first_offset = first
+        last_index, last_offset = last
+        runs = paragraph.runs
+        if first_index == last_index:
+            value = runs[first_index].text
+            runs[first_index].text = value[:first_offset] + report_date + value[last_offset:]
+        else:
+            runs[first_index].text = runs[first_index].text[:first_offset] + report_date
+            for index in range(first_index + 1, last_index):
+                runs[index].text = ""
+            runs[last_index].text = runs[last_index].text[last_offset:]
+        return (full_text[:start] + full_text[end:]).strip()
+    return ""
+
+
 def is_header_paragraph(p) -> bool:
     text = p.text.strip()
     if not text:
@@ -266,7 +302,7 @@ def _report_periods(job: dict[str, Any], run: dict[str, Any]) -> tuple[str, ...]
 def _daily_periods(
     job: dict[str, Any], run: dict[str, Any], results: list[dict[str, Any]], local_tz: ZoneInfo,
 ) -> dict[str, dict[str, Any]]:
-    """Use the latest completed run in each period, then replace this run's period."""
+    """Use the latest completed run in each period, manual or scheduled."""
     from app.repository import list_report_runs_for_day, list_screenshot_results
 
     report_day = _local_run_time(run, local_tz).date()
@@ -286,38 +322,14 @@ def _daily_periods(
     return periods
 
 
-def _remove_template_period(doc: Document, period: str) -> None:
-    headings = [p for p in doc.paragraphs if p.text.strip().startswith("巡检时间：")]
-    target = next((p for p in headings if period in p.text), None)
-    if target is None:
-        return
-    following = None
-    for index, heading in enumerate(headings):
-        if heading is target:
-            following = headings[index + 1]._p if index + 1 < len(headings) else None
-            break
-    element = target._p
-    while element is not None and element is not following and element.tag != qn("w:sectPr"):
-        next_element = element.getnext()
-        element.getparent().remove(element)
-        element = next_element
-
-
-def _fill_template(doc: Document, periods: dict[str, dict[str, Any]], visible_periods: tuple[str, ...]) -> None:
-    """Fill each template section once, keeping every screenshot in that section."""
-    for period in ("上午", "下午"):
-        if period not in visible_periods:
-            _remove_template_period(doc, period)
+def _fill_template(doc: Document, periods: dict[str, dict[str, Any]]) -> None:
+    """Insert results without editing or removing template paragraphs or styles."""
     headings: dict[tuple[str, str], Paragraph] = {}
-    period_headings: dict[str, Paragraph] = {}
-    used_headings: set[tuple[str, str]] = set()
     current_period = ""
     for paragraph in doc.paragraphs:
         label = paragraph.text.strip()
         if label.startswith("巡检时间："):
             current_period = "上午" if "上午" in label else "下午" if "下午" in label else ""
-            if current_period:
-                period_headings[current_period] = paragraph
         elif current_period and label and label[0].isdigit():
             headings[(current_period, normalize_section_name(label))] = paragraph
 
@@ -329,14 +341,6 @@ def _fill_template(doc: Document, periods: dict[str, dict[str, Any]], visible_pe
             target = headings.get((period, section))
             if target is None:
                 raise ValueError(f"模板中没有“{period} / {items[0].get('section') or section}”章节")
-            used_headings.add((period, section))
-            # 清理章节标题与下一个标题之间的旧内容、占位符或碍眼的说明文字（如 〔...〕）
-            while True:
-                index = next(i for i, paragraph in enumerate(doc.paragraphs) if paragraph._p is target._p) + 1
-                if index >= len(doc.paragraphs) or is_header_paragraph(doc.paragraphs[index]):
-                    break
-                element = doc.paragraphs[index]._element
-                element.getparent().remove(element)
             anchor = target
             for item in items:
                 name = str(item.get("item_name") or "未命名截图项")
@@ -344,41 +348,15 @@ def _fill_template(doc: Document, periods: dict[str, dict[str, Any]], visible_pe
                     anchor = insert_paragraph_after(
                         anchor, f"截图失败：{name}。原因：{item.get('error_message') or '未提供失败原因'}"
                     )
-                    anchor.runs[0].font.color.rgb = RGBColor(185, 28, 28)
                     continue
                 image_path = resolve_artifact_path(item.get("file_path") or "")
                 anchor = insert_paragraph_after(anchor)
-                anchor.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                anchor.paragraph_format.space_before = Pt(6)
-                anchor.paragraph_format.space_after = Pt(14)
                 try:
                     _add_report_picture(
                         anchor.add_run(), image_path, Inches(6.0), _image_marker(snapshot["run"]["id"], item)
                     )
                 except Exception as exc:
                     raise ReportValidationError(f"截图“{name}”写入 Word 失败：{exc}") from exc
-
-    for key, heading in headings.items():
-        if key in used_headings:
-            continue
-        while True:
-            index = next(i for i, paragraph in enumerate(doc.paragraphs) if paragraph._p is heading._p) + 1
-            if index >= len(doc.paragraphs) or is_header_paragraph(doc.paragraphs[index]):
-                break
-            element = doc.paragraphs[index]._element
-            element.getparent().remove(element)
-        heading._element.getparent().remove(heading._element)
-    for period in ("上午", "下午"):
-        if period not in visible_periods:
-            continue
-        heading = period_headings.get(period)
-        if heading is None:
-            continue
-        if period not in periods:
-            insert_paragraph_after(heading, "尚未执行。")
-        elif not periods[period]["results"]:
-            insert_paragraph_after(heading, "本时段无截图结果。")
-
 
 def generate_docx(
     job: dict[str, Any],
@@ -394,12 +372,8 @@ def generate_docx(
     now_local = datetime.now(local_tz)
     started_dt = _local_run_time(run, local_tz)
     period = _run_period(run, local_tz)
-    scheduled = is_daily_schedule_slot(run.get("schedule_slot"))
-    visible_periods = _report_periods(job, run)
-    daily_periods = _daily_periods(job, run, results, local_tz) if scheduled else {
-        period: {"run": run, "results": [{**item, "run_id": run["id"], "report_period": period} for item in results]}
-    }
-    daily_periods = {period: snapshot for period, snapshot in daily_periods.items() if period in visible_periods}
+    daily_periods = _daily_periods(job, run, results, local_tz)
+    visible_periods = tuple(slot for slot in ("上午", "下午") if slot in daily_periods)
     if not job.get("template_id"):
         # Existing records may still carry old hand-entered chapter names.
         # Rebuild numbering from the complete day's screenshots on every run.
@@ -417,13 +391,12 @@ def generate_docx(
                     name = f"{caption_number}. {name}"
                 numbered_results.append({**item, "section": name})
             snapshot["results"] = numbered_results
-    daily_results = [
-        item for slot in ("上午", "下午") for item in daily_periods.get(slot, {}).get("results", [])
-    ]
+    daily_results = [item for slot in ("上午", "下午")
+                     for item in daily_periods.get(slot, {}).get("results", [])]
     report_date = started_dt.strftime("%Y年%m月%d日")
     document_title = str(job.get("report_title") or job.get("name") or "巡检报告")
     report_name = safe_name(str(job.get("report_title") or job.get("name") or "巡检报告"))
-    stem = f"{report_name}-{started_dt.strftime('%Y-%m-%d')}" if scheduled else f"{report_name}-{started_dt.strftime('%Y-%m-%d')}-手动巡检-{run['id']}"
+    stem = f"{report_name}-{started_dt.strftime('%Y-%m-%d')}"
     output_path = output_dir / f"{stem}.docx"
     logger.info(f"当前时间为 {now_local.strftime('%Y-%m-%d %H:%M:%S')}，匹配巡检时段: '{period}'")
 
@@ -454,17 +427,9 @@ def generate_docx(
         raise ReportValidationError("截图项章节与所选报告模板不匹配，请调整章节或切换为自动排版")
     use_template = bool(template_path)
 
-    from app.repository import get_previous_run_today
     source_path = None
-    reuse_previous_path = False
-    prev_run = get_previous_run_today(job["id"], run["id"]) if scheduled else None
-    if prev_run and prev_run.get("report_path"):
-        prev_report_path = resolve_artifact_path(prev_run["report_path"])
-        # 同一任务当天更新同一份日报；其他任务重名时另取序号。
-        if prev_report_path.exists() and prev_report_path.parent == output_dir.resolve():
-            output_path = prev_report_path
-            reuse_previous_path = True
-            logger.info(f"查找到当天此任务较早执行记录 (运行 ID: {prev_run['id']})，将更新同一份日报: {output_path}")
+    if output_path.exists():
+        logger.info("更新当前任务的当日日报: %s", output_path)
 
     if use_template:
         source_path = template_path
@@ -472,36 +437,18 @@ def generate_docx(
     else:
         logger.info("未选择 Word 模板，自动排版生成报告")
 
-    if output_path == output_dir / f"{stem}.docx" and output_path.exists() and not reuse_previous_path:
-        output_path = unique_artifact_path(output_dir, stem, ".docx")
             
     if source_path:
         try:
             doc = Document(source_path)
+            template_title = replace_template_title_date(doc, report_date)
+            if template_title:
+                document_title = template_title
+                report_name = safe_name(template_title)
+                output_path = output_dir / f"{report_name}-{started_dt.strftime('%Y-%m-%d')}.docx"
             doc.core_properties.title = document_title
-            # 模板仅提供版式，正文标题始终使用任务配置的报告标题。
-            today_cn_str = report_date
-            for p in doc.paragraphs:
-                if "yyyy年mm月dd日" in p.text or "yyyy-mm-dd" in p.text:
-                    new_text = f"{today_cn_str}{document_title}"
-                    # Keep the uploaded template's title style and paragraph layout.
-                    if p.runs:
-                        p.runs[0].text = new_text
-                        for remaining in p.runs[1:]:
-                            remaining.text = ""
-                    else:
-                        p.add_run(new_text)
-                    logger.info(f"已更新模板的主标题为: {new_text}")
-                    break
                         
-            # 2. 删除旧版本曾插入的执行明细段落。模板正文只保留巡检项和截图。
-            for p in list(doc.paragraphs):
-                if "巡检执行时间：" in p.text or "巡检耗时：" in p.text:
-                    p._element.getparent().remove(p._element)
-                        
-            _fill_template(doc, daily_periods, visible_periods)
-            _insert_run_findings(doc, daily_results, run, daily_periods)
-            _format_report_typography(doc, report_date, document_title)
+            _fill_template(doc, daily_periods)
             save_docx_atomic(doc, output_path, run["id"], daily_results, document_title, report_date)
             logger.info(f"基于模板的报告已成功保存至: {output_path}")
             return str(output_path)
@@ -593,11 +540,13 @@ def _setup_styles(doc: Document) -> None:
     normal = doc.styles["Normal"]
     normal.font.name = "Microsoft YaHei"
     normal.font.size = Pt(10.5)
+    normal.font.color.rgb = RGBColor(0, 0, 0)
     normal.paragraph_format.space_after = Pt(6)
     for style_name, size, before, after in (
         ("Title", 20, 6, 26),
         ("Heading 1", 14, 12, 10),
         ("Heading 2", 12, 12, 12),
+        ("Heading 3", 11, 8, 8),
     ):
         style = doc.styles[style_name]
         style.font.name = "Microsoft YaHei"

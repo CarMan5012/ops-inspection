@@ -31,6 +31,20 @@ def selected_template(tmp_path, monkeypatch):
     return template
 
 
+def test_template_title_keeps_its_words_and_run_formatting():
+    doc = Document()
+    title = doc.add_paragraph()
+    title.add_run("yyyy年")
+    title.add_run("mm月")
+    title.add_run("dd日")
+    suffix = title.add_run(" 自动化巡检报告")
+    suffix.bold = True
+
+    assert report.replace_template_title_date(doc, "2026年11月13日") == "自动化巡检报告"
+    assert title.text == "2026年11月13日 自动化巡检报告"
+    assert suffix.text == " 自动化巡检报告" and suffix.bold
+
+
 def test_no_data_does_not_add_an_automatic_word_diagnosis():
     doc = Document()
     doc.add_paragraph("自动化运维报告")
@@ -172,7 +186,7 @@ def test_template_keeps_multiple_items_in_one_section(tmp_path, monkeypatch):
     doc = Document(path)
     texts = [paragraph.text for paragraph in doc.paragraphs]
     assert len(doc.inline_shapes) == 2
-    assert "2026年10月10日生产日报" in texts
+    assert "2026年10月10日 自动化巡检报告" in texts
     assert "看板 1" not in texts and "看板 2" not in texts
     assert "截图失败：第三张看板。原因：页面加载超时" in texts
 
@@ -307,7 +321,7 @@ def test_auto_report_has_one_black_title_per_screenshot(tmp_path, monkeypatch):
     assert all(run.font.color.rgb == (0, 0, 0) for p in paragraphs for run in p.runs if run.text)
 
 
-def test_uploaded_template_report_normalizes_text_to_black(tmp_path, monkeypatch):
+def test_uploaded_template_report_preserves_original_formatting(tmp_path, monkeypatch):
     import app.repository as repository
     from docx.shared import RGBColor
 
@@ -316,6 +330,8 @@ def test_uploaded_template_report_normalizes_text_to_black(tmp_path, monkeypatch
     for paragraph in source.paragraphs:
         for run in paragraph.runs:
             run.font.color.rgb = RGBColor(30, 80, 180)
+            run.font.size = Pt(17)
+    source.paragraphs[0].paragraph_format.space_after = Pt(37)
     source.save(template)
     monkeypatch.setattr(report, "get_report_dir", lambda _run_id: tmp_path)
     monkeypatch.setattr(repository, "get_previous_run_today", lambda *_args: None)
@@ -330,12 +346,20 @@ def test_uploaded_template_report_normalizes_text_to_black(tmp_path, monkeypatch
     )
     doc = Document(path)
     assert len(doc.inline_shapes) == 1
-    assert all(run.font.color.rgb == (0, 0, 0) for p in doc.paragraphs for run in p.runs if run.text)
-    assert all(run.font.size is not None for p in doc.paragraphs for run in p.runs if run.text)
-    assert any(run.font.color.rgb == RGBColor(30, 80, 180) for p in Document(template).paragraphs for run in p.runs)
+    original = Document(template)
+    original_labels = [p.text for p in original.paragraphs]
+    generated_labels = [p.text for p in doc.paragraphs]
+    for label in original_labels[1:]:
+        assert label in generated_labels
+    assert doc.paragraphs[0].paragraph_format.space_after == Pt(37)
+    for paragraph in doc.paragraphs:
+        if not paragraph.text or paragraph.text not in generated_labels[:5]:
+            continue
+        assert all(run.font.color.rgb == RGBColor(30, 80, 180) for run in paragraph.runs if run.text)
+        assert all(run.font.size == Pt(17) for run in paragraph.runs if run.text)
 
 
-def test_single_enabled_period_removes_unused_template_block(tmp_path, monkeypatch):
+def test_single_enabled_period_retains_template_sections(tmp_path, monkeypatch):
     import json
     import app.repository as repository
 
@@ -353,7 +377,63 @@ def test_single_enabled_period_removes_unused_template_block(tmp_path, monkeypat
     doc = Document(path)
     texts = [paragraph.text for paragraph in doc.paragraphs]
     assert "巡检时间：下午" in texts
-    assert "巡检时间：上午" not in texts
+    assert "巡检时间：上午" in texts
     assert "尚未执行。" not in texts
     assert "服务器看板" not in texts
     assert len(doc.inline_shapes) == 1
+
+
+def test_two_tasks_keep_separate_daily_word_and_selected_template(tmp_path, monkeypatch):
+    import app.repository as repository
+
+    history = []
+    images = {}
+    monkeypatch.setattr(report, "get_report_dir", lambda _run_id: tmp_path)
+    monkeypatch.setattr(repository, "list_report_runs_for_day", lambda job_id, *_args: [row for row in reversed(history) if row["job_id"] == job_id])
+    monkeypatch.setattr(repository, "get_previous_run_today", lambda job_id, *_args: next((row for row in reversed(history) if row["job_id"] == job_id), None))
+    monkeypatch.setattr(repository, "list_screenshot_results", lambda run_id: images[run_id])
+    first_image = tmp_path / "first.png"
+    second_image = tmp_path / "second.png"
+    Image.new("RGB", (120, 90), "green").save(first_image)
+    Image.new("RGB", (120, 90), "blue").save(second_image)
+    first = {"id": 1, "job_id": 1, "job_name": "主机巡检", "started_at": "2026-11-13T09:00:00+08:00", "schedule_slot": ""}
+    second = {"id": 2, "job_id": 2, "job_name": "容器巡检", "started_at": "2026-11-13T16:00:00+08:00", "schedule_slot": "calendar-1600"}
+    first_item = {"id": 1, "item_name": "主机看板", "status": "success", "file_path": str(first_image)}
+    second_item = {"id": 2, "item_name": "容器看板", "section": "1. 服务器资源", "status": "success", "file_path": str(second_image)}
+    first_path = report.generate_docx({"id": 1, "name": "主机巡检"}, first, [first_item])
+    history.append({**first, "report_path": first_path})
+    images[1] = [first_item]
+    selected_template(tmp_path, monkeypatch)
+    second_path = report.generate_docx({"id": 2, "name": "容器巡检", "template_id": 1}, second, [second_item])
+    assert second_path != first_path
+    doc = Document(second_path)
+    text = [paragraph.text for paragraph in doc.paragraphs]
+    assert "巡检时间：下午" in text and "1. 服务器资源" in text
+    assert len(doc.inline_shapes) == 1
+
+
+def test_manual_runs_rebuild_one_template_daily_word_without_manual_filename(tmp_path, monkeypatch):
+    import app.repository as repository
+
+    selected_template(tmp_path, monkeypatch)
+    monkeypatch.setattr(report, "get_report_dir", lambda _run_id: tmp_path)
+    history = []
+    monkeypatch.setattr(repository, "list_report_runs_for_day", lambda *_args: list(reversed(history)))
+    monkeypatch.setattr(repository, "get_previous_run_today", lambda *_args: history[-1] if history else None)
+    monkeypatch.setattr(repository, "list_screenshot_results", lambda _run_id: [])
+    job = {"id": 1, "name": "服务器巡检", "report_title": "服务器巡检", "template_id": 1}
+    first = {"id": 16, "started_at": "2026-11-13T09:00:00+08:00", "schedule_slot": ""}
+    second = {"id": 17, "started_at": "2026-11-13T10:00:00+08:00", "schedule_slot": ""}
+    first_image = tmp_path / "first-manual.png"
+    second_image = tmp_path / "second-manual.png"
+    Image.new("RGB", (120, 90), "green").save(first_image)
+    Image.new("RGB", (120, 90), "blue").save(second_image)
+    item = {"id": 1, "item_name": "服务器资源", "section": "1. 服务器资源", "status": "success", "file_path": str(first_image)}
+    path = report.generate_docx(job, first, [item])
+    assert Path(path).name == "自动化巡检报告-2026-11-13.docx"
+    history.append({**first, "report_path": path})
+    updated = report.generate_docx(job, second, [{**item, "id": 2, "file_path": str(second_image)}])
+    assert updated == path
+    doc = Document(updated)
+    assert len(doc.inline_shapes) == 1
+    assert "1. 服务器资源" in [paragraph.text for paragraph in doc.paragraphs]
